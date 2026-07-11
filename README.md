@@ -1,10 +1,26 @@
-# MissAV Manager v2.15
+# MissAV Manager v2.16
 
 MissAV Manager 是一个本地桌面 App，用于从文本、Telegram HTML、TXT、MD、CSV 等内容中提取番号，生成/核验 MissAV 链接，维护 SQLite 本地库，并导出 Raindrop.io 可导入的 HTML / CSV 文件。
 
-完整教程见：[使用教程.md](使用教程.md)
+完整教程见：[使用教程.md](使用教程.md)。
 
-## 快速启动
+## 给 Windows 用户
+
+推荐从 [Releases](https://github.com/3ll3-3ll3/missav-manager/releases/latest) 下载 `MissAV_Manager_v*.exe`：
+
+1. 下载单个 EXE 文件到任意可写文件夹。
+2. 双击 EXE 启动，无需安装 Node.js、Git 或其他运行环境。
+3. 首次运行会自动创建自己的本地数据库；升级 EXE 不会覆盖已有数据。
+
+这是未签名的个人桌面软件，Windows SmartScreen 可能会显示提示。只应从本仓库的 Releases 下载。
+
+应用会把数据库和备份保存到 Windows 的用户数据目录，而不是 EXE 所在目录。你可以在 App 的“外观 -> 数据位置”查看实际路径，并通过“备份恢复”创建或恢复备份。
+
+处理页面时需要网络能够访问目标页面；程序不要求登录账号，也不会随安装包附带任何收藏数据。
+
+## 给开发者
+
+需要 Node.js 18 或更高版本：
 
 ```bash
 npm install
@@ -17,7 +33,7 @@ npm start
 npm run dev
 ```
 
-也可以双击当前文件夹中的 `启动MissAV.bat`。
+也可以双击源码目录中的 `启动MissAV.bat`；它会在本机缺少依赖时执行 `npm install`。
 
 ## 核心功能
 
@@ -84,15 +100,24 @@ missav-manager/
 │   ├── exporter.js      # Raindrop 导出
 │   └── utils.js         # 通用工具
 ├── assets/              # 图标资源
-├── data/                # 本地数据目录
+├── .github/workflows/   # GitHub 自动构建 Release
 ├── 使用教程.md           # 完整使用教程
 ├── package.json
 └── README.md
 ```
 
-## 构建
+## 构建与发布
 
 ```bash
 npm run build
 npm run build:portable
+```
+
+便携版输出到 `dist/MissAV_Manager_v<版本号>.exe`，请作为 GitHub Release 附件发布，不要提交到源码分支。
+
+仓库包含 GitHub Actions 工作流：推送形如 `v2.16.0` 的标签后，会在 Windows 环境自动构建便携版并创建同名 Release。
+
+```bash
+git tag v2.16.0
+git push origin v2.16.0
 ```

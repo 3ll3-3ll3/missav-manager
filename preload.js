@@ -1,5 +1,6 @@
-const { contextBridge, ipcRenderer, app } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 // ─── 加载核心模块 ────────────────────────────────────
 const parser = require('./src/parser');
@@ -13,13 +14,33 @@ const csvTools = require('./src/csvTools');
 let dbReady = false;
 let dbInitError = '';
 
-// 数据库存放在项目目录下的 data 文件夹
-const dbDir = path.join(__dirname, 'data');
+let dbDir = '';
+
+async function resolveDbDir() {
+  const userDataDir = await ipcRenderer.invoke('app:getPath', 'userData');
+  return path.join(userDataDir, 'data');
+}
+
+function migrateLegacyData(targetDir) {
+  const legacyDir = path.join(__dirname, 'data');
+  const legacyDb = path.join(legacyDir, 'missav_data.db');
+  const targetDb = path.join(targetDir, 'missav_data.db');
+  if (!fs.existsSync(legacyDb) || fs.existsSync(targetDb)) return;
+
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.copyFileSync(legacyDb, targetDb);
+
+  const legacyBackups = path.join(legacyDir, 'backups');
+  const targetBackups = path.join(targetDir, 'backups');
+  if (fs.existsSync(legacyBackups) && !fs.existsSync(targetBackups)) {
+    fs.cpSync(legacyBackups, targetBackups, { recursive: true });
+  }
+}
 
 (async () => {
   try {
-    // 确保 data 目录存在
-    const fs = require('fs');
+    dbDir = await resolveDbDir();
+    migrateLegacyData(dbDir);
     if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
     await database.init(dbDir);
     dbReady = true;

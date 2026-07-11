@@ -1,13 +1,24 @@
-﻿{
+{
   "name": "missav-manager",
-  "version": "2.15.0",
+  "version": "2.16.0",
   "description": "MissAV 收藏管理桌面工具 — 番号 → MissAV 元数据抓取 → Raindrop 导入文件生成",
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/3ll3-3ll3/missav-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/3ll3-3ll3/missav-manager/issues"
+  },
+  "homepage": "https://github.com/3ll3-3ll3/missav-manager#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
     "build": "electron-builder --win",
-    "build:portable": "electron-builder --win portable"
+    "build:portable": "set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable"
   },
   "build": {
     "appId": "com.wjl.missav-manager",
@@ -24,6 +35,7 @@
       "node_modules/**"
     ],
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         "portable"
       ]
