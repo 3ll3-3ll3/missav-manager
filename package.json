@@ -1,0 +1,45 @@
+﻿{
+  "name": "missav-manager",
+  "version": "2.15.0",
+  "description": "MissAV 收藏管理桌面工具 — 番号 → MissAV 元数据抓取 → Raindrop 导入文件生成",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win",
+    "build:portable": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.wjl.missav-manager",
+    "productName": "MissAV_Manager",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "src/**",
+      "assets/**",
+      "node_modules/**"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ]
+    },
+    "portable": {
+      "artifactName": "MissAV_Manager_v${version}.exe"
+    }
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0",
+    "sql.js": "^1.14.1"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "author": "WJL",
+  "license": "MIT"
+}

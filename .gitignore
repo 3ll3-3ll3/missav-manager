@@ -1,0 +1,27 @@
+# Dependencies and packaged application output
+node_modules/
+dist/
+release/
+
+# Local application data and backups
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# User-provided source material and generated exports
+附件存放/
+exports/
+output/
+
+# Electron and operating-system local files
+.electron/
+.DS_Store
+Thumbs.db
+
+# Editor and environment files
+.vscode/
+.idea/
+*.log
+.env
+.env.*

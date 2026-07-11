@@ -1,0 +1,371 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MissAV Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="mint">
+  <div class="background-layer" id="backgroundLayer"></div>
+
+  <header class="app-header">
+    <div class="header-left">
+      <span class="logo-icon">M</span>
+      <h1 class="app-title">MissAV <span class="title-highlight">Manager</span></h1>
+      <span class="version-badge">v2.15</span>
+    </div>
+    <div class="header-right">
+      <button class="btn-icon" id="btnHistory" title="处理历史">H</button>
+      <button class="btn-icon" id="btnSettings" title="外观设置">S</button>
+      <button class="btn-icon" id="btnHelp" title="帮助">?</button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <aside class="side-nav" aria-label="主导航">
+      <button class="nav-btn active" data-page="process"><span>处理</span><small>输入与运行</small></button>
+      <button class="nav-btn" data-page="results"><span>结果</span><small>表格与导出</small></button>
+      <button class="nav-btn" data-page="library"><span>数据</span><small>本地库 / CSV</small></button>
+      <button class="nav-btn" data-page="settings"><span>外观</span><small>主题与背景</small></button>
+    </aside>
+
+    <section class="page-stack">
+      <section class="app-page active" data-page-panel="process">
+        <div class="page-grid process-grid">
+          <section class="module-card module-input input-panel">
+            <div class="module-header">
+              <div>
+                <h2>番号处理</h2>
+                <span class="module-subtitle" id="inputSourceInfo">文本 / HTML / TXT / MD</span>
+              </div>
+              <span class="badge" id="codeCount">0 条</span>
+            </div>
+            <textarea
+              id="codeInput"
+              class="code-textarea"
+              placeholder="粘贴任意文本、Telegram HTML、Markdown、MissAV 链接或番号"
+              spellcheck="false"
+            ></textarea>
+            <div class="input-actions split-actions">
+              <div class="btn-row">
+                <button class="btn btn-secondary btn-sm" id="btnImportTextFile">导入文件</button>
+                <button class="btn btn-secondary btn-sm" id="btnImportTextFiles">批量导入</button>
+                <button class="btn btn-outline btn-sm" id="btnCopyCodes">复制识别结果</button>
+                <button class="btn btn-outline btn-sm" id="btnExportCodeList">保存清单</button>
+                <button class="btn btn-outline btn-sm" id="btnClearInput">清空</button>
+              </div>
+              <div class="status-bar" id="statusBar">
+                <span class="status-dot status-idle"></span>
+                <span class="status-text">就绪</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="module-card run-panel">
+            <div class="module-header">
+              <div>
+                <h2>运行控制</h2>
+                <span class="module-subtitle" id="dbSummaryMini">数据库加载中</span>
+              </div>
+              <button class="btn btn-outline btn-sm" id="btnPasteSample">示例</button>
+            </div>
+            <div class="library-metrics compact-metrics">
+              <div><strong id="statTotal">0</strong><span>本次输入</span></div>
+              <div><strong id="statNew">0</strong><span>新增导入</span></div>
+              <div><strong id="statExists">0</strong><span>已存在</span></div>
+              <div><strong id="statNotFound">0</strong><span>需核验</span></div>
+              <div><strong id="statDuplicate">0</strong><span>重复</span></div>
+            </div>
+            <div class="file-row">
+              <label class="file-label">输出目录</label>
+              <div class="file-selector">
+                <span class="file-path" id="outputDirPath">未选择...</span>
+                <button class="btn btn-outline btn-sm" id="btnSelectOutputDir">选择目录</button>
+              </div>
+            </div>
+            <div class="run-actions">
+              <button class="btn btn-primary btn-lg btn-full" id="btnStart" disabled>开始处理</button>
+              <button class="btn btn-danger btn-lg btn-full" id="btnStop" style="display:none;">停止处理</button>
+            </div>
+            <div class="progress-container" id="progressContainer" style="display:none;">
+              <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+              </div>
+              <div class="progress-text">
+                <span id="progressCurrent">0</span> / <span id="progressTotal">0</span>
+                <span class="progress-percent" id="progressPercent">0%</span>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="btn btn-outline btn-sm" id="btnOpenLibraryFromPanel">打开本地库</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="results">
+        <section class="module-card results-shell">
+          <div class="module-header table-header">
+            <div>
+              <h2>处理结果</h2>
+              <span class="module-subtitle">导入前预览</span>
+            </div>
+            <div class="table-tabs">
+              <button class="tab-btn active" data-tab="all">全部</button>
+              <button class="tab-btn" data-tab="new">新增</button>
+              <button class="tab-btn" data-tab="skipped">已跳过</button>
+              <button class="tab-btn" data-tab="manual">需核验</button>
+            </div>
+          </div>
+          <div class="table-wrapper">
+            <table class="result-table" id="resultTable">
+              <thead>
+                <tr>
+                  <th class="col-code">番号</th>
+                  <th class="col-url">链接</th>
+                  <th class="col-status">状态</th>
+                  <th class="col-actress">女优 Tag</th>
+                  <th class="col-genre">类型 Tag</th>
+                  <th class="col-final">最终 Tags</th>
+                  <th class="col-note">备注</th>
+                </tr>
+              </thead>
+              <tbody id="resultBody">
+                <tr class="empty-row">
+                  <td colspan="7">
+                    <div class="empty-state">
+                      <span class="empty-icon">M</span>
+                      <p>等待处理</p>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="export-bar" id="exportBar" style="display:none;">
+            <span class="export-label">导出文件</span>
+            <button class="btn btn-success btn-sm" id="btnExportAll">全部导出</button>
+            <button class="btn btn-outline btn-sm" id="btnExportHTML">仅 HTML</button>
+            <button class="btn btn-outline btn-sm" id="btnExportCSV">仅 CSV</button>
+            <button class="btn btn-outline btn-sm" id="btnOpenFolder">打开输出目录</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="app-page" data-page-panel="library">
+        <div class="data-workbench">
+          <div class="data-mode-tabs">
+            <button class="tab-btn active" data-data-mode="library">SQLite 本地库</button>
+            <button class="tab-btn" data-data-mode="csv">CSV 工作台</button>
+          </div>
+          <div class="data-mode-panel active" data-data-mode-panel="library">
+        <section class="module-card library-page-card">
+          <div class="module-header">
+            <div>
+              <h2>SQLite 本地库</h2>
+              <span class="module-subtitle" id="tagCollectionPath">SQLite 本地库</span>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-outline btn-sm" id="btnSelectTagFile">导入 CSV</button>
+              <button class="btn btn-success btn-sm" id="btnExportDbCSV">导出合集 CSV</button>
+            </div>
+          </div>
+          <div class="library-toolbar">
+            <input id="librarySearch" class="library-search" type="search" placeholder="搜索女优 tag、番号或链接">
+            <button class="btn btn-outline btn-sm" id="btnRefreshLibrary">刷新</button>
+          </div>
+          <div class="library-tabs">
+            <button class="tab-btn active" data-library-tab="overview">概览</button>
+            <button class="tab-btn" data-library-tab="actresses">女优 Tag</button>
+            <button class="tab-btn" data-library-tab="codes">番号库</button>
+            <button class="tab-btn" data-library-tab="map">收藏地图</button>
+            <button class="tab-btn" data-library-tab="review">整理卡片</button>
+            <button class="tab-btn" data-library-tab="export">导出预览</button>
+            <button class="tab-btn" data-library-tab="health">数据体检</button>
+            <button class="tab-btn" data-library-tab="backup">备份恢复</button>
+            <button class="tab-btn" data-library-tab="genres">类型 Tag</button>
+            <button class="tab-btn" data-library-tab="raw">原始表</button>
+            <button class="tab-btn" data-library-tab="duplicates">疑似重复</button>
+            <button class="tab-btn" data-library-tab="runs">处理历史</button>
+          </div>
+          <div id="libraryContent" class="library-content"></div>
+        </section>
+          </div>
+          <div class="data-mode-panel" data-data-mode-panel="csv">
+        <div class="csv-workbench-layout">
+          <section class="module-card csv-main-card">
+            <div class="module-header">
+              <div>
+                <h2>CSV 工作台</h2>
+                <span class="module-subtitle" id="csvFileInfo">未打开 CSV 文件</span>
+              </div>
+              <span class="badge" id="csvDirtyBadge">未载入</span>
+            </div>
+            <div class="csv-toolbar">
+              <button class="btn btn-secondary btn-sm" id="btnCsvOpen">打开 CSV</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvSave" disabled>保存</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvSaveAs" disabled>另存为</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvBackup" disabled>备份</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvAddRow" disabled>新增行</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvAddColumn" disabled>新增列</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvDeleteRows" disabled>删除选中</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvNormalizeCodes" disabled>规范番号</button>
+              <button class="btn btn-outline btn-sm" id="btnCsvReplace" disabled>批量替换</button>
+              <button class="btn btn-success btn-sm" id="btnCsvImportDb" disabled>导入本地库</button>
+            </div>
+            <div class="csv-path-row">
+              <span class="file-path" id="csvFilePath">未选择文件</span>
+            </div>
+            <div class="csv-table-shell">
+              <table class="csv-table" id="csvTable">
+                <thead id="csvTableHead"></thead>
+                <tbody id="csvTableBody">
+                  <tr class="empty-row"><td><div class="empty-state"><span class="empty-icon">CSV</span><p>打开 CSV 后在这里浏览和编辑</p></div></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="csv-footer" id="csvFooter">未载入数据</div>
+          </section>
+
+          <section class="module-card csv-side-card">
+            <div class="module-header">
+              <div>
+                <h2>筛选与校验</h2>
+                <span class="module-subtitle">搜索 / 状态 / 数据问题</span>
+              </div>
+              <button class="btn btn-outline btn-sm" id="btnCsvValidate" disabled>重新校验</button>
+            </div>
+            <div class="settings-grid csv-filter-grid">
+              <label class="setting-field">
+                <span>搜索</span>
+                <input id="csvSearch" class="library-search" type="search" placeholder="番号、女优、链接、状态">
+              </label>
+              <label class="setting-field">
+                <span>状态筛选</span>
+                <select id="csvStatusFilter">
+                  <option value="all">全部</option>
+                  <option value="unknown">未知女优</option>
+                  <option value="need_check">待核验 / 需要查找</option>
+                  <option value="not_found">未找到</option>
+                  <option value="issue">有校验问题</option>
+                </select>
+              </label>
+            </div>
+            <div class="csv-metrics">
+              <div><strong id="csvMetricRows">0</strong><span>行</span></div>
+              <div><strong id="csvMetricCols">0</strong><span>列</span></div>
+              <div><strong id="csvMetricIssues">0</strong><span>问题</span></div>
+              <div><strong id="csvMetricSelected">0</strong><span>选中</span></div>
+            </div>
+            <div class="csv-issues" id="csvIssueList">
+              <div class="library-empty">暂无校验结果</div>
+            </div>
+            <h3 class="library-section-title">最近 CSV</h3>
+            <div class="csv-recent-list" id="csvRecentList"></div>
+          </section>
+        </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="settings">
+        <div class="page-grid settings-page-grid">
+          <section class="module-card module-settings">
+            <div class="module-header">
+              <div>
+                <h2>外观设置</h2>
+                <span class="module-subtitle">主题 / 背景 / 密度</span>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <label class="setting-field">
+                <span>主题</span>
+                <select id="themeSelect">
+                  <option value="mint">护眼淡绿</option>
+                  <option value="sage">青柠灰绿</option>
+                  <option value="paper">纸感浅色</option>
+                  <option value="dusk">暮色紫灰</option>
+                  <option value="graphite">石墨深色</option>
+                  <option value="rose">柔粉米白</option>
+                </select>
+              </label>
+              <label class="setting-field">
+                <span>密度</span>
+                <select id="uiDensitySelect">
+                  <option value="comfortable">舒展</option>
+                  <option value="compact">紧凑</option>
+                </select>
+              </label>
+              <label class="setting-field range-field">
+                <span>背景压暗</span>
+                <input type="range" id="bgDimRange" min="0" max="85" value="35">
+                <em id="bgDimValue">35%</em>
+              </label>
+            </div>
+            <div class="btn-row wrap-row">
+              <button class="btn btn-secondary btn-sm" id="btnSelectBgImage">导入背景图</button>
+              <button class="btn btn-outline btn-sm" id="btnClearBgImage">清除背景</button>
+            </div>
+          </section>
+
+          <section class="module-card utility-panel">
+            <div class="module-header">
+              <div>
+                <h2>数据位置</h2>
+                <span class="module-subtitle">本地文件</span>
+              </div>
+            </div>
+            <div class="file-row">
+              <label class="file-label">数据库目录</label>
+              <div class="file-selector single-line">
+                <span class="file-path" id="dbPathValue">加载中...</span>
+              </div>
+            </div>
+            <div class="file-row">
+              <label class="file-label">当前输出目录</label>
+              <div class="file-selector">
+                <span class="file-path" id="outputDirPathMirror">未选择...</span>
+                <button class="btn btn-outline btn-sm" id="btnSelectOutputDirMirror">选择目录</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <div class="modal-overlay" id="modalHistory" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>处理历史</h2>
+        <button class="btn-icon modal-close" id="btnCloseHistory">X</button>
+      </div>
+      <div class="modal-body" id="historyList">
+        <p class="empty-state">暂无历史记录</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modalHelp" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>使用帮助</h2>
+        <button class="btn-icon modal-close" id="btnCloseHelp">X</button>
+      </div>
+      <div class="modal-body help-content">
+        <h3>输入</h3>
+        <p>支持番号、MissAV 链接，以及 HTML、TXT、MD 文件文本提取。</p>
+        <h3>标签</h3>
+        <p>女优 tag 来自 actresses 链接，类型 tag 来自 genres 链接，导出前会过滤广告类 tag。</p>
+        <h3>本地库</h3>
+        <p>SQLite 保存历史番号、女优 tag、类型 tag 和处理批次；CSV 用于兼容旧合集。</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
