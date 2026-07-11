@@ -1,6 +1,12 @@
 name: Build Windows Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create or update, for example v2.16.0
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
@@ -38,4 +44,12 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create ${{ github.ref_name }} "${{ steps.asset.outputs.path }}" --title "MissAV Manager ${{ github.ref_name }}" --generate-notes
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_ASSET: ${{ steps.asset.outputs.path }}
+        shell: pwsh
+        run: |
+          if (gh release view $env:RELEASE_TAG 2>$null) {
+            gh release upload $env:RELEASE_TAG $env:RELEASE_ASSET --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --title "MissAV Manager $env:RELEASE_TAG" --generate-notes
+          }
