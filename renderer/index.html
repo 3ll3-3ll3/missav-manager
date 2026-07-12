@@ -13,7 +13,7 @@
     <div class="header-left">
       <span class="logo-icon">M</span>
       <h1 class="app-title">MissAV <span class="title-highlight">Manager</span></h1>
-      <span class="version-badge">v2.16</span>
+      <span class="version-badge">v0.1</span>
     </div>
     <div class="header-right">
       <button class="btn-icon" id="btnHistory" title="处理历史">H</button>
@@ -156,38 +156,30 @@
       <section class="app-page" data-page-panel="library">
         <div class="data-workbench">
           <div class="data-mode-tabs">
-            <button class="tab-btn active" data-data-mode="library">SQLite 本地库</button>
-            <button class="tab-btn" data-data-mode="csv">CSV 工作台</button>
+            <button class="tab-btn active" data-data-mode="library">本地收藏库</button>
+            <button class="tab-btn" data-data-mode="csv">CSV 文件</button>
           </div>
           <div class="data-mode-panel active" data-data-mode-panel="library">
         <section class="module-card library-page-card">
           <div class="module-header">
             <div>
-              <h2>SQLite 本地库</h2>
-              <span class="module-subtitle" id="tagCollectionPath">SQLite 本地库</span>
+              <h2>收藏数据库</h2>
+              <span class="module-subtitle" id="tagCollectionPath">历史番号与 Raindrop 字段</span>
             </div>
             <div class="btn-row">
-              <button class="btn btn-outline btn-sm" id="btnSelectTagFile">导入 CSV</button>
-              <button class="btn btn-success btn-sm" id="btnExportDbCSV">导出合集 CSV</button>
+              <button class="btn btn-outline btn-sm" id="btnSelectTagFile">导入 Raindrop</button>
+              <button class="btn btn-success btn-sm" id="btnExportDbCSV">导出官方 CSV</button>
             </div>
           </div>
           <div class="library-toolbar">
-            <input id="librarySearch" class="library-search" type="search" placeholder="搜索女优 tag、番号或链接">
+            <input id="librarySearch" class="library-search" type="search" placeholder="搜索番号、标题、链接、Collection、Tags 或 Note">
             <button class="btn btn-outline btn-sm" id="btnRefreshLibrary">刷新</button>
           </div>
           <div class="library-tabs">
-            <button class="tab-btn active" data-library-tab="overview">概览</button>
-            <button class="tab-btn" data-library-tab="actresses">女优 Tag</button>
-            <button class="tab-btn" data-library-tab="codes">番号库</button>
-            <button class="tab-btn" data-library-tab="map">收藏地图</button>
-            <button class="tab-btn" data-library-tab="review">整理卡片</button>
-            <button class="tab-btn" data-library-tab="export">导出预览</button>
-            <button class="tab-btn" data-library-tab="health">数据体检</button>
-            <button class="tab-btn" data-library-tab="backup">备份恢复</button>
-            <button class="tab-btn" data-library-tab="genres">类型 Tag</button>
-            <button class="tab-btn" data-library-tab="raw">原始表</button>
-            <button class="tab-btn" data-library-tab="duplicates">疑似重复</button>
-            <button class="tab-btn" data-library-tab="runs">处理历史</button>
+            <button class="tab-btn active" data-library-tab="codes">收藏库</button>
+            <button class="tab-btn" data-library-tab="dedupe">导入去重</button>
+            <button class="tab-btn" data-library-tab="tags">标签管理</button>
+            <button class="tab-btn" data-library-tab="maintenance">维护</button>
           </div>
           <div id="libraryContent" class="library-content"></div>
         </section>
@@ -245,9 +237,9 @@
                 <span>状态筛选</span>
                 <select id="csvStatusFilter">
                   <option value="all">全部</option>
-                  <option value="unknown">未知女优</option>
-                  <option value="need_check">待核验 / 需要查找</option>
-                  <option value="not_found">未找到</option>
+                  <option value="favorite">Favorite</option>
+                  <option value="highlights">有 Highlights</option>
+                  <option value="missing_url">缺 URL</option>
                   <option value="issue">有校验问题</option>
                 </select>
               </label>
@@ -257,6 +249,9 @@
               <div><strong id="csvMetricCols">0</strong><span>列</span></div>
               <div><strong id="csvMetricIssues">0</strong><span>问题</span></div>
               <div><strong id="csvMetricSelected">0</strong><span>选中</span></div>
+            </div>
+            <div class="csv-detail-editor" id="csvDetailEditor">
+              <div class="library-empty">选择一行后编辑完整 Raindrop 字段</div>
             </div>
             <div class="csv-issues" id="csvIssueList">
               <div class="library-empty">暂无校验结果</div>

@@ -9,6 +9,7 @@ const exporter = require('./src/exporter');
 const utils = require('./src/utils');
 const database = require('./src/database');
 const csvTools = require('./src/csvTools');
+const raindrop = require('./src/raindrop');
 
 // ─── 数据库初始化 ────────────────────────────────────
 let dbReady = false;
@@ -71,9 +72,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   csvParse: (text) => csvTools.parseCSV(text),
   csvStringify: (headers, rows) => csvTools.stringifyCSV(headers, rows),
   csvAnalyze: (headers, rows) => csvTools.analyzeCSV(headers, rows),
+  parseRaindropCSV: (text) => raindrop.parseRaindropCSV(text),
+  parseRaindropHTML: (text) => raindrop.parseRaindropHTML(text),
+  generateOfficialRaindropCSV: (records) => raindrop.generateRaindropCSV(records),
+  generateOfficialRaindropHTML: (records) => raindrop.generateRaindropHTML(records),
 
   // ── Shell ──
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  showDirectory: (dirPath) => ipcRenderer.invoke('shell:openDirectory', dirPath),
 
   // ── App ──
   getPath: (name) => ipcRenderer.invoke('app:getPath', name),
@@ -106,6 +112,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dbGetStats: () => database.getStats(),
   dbGetActressLibrary: (options) => database.getActressLibrary(options),
   dbGetCodeLibrary: (options) => database.getCodeLibrary(options),
+  dbGetBookmarkLibrary: (options) => database.getBookmarkLibrary(options),
+  dbGetBookmarkStats: () => database.getBookmarkStats(),
+  dbGetBookmarkCollections: () => database.getBookmarkCollections(),
+  dbGetBookmarkCollectionInfo: (path) => database.getBookmarkCollectionInfo(path),
+  dbCreateBookmarkCollection: (path) => database.createBookmarkCollection(path),
+  dbRenameBookmarkCollection: (path, nextPath) => database.renameBookmarkCollection(path, nextPath),
+  dbDeleteBookmarkCollection: (path) => database.deleteBookmarkCollection(path),
+  dbGetBookmarkScopeInfo: (scope) => database.getBookmarkScopeInfo(scope),
+  dbDeleteBookmarksByScope: (scope) => database.deleteBookmarksByScope(scope),
+  dbImportRaindropRecords: (records, options) => database.importRaindropRecords(records, options),
+  dbExportRaindropRecords: () => database.exportRaindropRecords(),
+  dbCreateBookmarkRecord: (record) => database.createBookmarkRecord(record),
+  dbUpdateBookmarkRecord: (id, patch) => database.updateBookmarkRecord(id, patch),
+  dbDeleteBookmarkRecord: (id) => database.deleteBookmarkRecord(id),
+  dbAnalyzeCodeImport: (codes) => database.analyzeCodeImport(codes),
+  dbImportHistoricalCodes: (codes) => database.importHistoricalCodes(codes),
+  dbImportHistoricalRecords: (records) => database.importHistoricalRecords(records),
   dbGetRaindropImportRows: (options) => database.getRaindropImportRows(options),
   dbGetDuplicateCodeGroups: () => database.getDuplicateCodeGroups(),
   dbGetHealthReport: (options) => database.getHealthReport(options),

@@ -1,5 +1,5 @@
 ﻿/**
- * MissAV Manager — 前端主逻辑 v2.16
+ * MissAV Manager — 前端主逻辑 v0.1
  * 数据存储使用 SQLite 数据库（替代旧 CSV 读写）
  */
 
@@ -21,7 +21,7 @@ const state = {
   activeTab: 'all',
   history: [],
   dbReady: false,
-  libraryTab: 'overview',
+  libraryTab: 'codes',
   dataMode: 'library',
   activePage: 'process',
   libraryActresses: [],
@@ -30,8 +30,14 @@ const state = {
   codeSelected: new Set(),
   selectedCodeId: null,
   codeStatusFilter: 'all',
+  codeCollectionFilter: 'all',
+  codeCollectionCollapsed: new Set(),
+  codeSort: 'recent',
+  codePage: 1,
+  codePageSize: 160,
   collectionMap: { collection: 'all', tag: '', riskOnly: false },
   reviewDeck: { queue: 'priority', index: 0, done: 0, skipped: 0 },
+  importCompare: { text: '', rows: [], policy: 'new_only', filter: 'all', selected: new Set(), metadataByKey: new Map(), sourceLabel: '' },
   libraryGenres: [],
   rawDbTable: 'codes',
   rawDbTables: [],
@@ -39,7 +45,7 @@ const state = {
   healthReport: null,
   backupRows: [],
   appearance: { theme: 'mint', density: 'comfortable', bgImagePath: '', bgDim: 35 },
-  csv: { filePath: '', headers: [], rows: [], selectedRows: new Set(), dirty: false, analysis: null, recent: [] },
+  csv: { filePath: '', headers: [], rows: [], selectedRows: new Set(), focusedRow: null, isRaindrop: false, dirty: false, analysis: null, recent: [] },
 };
 
 // ─── 初始化 ──────────────────────────────────────────
@@ -120,6 +126,7 @@ function init() {
   DOM.csvTableBody = $('#csvTableBody');
   DOM.csvFooter = $('#csvFooter');
   DOM.csvIssueList = $('#csvIssueList');
+  DOM.csvDetailEditor = $('#csvDetailEditor');
   DOM.csvRecentList = $('#csvRecentList');
   DOM.csvMetricRows = $('#csvMetricRows');
   DOM.csvMetricCols = $('#csvMetricCols');
@@ -218,8 +225,9 @@ async function selectBackgroundImage() {
 function refreshDbSummary() {
   if (!state.dbReady || !DOM.dbSummaryMini) return;
   const stats = api.dbGetStats();
-  DOM.dbSummaryMini.textContent = `${stats.actressCount} 女优 / ${stats.codeCount} 番号 / ${stats.linkCount} 关联`;
-  DOM.tagCollectionPath.textContent = `SQLite 本地库 (${stats.actressCount} 女优, ${stats.codeCount} 番号)`;
+  const bookmarkStats = api.dbGetBookmarkStats();
+  DOM.dbSummaryMini.textContent = `${bookmarkStats.count} 收藏 / ${stats.codeCount} 番号 / ${bookmarkStats.collectionCount} Collections`;
+  DOM.tagCollectionPath.textContent = `Raindrop 兼容主库 (${bookmarkStats.count} 收藏, ${stats.codeCount} 番号索引)`;
   if (DOM.dbPathValue) DOM.dbPathValue.textContent = api.dbGetPath ? api.dbGetPath() : 'data';
 }
 // ─── 数据库状态检查 ──────────────────────────────────
@@ -279,6 +287,10 @@ function bindEvents() {
   if (DOM.csvStatusFilter) DOM.csvStatusFilter.addEventListener('change', renderCsvTable);
   if (DOM.csvTable) DOM.csvTable.addEventListener('input', handleCsvTableInput);
   if (DOM.csvTable) DOM.csvTable.addEventListener('change', handleCsvTableChange);
+  if (DOM.csvTable) DOM.csvTable.addEventListener('click', handleCsvTableClick);
+  if (DOM.csvTable) DOM.csvTable.addEventListener('focusin', handleCsvTableFocusIn);
+  if (DOM.csvDetailEditor) DOM.csvDetailEditor.addEventListener('input', handleCsvDetailInput);
+  if (DOM.csvDetailEditor) DOM.csvDetailEditor.addEventListener('change', handleCsvDetailInput);
   if (DOM.csvIssueList) DOM.csvIssueList.addEventListener('click', handleCsvIssueClick);
   if (DOM.csvRecentList) DOM.csvRecentList.addEventListener('click', handleCsvRecentClick);
 
@@ -288,6 +300,7 @@ function bindEvents() {
   DOM.btnExportHTML.addEventListener('click', exportHTMLOnly);
   DOM.btnExportCSV.addEventListener('click', exportCSVOnly);
   DOM.btnOpenFolder.addEventListener('click', openOutputFolder);
+  DOM.resultBody.addEventListener('click', handleResultTableClick);
   DOM.btnOpenLibraryFromPanel.addEventListener('click', openLibraryModal);
   DOM.themeSelect.addEventListener('change', () => setAppearance({ theme: DOM.themeSelect.value }));
   DOM.uiDensitySelect.addEventListener('change', () => setAppearance({ density: DOM.uiDensitySelect.value }));
@@ -316,23 +329,44 @@ function bindEvents() {
   DOM.libraryContent.addEventListener('input', handleLibraryInput);
   DOM.libraryContent.addEventListener('keydown', handleLibraryKeydown);
   DOM.libraryContent.addEventListener('focusout', handleLibraryFocusOut);
+  DOM.libraryContent.addEventListener('contextmenu', handleLibraryContextMenu);
+  document.addEventListener('click', event => { if (!event.target.closest('.collection-context-menu')) closeCollectionContextMenu(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeCollectionContextMenu(); });
   DOM.modalHistory.addEventListener('click', e => { if (e.target === DOM.modalHistory) DOM.modalHistory.style.display = 'none'; });
   DOM.modalHelp.addEventListener('click', e => { if (e.target === DOM.modalHelp) DOM.modalHelp.style.display = 'none'; });
   if (DOM.modalLibrary) DOM.modalLibrary.addEventListener('click', e => { if (e.target === DOM.modalLibrary) DOM.modalLibrary.style.display = 'none'; });
 }
 
-// ─── CSV 导入到数据库（首次迁移用） ──────────────────
+// ─── Raindrop / 旧合集导入 ───────────────────────────
 async function importCSVToDb() {
-  const filePath = await api.openFile({ title: '选择旧女优 Tag 合集 CSV（首次导入用）', filters: [{ name: 'CSV 文件', extensions: ['csv'] }] });
-  if (!filePath) return;
+  const filePaths = await api.openFile({
+    title: '选择 Raindrop 官方 CSV / HTML 或旧女优 Tag 合集',
+    multiSelections: true,
+    filters: [{ name: 'Raindrop 与 CSV 文件', extensions: ['csv', 'html', 'htm'] }],
+  });
+  if (!filePaths || !filePaths.length) return;
   try {
-    const text = await api.readFile(filePath);
-    setStatus(null, '正在导入 CSV 到数据库...', null, null);
-    api.dbImportCSV(text);
+    setStatus(null, '正在导入收藏数据库...', null, null);
+    api.dbCreateBackup('before_raindrop_import', 'import');
+    const records = [];
+    let legacyImported = 0;
+    for (const filePath of filePaths) {
+      const text = await api.readFile(filePath);
+      if (/\.html?$/i.test(filePath)) {
+        records.push(...api.parseRaindropHTML(text));
+        continue;
+      }
+      const parsed = api.csvParse(text);
+      const headers = new Set((parsed.headers || []).map(header => String(header || '').trim().toLowerCase()));
+      if (headers.has('url') && headers.has('title') && headers.has('folder')) records.push(...api.parseRaindropCSV(text));
+      else legacyImported += Number(api.dbImportCSV(text)?.imported || 0);
+    }
+    const result = records.length ? api.dbImportRaindropRecords(records, { mode: 'merge' }) : { imported: 0, updated: 0, codeLinked: 0 };
     const stats = api.dbGetStats();
     refreshDbSummary();
     setStatus('就绪 ✓', null, null, null);
-    toast(`导入完成！${stats.actressCount} 个女优 tag，${stats.codeCount} 个番号`, 'success');
+    toast(`导入完成：新增收藏 ${result.imported}，更新 ${result.updated}，同步番号 ${result.codeLinked}，旧合集关系 ${legacyImported}；当前番号索引 ${stats.codeCount}`, 'success');
+    await refreshLibrary();
     updateUI();
   } catch (err) { toast(`导入失败: ${err.message}`, 'error'); }
 }
@@ -392,7 +426,7 @@ function renderTable() {
   DOM.resultBody.innerHTML = rows.map(r => `
     <tr>
       <td class="col-code">${esc(r.code)}</td>
-      <td class="col-url"><a href="#" onclick="window.electronAPI.openExternal('${esc(r.url)}');return false;" title="${esc(r.url)}">${esc(shortUrl(r.url))}</a></td>
+      <td class="col-url"><a href="#" data-result-url="${esc(r.url)}" title="${esc(r.url)}">${esc(shortUrl(r.url))}</a></td>
       <td class="col-status"><span class="status-badge ${statusClass(r)}">${statusLabel(r)}</span></td>
       <td class="col-actress">${(r.actresses||[]).map(t => `<span class="tag-chip">${esc(t)}</span>`).join('') || '-'}</td>
       <td class="col-genre">${(r.genres||[]).map(t => `<span class="tag-chip">${esc(t)}</span>`).join('') || '-'}</td>
@@ -404,6 +438,17 @@ function renderTable() {
       }).join('') || '-'}</td>
       <td class="col-note">${esc(r.skippedReason || '-')}</td>
     </tr>`).join('');
+}
+
+async function handleResultTableClick(event) {
+  const link = event.target.closest('[data-result-url]');
+  if (!link) return;
+  event.preventDefault();
+  try {
+    await api.openExternal(link.dataset.resultUrl);
+  } catch (err) {
+    toast(`无法打开链接: ${err.message}`, 'error');
+  }
 }
 
 function getFilteredResults() {
@@ -602,7 +647,14 @@ async function exportHTMLOnly() {
 async function exportCSVOnly() {
   try { const prefix = api.timePrefixToMinute(); const runDir = `${state.outputDirPath}\\${prefix}_missav_import`; await api.createDirectory(runDir); await api.writeFile(`${runDir}\\${prefix}_missav_raindrop_import.csv`, api.generateRaindropCSV(state.results)); toast('CSV 已导出', 'success'); } catch (err) { toast(`导出失败: ${err.message}`, 'error'); }
 }
-function openOutputFolder() { if (state.outputDirPath) api.openExternal(`file:///${state.outputDirPath.replace(/\\/g, '/')}`); }
+async function openOutputFolder() {
+  if (!state.outputDirPath) return;
+  try {
+    await api.showDirectory(state.outputDirPath);
+  } catch (err) {
+    toast(`无法打开输出目录: ${err.message}`, 'error');
+  }
+}
 
 // ─── 本地库管理 ──────────────────────────────────────
 async function openLibraryModal() {
@@ -614,17 +666,36 @@ async function openLibraryModal() {
 
 function switchLibraryTab(tab) {
   state.libraryTab = tab;
-  $$('.library-tabs .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.libraryTab === tab));
+  state.codePage = 1;
+  const visibleTab = visibleLibraryTab(tab);
+  $$('.library-tabs .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.libraryTab === visibleTab));
   refreshLibrary();
+}
+
+function visibleLibraryTab(tab) {
+  if (['overview', 'map', 'review', 'export', 'health', 'backup', 'raw', 'duplicates', 'runs'].includes(tab)) return 'maintenance';
+  if (['actresses', 'genres'].includes(tab)) return 'tags';
+  return tab;
 }
 
 async function refreshLibrary() {
   if (!state.dbReady || !DOM.libraryContent) return;
   const q = DOM.librarySearch ? DOM.librarySearch.value.trim() : '';
   try {
+    if (DOM.librarySearch) {
+      DOM.librarySearch.closest('.library-toolbar')?.classList.toggle('library-toolbar-hidden', state.libraryTab === 'dedupe');
+      DOM.librarySearch.placeholder = state.libraryTab === 'codes'
+        ? '搜索番号、标题、链接、Collection、Tags 或 Note'
+        : state.libraryTab === 'tags'
+          ? '搜索女优或类型 Tag'
+          : '搜索当前维护视图';
+    }
     if (state.libraryTab === 'overview') renderLibraryOverview();
     if (state.libraryTab === 'actresses') renderLibraryActresses(q);
     if (state.libraryTab === 'codes') renderLibraryCodes(q);
+    if (state.libraryTab === 'dedupe') renderLibraryDedupe();
+    if (state.libraryTab === 'tags') renderLibraryTagManager(q);
+    if (state.libraryTab === 'maintenance') renderLibraryMaintenance();
     if (state.libraryTab === 'map') renderLibraryCollectionMap(q);
     if (state.libraryTab === 'review') renderLibraryReviewDeck(q);
     if (state.libraryTab === 'export') renderLibraryExportPreview(q);
@@ -637,6 +708,241 @@ async function refreshLibrary() {
   } catch (err) {
     DOM.libraryContent.innerHTML = `<div class="library-empty">加载失败：${esc(err.message)}</div>`;
   }
+}
+
+function renderLibraryDedupe() {
+  const report = importCompareSummary();
+  const allRows = state.importCompare.rows || [];
+  const rows = state.importCompare.filter === 'all' ? allRows : allRows.filter(row => row.classification === state.importCompare.filter);
+  const selectedCount = state.importCompare.selected.size;
+  DOM.libraryContent.innerHTML = `
+    <div class="import-compare-workbench">
+      <section class="import-source-panel">
+        <div class="workspace-section-head">
+          <div><h3>导入新内容</h3><span>支持文本、HTML、Markdown、MissAV 链接与多个文件</span></div>
+          <span class="workspace-count">${allRows.length} 条 · ${state.importCompare.metadataByKey.size} 条含完整字段</span>
+        </div>
+        <textarea class="import-compare-input" data-import-compare-input spellcheck="false" placeholder="粘贴新收集的内容，系统会提取番号并与全部历史库比对">${esc(state.importCompare.text || '')}</textarea>
+        <div class="import-source-actions">
+          <button class="btn btn-secondary btn-sm" data-action="import-compare-analyze">分析并比对</button>
+          <button class="btn btn-outline btn-sm" data-action="import-compare-files">导入文件</button>
+          <button class="btn btn-outline btn-sm" data-action="import-compare-from-process">读取处理页</button>
+          <button class="btn btn-outline btn-sm" data-action="import-compare-clear">清空</button>
+        </div>
+        <div class="import-policy-panel">
+          <label><span>默认保留规则</span><select data-import-policy>
+            <option value="new_only" ${state.importCompare.policy === 'new_only' ? 'selected' : ''}>仅保留全新番号</option>
+            <option value="new_and_review" ${state.importCompare.policy === 'new_and_review' ? 'selected' : ''}>全新 + 历史失败/待核验</option>
+            <option value="all" ${state.importCompare.policy === 'all' ? 'selected' : ''}>全部保留</option>
+          </select></label>
+          <p>规则只决定默认勾选，之后仍可逐条修改。</p>
+        </div>
+      </section>
+
+      <section class="import-result-panel">
+        <div class="import-summary-strip">
+          <button data-action="import-filter" data-filter="all" class="${state.importCompare.filter === 'all' ? 'active' : ''}"><strong>${report.total}</strong><span>已识别</span></button>
+          <button data-action="import-filter" data-filter="new" class="${state.importCompare.filter === 'new' ? 'active' : ''}"><strong>${report.newCount}</strong><span>全新</span></button>
+          <button data-action="import-filter" data-filter="existing" class="${state.importCompare.filter === 'existing' ? 'active' : ''}"><strong>${report.existingCount}</strong><span>已收录</span></button>
+          <button data-action="import-filter" data-filter="review" class="${state.importCompare.filter === 'review' ? 'active' : ''}"><strong>${report.reviewCount}</strong><span>需复查</span></button>
+        </div>
+        <div class="import-result-toolbar">
+          <span>已选 <strong>${selectedCount}</strong> 条</span>
+          <button class="btn btn-outline btn-sm" data-action="import-select-new">仅选全新</button>
+          <button class="btn btn-outline btn-sm" data-action="import-select-all">全选</button>
+          <button class="btn btn-outline btn-sm" data-action="import-select-none">全不选</button>
+        </div>
+        <div class="import-compare-list">
+          ${rows.length ? rows.slice(0, 3000).map(renderImportCompareRow).join('') : '<div class="library-empty">粘贴或导入内容后点击“分析并比对”</div>'}
+          ${rows.length > 3000 ? `<div class="import-list-more">为保持界面流畅，仅显示前 3000 条；所有 ${rows.length} 条仍会参与批量操作。</div>` : ''}
+        </div>
+        <div class="import-result-actions">
+          <button class="btn btn-success" data-action="import-send-process" ${selectedCount ? '' : 'disabled'}>把选中项送到处理页</button>
+          <button class="btn btn-secondary" data-action="import-add-history" ${selectedCount ? '' : 'disabled'}>直接加入历史库</button>
+        </div>
+      </section>
+    </div>`;
+}
+
+function importCompareSummary() {
+  const rows = state.importCompare.rows || [];
+  return {
+    total: rows.length,
+    newCount: rows.filter(row => row.classification === 'new').length,
+    existingCount: rows.filter(row => row.classification === 'existing').length,
+    reviewCount: rows.filter(row => row.classification === 'review').length,
+  };
+}
+
+function renderImportCompareRow(row) {
+  const checked = state.importCompare.selected.has(row.key);
+  const existing = row.existing;
+  const labels = {
+    new: ['全新', 'import-row-new'],
+    existing: ['已收录', 'import-row-existing'],
+    review: ['需复查', 'import-row-review'],
+  };
+  const [label, cls] = labels[row.classification] || labels.new;
+  return `<label class="import-compare-row ${cls}">
+    <input type="checkbox" data-import-row-key="${esc(row.key)}" ${checked ? 'checked' : ''}>
+    <span class="import-code">${esc(row.code)}</span>
+    <span class="import-state">${label}</span>
+    <span class="import-existing-detail">${existing ? `${esc(existing.code)} · ${esc(statusDisplayLabel(existing.status))}${existing.url ? ' · 有链接' : ''}` : '历史库中没有该番号'}</span>
+  </label>`;
+}
+
+function statusDisplayLabel(status) {
+  return CODE_STATUS_OPTIONS.find(item => item[0] === status)?.[1] || status || '-';
+}
+
+function applyImportComparePolicy() {
+  const selected = new Set();
+  for (const row of state.importCompare.rows || []) {
+    const keep = state.importCompare.policy === 'all'
+      || row.classification === 'new'
+      || (state.importCompare.policy === 'new_and_review' && row.classification === 'review');
+    if (keep) selected.add(row.key);
+  }
+  state.importCompare.selected = selected;
+}
+
+async function analyzeImportComparison(text = state.importCompare.text) {
+  state.importCompare.text = String(text || '');
+  state.importCompare.metadataByKey = extractRaindropMetadataFromCsv(state.importCompare.text);
+  const codes = api.parseCodeList(state.importCompare.text);
+  const report = api.dbAnalyzeCodeImport(codes);
+  state.importCompare.rows = report.rows || [];
+  state.importCompare.filter = 'all';
+  applyImportComparePolicy();
+  await refreshLibrary();
+  toast(`已比对 ${report.total || 0} 条：全新 ${report.newCount || 0}，已收录 ${report.existingCount || 0}，需复查 ${report.reviewCount || 0}`, 'success');
+}
+
+function extractRaindropMetadataFromCsv(text) {
+  const result = new Map();
+  const parsed = api.csvParse(String(text || ''));
+  const headers = (parsed.headers || []).map(header => String(header || '').trim().toLowerCase());
+  const find = names => headers.findIndex(header => names.includes(header));
+  const indexes = {
+    code: find(['code', '番号', '品番']),
+    url: find(['url', 'link', '链接', '网址']),
+    title: find(['title', '标题']),
+    note: find(['note', '备注']),
+    tags: find(['tags', 'tag', '标签']),
+    folder: find(['folder', 'collection', '收藏夹', '文件夹']),
+    created: find(['created', 'created_at', '创建时间']),
+    cover: find(['cover', 'image', '封面']),
+    excerpt: find(['excerpt', 'description', '摘要']),
+  };
+  if (indexes.code < 0 && indexes.url < 0 && indexes.title < 0) return result;
+
+  const value = (row, index) => index >= 0 ? String(row[index] || '').trim() : '';
+  for (const row of parsed.rows || []) {
+    const explicitCode = value(row, indexes.code);
+    const url = value(row, indexes.url);
+    const title = value(row, indexes.title);
+    const code = api.parseCodeList([explicitCode, url, title].filter(Boolean).join(' '))[0];
+    if (!code) continue;
+    const key = api.codeComparableKey(code);
+    if (!key || result.has(key)) continue;
+    result.set(key, {
+      code,
+      url,
+      title,
+      note: value(row, indexes.note),
+      tags: value(row, indexes.tags),
+      folder: value(row, indexes.folder),
+      created: value(row, indexes.created),
+      cover: value(row, indexes.cover),
+      excerpt: value(row, indexes.excerpt),
+    });
+  }
+  return result;
+}
+
+async function importComparisonFiles() {
+  const paths = await api.openFile({
+    title: '选择要比对的文件',
+    multiSelections: true,
+    filters: [{ name: '文本与数据文件', extensions: ['txt', 'md', 'html', 'htm', 'csv'] }],
+  });
+  if (!paths || !paths.length) return;
+  const chunks = [];
+  const metadata = new Map();
+  for (const filePath of paths) {
+    const text = await api.readFile(filePath, 'utf-8');
+    chunks.push(text);
+    for (const [key, record] of extractRaindropMetadataFromCsv(text)) if (!metadata.has(key)) metadata.set(key, record);
+  }
+  state.importCompare.text = chunks.join('\n\n');
+  state.importCompare.sourceLabel = `${paths.length} 个文件`;
+  await analyzeImportComparison(state.importCompare.text);
+  state.importCompare.metadataByKey = metadata;
+  await refreshLibrary();
+}
+
+function selectedImportCodes() {
+  const selected = state.importCompare.selected;
+  return (state.importCompare.rows || []).filter(row => selected.has(row.key)).map(row => row.code);
+}
+
+async function sendImportSelectionToProcess() {
+  const codes = selectedImportCodes();
+  if (!codes.length) throw new Error('请先选择要处理的番号');
+  DOM.codeInput.value = codes.join('\n');
+  parseInputCodes('导入去重');
+  switchPage('process');
+  toast(`已把 ${codes.length} 条送到处理页`, 'success');
+}
+
+async function addImportSelectionToHistory() {
+  const codes = selectedImportCodes();
+  if (!codes.length) throw new Error('请先选择要加入历史库的番号');
+  const newKeys = new Set((state.importCompare.rows || []).filter(row => row.classification === 'new').map(row => row.key));
+  if (!codes.some(code => newKeys.has(api.codeComparableKey(code)))) throw new Error('选中项都已存在于历史库，没有需要新增的记录');
+  api.dbCreateBackup('historical_import', 'import');
+  const records = codes.map(code => state.importCompare.metadataByKey.get(api.codeComparableKey(code)) || { code });
+  const result = api.dbImportHistoricalRecords(records);
+  await refreshDbSummary();
+  await analyzeImportComparison(state.importCompare.text);
+  toast(`已加入历史库 ${result.imported} 条，已有 ${result.existing} 条未重复写入`, 'success');
+}
+
+function renderLibraryTagManager(q) {
+  const actresses = api.dbGetActressLibrary({ search: q, limit: 500 });
+  const genres = api.dbGetGenreLibrary({ search: q, limit: 500 });
+  DOM.libraryContent.innerHTML = `
+    <div class="tag-manager-workbench">
+      <section class="tag-manager-section">
+        <div class="workspace-section-head"><div><h3>女优 Tags</h3><span>${actresses.length} 个匹配项</span></div><button class="btn btn-secondary btn-sm" data-action="create-actress">新增</button></div>
+        <div class="tag-manager-list">${actresses.map(row => `<div class="tag-manager-row"><div><strong>${esc(row.tag_name)}</strong><span>${row.code_count} 条记录 · ${row.sample_codes.slice(0, 4).map(esc).join(' ') || '暂无关联'}</span></div><div><button class="btn btn-outline btn-sm" data-action="rename-tag" data-id="${row.id}" data-name="${esc(row.tag_name)}">重命名</button><button class="btn btn-outline btn-sm" data-action="merge-tag" data-id="${row.id}" data-name="${esc(row.tag_name)}">合并</button><button class="btn btn-danger btn-sm" data-action="delete-tag" data-id="${row.id}" data-name="${esc(row.tag_name)}" data-count="${row.code_count}">删除</button></div></div>`).join('') || '<div class="library-empty">没有匹配的女优 Tag</div>'}</div>
+      </section>
+      <section class="tag-manager-section">
+        <div class="workspace-section-head"><div><h3>类型 Tags</h3><span>${genres.length} 个匹配项</span></div><button class="btn btn-secondary btn-sm" data-action="create-genre">新增</button></div>
+        <div class="tag-manager-list">${genres.map(row => `<div class="tag-manager-row"><div><strong>${esc(row.name)}</strong><span>${row.code_count} 条记录 · ${row.sample_codes.slice(0, 4).map(esc).join(' ') || '暂无关联'}</span></div><div><button class="btn btn-outline btn-sm" data-action="rename-genre" data-id="${row.id}" data-name="${esc(row.name)}">重命名</button><button class="btn btn-danger btn-sm" data-action="delete-genre" data-id="${row.id}" data-name="${esc(row.name)}" data-count="${row.code_count}">删除</button></div></div>`).join('') || '<div class="library-empty">没有匹配的类型 Tag</div>'}</div>
+      </section>
+    </div>`;
+}
+
+function renderLibraryMaintenance() {
+  const stats = api.dbGetStats();
+  const bookmarkStats = api.dbGetBookmarkStats();
+  const tools = [
+    ['overview', '数据概况', '数量统计与最近处理记录'],
+    ['health', '数据体检', '缺链接、缺 Tag、状态矛盾与坏关联'],
+    ['backup', '备份恢复', '创建、恢复和管理数据库快照'],
+    ['export', '导出预览', '导出 Raindrop 前检查字段与状态'],
+    ['duplicates', '疑似重复', '按标准化番号查找重复记录'],
+    ['raw', '原始表', '直接维护底层表，仅用于高级修复'],
+    ['map', 'Collection 分布', '查看收藏夹、Tags 与缺失字段'],
+    ['review', '逐条整理队列', '按风险优先逐条补全旧数据'],
+    ['runs', '处理历史', '查看历史处理批次'],
+  ];
+  DOM.libraryContent.innerHTML = `
+    <div class="maintenance-workbench">
+      <div class="maintenance-summary"><strong>${bookmarkStats.count}</strong><span>收藏</span><strong>${bookmarkStats.collectionCount}</strong><span>Collections</span><strong>${stats.codeCount}</strong><span>番号索引</span><strong>${bookmarkStats.highlightCount}</strong><span>Highlights</span></div>
+      <div class="maintenance-list">${tools.map(([tab, title, desc]) => `<button data-action="maintenance-open" data-tab="${tab}"><span><strong>${title}</strong><small>${desc}</small></span><b>›</b></button>`).join('')}</div>
+    </div>`;
 }
 
 function renderLibraryOverview() {
@@ -1379,8 +1685,9 @@ function renderHealthRelationSection(actressLinks, genreLinks) {
 
 async function openHealthCode(id, code) {
   state.libraryTab = 'codes';
-  state.selectedCodeId = Number(id);
+  state.selectedCodeId = null;
   state.codeStatusFilter = 'all';
+  state.codeCollectionFilter = 'all';
   if (DOM.librarySearch) DOM.librarySearch.value = code || '';
   $$('.library-tabs .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.libraryTab === 'codes'));
   await refreshLibrary();
@@ -1458,88 +1765,189 @@ function backupReasonLabel(reason) {
   return map[reason] || reason || '-';
 }
 function renderLibraryCodes(q) {
-  const fetched = api.dbGetCodeLibrary({ search: q, limit: 1000 });
+  const fetched = api.dbGetBookmarkLibrary({ search: q, limit: 50000 });
   state.libraryCodeAllRows = fetched;
-  const rows = filterCodeRows(fetched);
+  const collectionTree = buildCodeCollectionTree(api.dbGetBookmarkCollections(), fetched);
+  if (state.codeCollectionFilter !== 'all' && state.codeCollectionFilter !== '__unfiled__' && !collectionTree.paths.has(state.codeCollectionFilter)) state.codeCollectionFilter = 'all';
+
+  let rows = filterCodeRows(fetched);
+  if (state.codeCollectionFilter !== 'all') rows = rows.filter(row => isWithinSelectedCollection(row, state.codeCollectionFilter));
+  rows = sortCodeLibraryRows(rows);
   state.libraryCodes = rows;
 
-  const visibleIds = new Set(rows.map(r => Number(r.id)));
-  state.codeSelected = new Set([...state.codeSelected].filter(id => visibleIds.has(Number(id))));
-  if (state.selectedCodeId && !visibleIds.has(Number(state.selectedCodeId))) state.selectedCodeId = rows[0]?.id || null;
-  if (!state.selectedCodeId && rows.length) state.selectedCodeId = rows[0].id;
-  const detailRow = rows.find(r => Number(r.id) === Number(state.selectedCodeId)) || rows[0] || null;
+  const pageCount = Math.max(1, Math.ceil(rows.length / state.codePageSize));
+  state.codePage = Math.min(Math.max(1, state.codePage), pageCount);
+  const start = (state.codePage - 1) * state.codePageSize;
+  const pageRows = rows.slice(start, start + state.codePageSize);
+  const availableIds = new Set(fetched.map(row => Number(row.id)));
+  state.codeSelected = new Set([...state.codeSelected].filter(id => availableIds.has(Number(id))));
+  if (state.selectedCodeId && !availableIds.has(Number(state.selectedCodeId))) state.selectedCodeId = pageRows[0]?.id || null;
+  if (!state.selectedCodeId && pageRows.length) state.selectedCodeId = pageRows[0].id;
+  const detailRow = fetched.find(row => Number(row.id) === Number(state.selectedCodeId)) || pageRows[0] || null;
 
   DOM.libraryContent.innerHTML = `
     <div class="code-workbench">
-      <div class="library-action-bar code-bulk-toolbar">
-        <button class="btn btn-secondary btn-sm" data-action="create-code">新增番号</button>
-        <button class="btn btn-outline btn-sm" data-action="code-select-visible">选择当前列表</button>
+      <div class="library-action-bar code-primary-toolbar">
+        <button class="btn btn-secondary btn-sm" data-action="create-code">新建收藏</button>
+        <button class="btn btn-outline btn-sm" data-action="open-import-compare">导入并去重</button>
+        <button class="btn btn-outline btn-sm" data-action="code-select-filtered">选择当前范围 ${rows.length}</button>
         <button class="btn btn-outline btn-sm" data-action="code-clear-selection">清空选择</button>
-        <button class="btn btn-outline btn-sm" data-action="code-copy-selected">复制番号</button>
-        <button class="btn btn-outline btn-sm" data-action="code-export-raindrop-csv">导出 Raindrop CSV</button>
-        <button class="btn btn-outline btn-sm" data-action="code-export-raindrop-html">导出 Raindrop HTML</button>
+        <button class="btn btn-outline btn-sm" data-action="code-export-raindrop-csv">导出 CSV</button>
+        <button class="btn btn-outline btn-sm" data-action="code-export-raindrop-html">导出 HTML</button>
         <label class="code-toolbar-field"><span>筛选</span><select data-code-filter-status="1">
           <option value="all" ${state.codeStatusFilter === 'all' ? 'selected' : ''}>全部</option>
-          <option value="ok" ${state.codeStatusFilter === 'ok' ? 'selected' : ''}>ok</option>
-          <option value="need_manual_check" ${state.codeStatusFilter === 'need_manual_check' ? 'selected' : ''}>需核验</option>
-          <option value="not_found" ${state.codeStatusFilter === 'not_found' ? 'selected' : ''}>未找到</option>
+          <option value="favorite" ${state.codeStatusFilter === 'favorite' ? 'selected' : ''}>收藏标记</option>
+          <option value="highlights" ${state.codeStatusFilter === 'highlights' ? 'selected' : ''}>有 Highlights</option>
+          <option value="has_code" ${state.codeStatusFilter === 'has_code' ? 'selected' : ''}>已识别番号</option>
+          <option value="no_code" ${state.codeStatusFilter === 'no_code' ? 'selected' : ''}>普通网页</option>
           <option value="no_url" ${state.codeStatusFilter === 'no_url' ? 'selected' : ''}>无链接</option>
-          <option value="no_actress" ${state.codeStatusFilter === 'no_actress' ? 'selected' : ''}>无女优 Tag</option>
-          <option value="no_genre" ${state.codeStatusFilter === 'no_genre' ? 'selected' : ''}>无类型 Tag</option>
         </select></label>
-        <label class="code-toolbar-field"><span>批量状态</span><select data-code-bulk-status-value="1">${statusOptionsHtml('ok')}</select></label>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-status">应用状态</button>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-add-actress">追加女优</button>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-remove-actress">移除女优</button>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-add-genre">追加类型</button>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-remove-genre">移除类型</button>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-generate-url">生成链接</button>
-        <button class="btn btn-outline btn-sm" data-action="code-bulk-normalize">规范番号</button>
-        <button class="btn btn-danger btn-sm" data-action="code-bulk-delete">删除选中</button>
-        <span>已选 <strong data-code-selected-count="1">${state.codeSelected.size}</strong> / 当前 ${rows.length} 条</span>
+        <label class="code-toolbar-field"><span>排序</span><select data-code-sort="1">
+          <option value="recent" ${state.codeSort === 'recent' ? 'selected' : ''}>最近加入</option>
+          <option value="code" ${state.codeSort === 'code' ? 'selected' : ''}>番号 A-Z</option>
+          <option value="title" ${state.codeSort === 'title' ? 'selected' : ''}>标题 A-Z</option>
+          <option value="collection" ${state.codeSort === 'collection' ? 'selected' : ''}>Collection</option>
+        </select></label>
+        <span>共 <strong>${rows.length}</strong> 条 · 已选 <strong data-code-selected-count="1">${state.codeSelected.size}</strong></span>
       </div>
-      <div class="raindrop-bulk-panel">
-        <div class="raindrop-bulk-heading">
-          <strong>Raindrop 批量编辑</strong>
-          <span>对已选番号生效，写入前自动备份</span>
-        </div>
+      <details class="library-bulk-drawer" ${state.codeSelected.size ? 'open' : ''}>
+        <summary>批量编辑选中的 <strong data-code-selected-count="1">${state.codeSelected.size}</strong> 条记录</summary>
         <datalist id="bulk-raindrop-collections">${raindropCollectionOptionsHtml()}</datalist>
-        <div class="raindrop-bulk-grid">
+        <div class="library-bulk-grid">
           <label class="code-toolbar-field"><span>Collection</span><input data-bulk-rd-collection list="bulk-raindrop-collections" placeholder="MissAV_Import"></label>
-          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-collection">应用 Collection</button>
+          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-collection">应用</button>
           <label class="code-toolbar-field"><span>Tags</span><input data-bulk-rd-tags placeholder="tag1, tag2"></label>
           <label class="code-toolbar-field"><span>方式</span><select data-bulk-rd-tags-mode><option value="append">追加</option><option value="replace">替换</option><option value="remove">删除</option></select></label>
-          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-tags">应用 Tags</button>
-          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-auto-tags">写入自动 Tags</button>
+          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-tags">应用</button>
           <label class="code-toolbar-field"><span>Created</span><input type="datetime-local" data-bulk-rd-created></label>
           <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-created-now">现在</button>
-          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-created">应用 Created</button>
-          <label class="code-toolbar-field"><span>标题</span><select data-bulk-rd-title-mode><option value="fill_empty_code">空标题填番号</option><option value="overwrite_code">覆盖为番号</option><option value="code_actress">番号 + 首位女优</option></select></label>
-          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-title">应用标题</button>
-          <label class="code-toolbar-field"><span>清空</span><select data-bulk-rd-clear-field><option value="raindrop_note">Note</option><option value="raindrop_excerpt">Excerpt</option><option value="raindrop_cover">Cover</option><option value="raindrop_created">Created</option><option value="raindrop_tags">Tags</option><option value="raindrop_folder">Collection</option><option value="raindrop_title">Title</option></select></label>
-          <button class="btn btn-danger btn-sm" data-action="code-bulk-rd-clear">清空字段</button>
+          <button class="btn btn-outline btn-sm" data-action="code-bulk-rd-created">应用</button>
+          <button class="btn btn-outline btn-sm" data-action="code-copy-selected">复制链接/番号</button>
+          <button class="btn btn-danger btn-sm" data-action="code-bulk-delete">删除选中</button>
         </div>
-      </div>
-      <div class="code-editor-grid">
-        <div class="code-table-panel">
-          ${!rows.length ? '<div class="library-empty">没有匹配的番号</div>' : `
-          <div class="db-table-wrapper code-table-wrapper">
-            <table class="library-table code-edit-table">
-              <thead><tr><th class="code-col-check">选</th><th>ID</th><th>番号</th><th>标题</th><th>状态</th><th>链接</th><th>女优 Tag</th><th>类型 Tag</th><th>操作</th></tr></thead>
-              <tbody>${rows.map(renderCodeTableRow).join('')}</tbody>
-            </table>
-          </div>`}
-        </div>
+      </details>
+      <div class="raindrop-library-layout">
+        <aside class="collection-sidebar">
+          <div class="collection-sidebar-head"><strong>Collections</strong><span>${collectionTree.paths.size}</span><button class="collection-create-btn" data-action="collection-create" title="新建文件夹"><b>+</b><span>新建</span></button></div>
+          <button class="collection-filter-item ${state.codeCollectionFilter === 'all' ? 'active' : ''}" data-action="code-filter-collection" data-collection="all" data-collection-context="all" data-collection-kind="all"><span>全部收藏</span><b>${fetched.length}</b></button>
+          <button class="collection-filter-item ${state.codeCollectionFilter === '__unfiled__' ? 'active' : ''}" data-action="code-filter-collection" data-collection="__unfiled__" data-collection-context="__unfiled__" data-collection-kind="unfiled"><span>未分类</span><b>${collectionTree.unfiledCount}</b></button>
+          <div class="collection-tree">${collectionTree.children.map(node => renderCollectionTreeNode(node, 0)).join('')}</div>
+        </aside>
+        <section class="raindrop-record-pane">
+          <div class="record-pane-head"><span>${rows.length ? `${start + 1}-${Math.min(start + pageRows.length, rows.length)} / ${rows.length}` : '0 条记录'}</span><div><button class="btn btn-outline btn-sm" data-action="code-page" data-page="${state.codePage - 1}" ${state.codePage <= 1 ? 'disabled' : ''}>上一页</button><button class="btn btn-outline btn-sm" data-action="code-page" data-page="${state.codePage + 1}" ${state.codePage >= pageCount ? 'disabled' : ''}>下一页</button></div></div>
+          <div class="raindrop-record-list">${pageRows.length ? pageRows.map(renderCodeLibraryItem).join('') : '<div class="library-empty">当前筛选下没有记录</div>'}</div>
+        </section>
         ${renderCodeDetailPanel(detailRow)}
       </div>
+    </div>`;
+}
+
+function codeCollectionKey(row) {
+  return String(row.raindrop_folder || '').trim() || '__unfiled__';
+}
+
+function collectionPathParts(value) {
+  return String(value || '').split(/\s+\/\s+/).map(part => part.trim()).filter(Boolean);
+}
+
+function buildCodeCollectionTree(collections, rows) {
+  const root = { path: '', name: '', children: new Map(), directCount: 0, totalCount: 0 };
+  const paths = new Set();
+  const addPath = value => {
+    const parts = collectionPathParts(value);
+    if (!parts.length) return null;
+    let node = root;
+    const built = [];
+    for (const part of parts) {
+      built.push(part);
+      const path = built.join(' / ');
+      if (!node.children.has(part)) node.children.set(part, { path, name: part, children: new Map(), directCount: 0, totalCount: 0 });
+      node = node.children.get(part);
+      paths.add(path);
+    }
+    return node;
+  };
+
+  for (const collection of collections || []) addPath(collection.path);
+  let unfiledCount = 0;
+  for (const row of rows || []) {
+    const key = codeCollectionKey(row);
+    if (key === '__unfiled__') { unfiledCount++; continue; }
+    const node = addPath(key);
+    if (node) node.directCount++;
+  }
+  const finalize = node => {
+    const children = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    node.children = children;
+    node.totalCount = node.directCount + children.reduce((total, child) => total + finalize(child), 0);
+    return node.totalCount;
+  };
+  finalize(root);
+  return { children: root.children, paths, unfiledCount };
+}
+
+function isWithinSelectedCollection(row, collection) {
+  const key = codeCollectionKey(row);
+  if (collection === '__unfiled__') return key === '__unfiled__';
+  return key === collection || key.startsWith(`${collection} / `);
+}
+
+function renderCollectionTreeNode(node, depth) {
+  const hasChildren = node.children.length > 0;
+  const collapsed = state.codeCollectionCollapsed.has(node.path);
+  const active = state.codeCollectionFilter === node.path;
+  return `<div class="collection-tree-node" style="--collection-depth:${depth}">
+    <div class="collection-tree-row ${active ? 'active' : ''}" data-collection-context="${esc(node.path)}" data-collection-kind="folder">
+      ${hasChildren ? `<button class="collection-toggle" data-action="collection-toggle" data-collection="${esc(node.path)}" title="${collapsed ? '展开子文件夹' : '折叠子文件夹'}" aria-label="${collapsed ? '展开' : '折叠'}">${collapsed ? '▸' : '▾'}</button>` : '<span class="collection-toggle-placeholder"></span>'}
+      <button class="collection-tree-select" data-action="code-filter-collection" data-collection="${esc(node.path)}" title="${esc(node.path)}"><span>${esc(node.name)}</span><b>${node.totalCount}</b></button>
+      <div class="collection-tree-actions">
+        <button data-action="collection-menu-open" data-collection="${esc(node.path)}" data-collection-kind="folder" title="文件夹操作" aria-label="文件夹操作">⋮</button>
+      </div>
     </div>
-  `;
+    ${hasChildren && !collapsed ? `<div class="collection-tree-children">${node.children.map(child => renderCollectionTreeNode(child, depth + 1)).join('')}</div>` : ''}
+  </div>`;
+}
+
+function sortCodeLibraryRows(rows) {
+  const next = [...rows];
+  if (state.codeSort === 'code') next.sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+  if (state.codeSort === 'title') next.sort((a, b) => String(a.raindrop_title || a.code).localeCompare(String(b.raindrop_title || b.code), undefined, { numeric: true }));
+  if (state.codeSort === 'collection') next.sort((a, b) => String(a.raindrop_folder || '').localeCompare(String(b.raindrop_folder || '')) || String(a.code).localeCompare(String(b.code)));
+  return next;
+}
+
+function renderCodeLibraryItem(row) {
+  const id = Number(row.id);
+  const selected = state.codeSelected.has(id);
+  const focused = Number(state.selectedCodeId) === id;
+  const title = row.raindrop_title || row.code;
+  const collection = String(row.raindrop_folder || '').trim() || '未分类';
+  const explicitTags = splitTagInput(row.raindrop_tags);
+  const tags = explicitTags.length ? explicitTags : [...(row.actress_tags || []), ...(row.genre_tags || [])];
+  return `<article class="raindrop-record-item ${selected ? 'is-selected' : ''} ${focused ? 'is-focused' : ''}" data-code-row="${id}">
+    <input type="checkbox" data-code-select-row="${id}" ${selected ? 'checked' : ''}>
+    <button class="record-main" data-action="code-focus-row" data-id="${id}">
+      <strong>${esc(title)}</strong>
+      <span class="record-code">${row.code ? `${esc(row.code)} · ` : ''}${esc(collection)}</span>
+      <span class="record-link">${esc(row.best_url || 'No link')}</span>
+      <span class="record-tags">${tags.slice(0, 4).map(tag => `<i>${esc(tag)}</i>`).join('') || '<i>无 Tags</i>'}</span>
+    </button>
+    <div class="record-side">
+      <button class="record-favorite-btn ${row.favorite ? 'active' : ''}" data-action="bookmark-toggle-favorite" data-id="${id}" data-favorite="${row.favorite ? '1' : '0'}" title="${row.favorite ? '取消收藏标记' : '添加收藏标记'}">★</button>
+      ${row.highlights ? '<span class="record-highlight-mark" title="包含 Highlights">H</span>' : ''}
+      ${row.best_url ? `<button class="record-open-btn" data-action="open-url" data-url="${esc(row.best_url)}" title="打开链接">↗</button>` : ''}
+    </div>
+  </article>`;
 }
 
 function filterCodeRows(rows) {
   const filter = state.codeStatusFilter || 'all';
   if (filter === 'all') return rows;
   return rows.filter(row => {
+    if (filter === 'favorite') return row.favorite === true;
+    if (filter === 'highlights') return Boolean(String(row.highlights || '').trim());
+    if (filter === 'has_code') return Boolean(String(row.code || '').trim());
+    if (filter === 'no_code') return !String(row.code || '').trim();
     if (filter === 'no_url') return !String(row.best_url || '').trim();
     if (filter === 'no_actress') return !(row.actress_tags || []).length;
     if (filter === 'no_genre') return !(row.genre_tags || []).length;
@@ -1571,10 +1979,10 @@ function renderCodeTableRow(row) {
 
 function renderCodeDetailPanel(row) {
   if (!row) {
-    return `<aside class="code-detail-panel raindrop-edit-panel"><div class="library-empty">选择一个番号后编辑详情</div></aside>`;
+    return `<aside class="code-detail-panel raindrop-edit-panel"><div class="library-empty">选择一条收藏后编辑详情</div></aside>`;
   }
   const tagsText = raindropTagTextForRow(row);
-  const title = row.raindrop_title || row.code || 'Untitled';
+  const title = row.raindrop_title || row.code || row.best_url || 'Untitled';
   const cover = String(row.raindrop_cover || '').trim();
   const coverHtml = cover
     ? `<img src="${esc(cover)}" alt="">`
@@ -1586,30 +1994,34 @@ function renderCodeDetailPanel(row) {
       <div class="raindrop-edit-header">
         <div class="raindrop-cover-preview" data-rd-cover>${coverHtml}</div>
         <div class="raindrop-edit-heading">
-          <span>Raindrop</span>
+          <span>收藏详情</span>
           <h3 data-rd-title>${esc(title)}</h3>
           <p data-rd-link>${esc(row.best_url || 'No link')}</p>
         </div>
         <div class="raindrop-header-actions">
           <span class="raindrop-dirty-badge" data-detail-dirty-badge>未保存</span>
+          <label class="favorite-toggle"><input type="checkbox" data-code-detail-field="favorite" ${row.favorite ? 'checked' : ''}><span>★</span></label>
           ${row.best_url ? `<button class="btn btn-outline btn-sm" data-action="open-url" data-url="${esc(row.best_url)}">打开</button>` : ''}
         </div>
       </div>
 
       <datalist id="${collectionListId}">${raindropCollectionOptionsHtml()}</datalist>
       <div class="raindrop-form">
-        <label class="code-detail-field"><span>Link</span><input data-code-detail-field="best_url" value="${esc(row.best_url || '')}"></label>
         <label class="code-detail-field"><span>Title</span><input data-code-detail-field="raindrop_title" value="${esc(row.raindrop_title || '')}" placeholder="${esc(row.code || 'Untitled')}"></label>
+        <label class="code-detail-field"><span>Link</span><input data-code-detail-field="best_url" value="${esc(row.best_url || '')}"></label>
         <label class="code-detail-field"><span>Collection</span><input data-code-detail-field="raindrop_folder" list="${collectionListId}" value="${esc(row.raindrop_folder || '')}" placeholder="MissAV_Import"></label>
         <label class="code-detail-field"><span>Tags</span>${renderRaindropTagEditor(tagsText)}</label>
         <label class="code-detail-field"><span>Note</span><textarea data-code-detail-field="raindrop_note" spellcheck="false">${esc(row.raindrop_note || '')}</textarea></label>
-        <label class="code-detail-field"><span>Created</span><div class="raindrop-field-row"><input type="datetime-local" data-code-detail-field="raindrop_created" value="${esc(toDateTimeLocalValue(row.raindrop_created || row.created_at))}"><button type="button" class="btn btn-outline btn-sm" data-action="detail-created-now">现在</button></div></label>
+        <label class="code-detail-field"><span>Created</span><div class="raindrop-field-row"><input data-code-detail-field="raindrop_created" value="${esc(row.raindrop_created || row.created_at || '')}" placeholder="2026-07-12T10:00:00.000Z"><button type="button" class="btn btn-outline btn-sm" data-action="detail-created-now">现在</button></div></label>
       </div>
 
       <details class="raindrop-extra-panel">
         <summary>Metadata</summary>
         <label class="code-detail-field"><span>Excerpt</span><textarea data-code-detail-field="raindrop_excerpt" spellcheck="false">${esc(row.raindrop_excerpt || '')}</textarea></label>
+        <label class="code-detail-field"><span>Highlights</span><textarea data-code-detail-field="highlights" spellcheck="false">${esc(row.highlights || '')}</textarea></label>
         <label class="code-detail-field"><span>Cover</span><input data-code-detail-field="raindrop_cover" value="${esc(row.raindrop_cover || '')}"></label>
+        <label class="code-detail-field"><span>Raindrop ID</span><input data-code-detail-field="raindrop_id" value="${esc(row.raindrop_id || '')}"></label>
+        <label class="code-detail-field"><span>Last modified</span><input data-code-detail-field="last_modified" value="${esc(row.last_modified || '')}"></label>
         <div class="raindrop-inline-actions">
           <button type="button" class="btn btn-outline btn-sm" data-action="detail-cover-preview">刷新预览</button>
           <button type="button" class="btn btn-outline btn-sm" data-action="detail-cover-clear">清空封面</button>
@@ -1617,18 +2029,19 @@ function renderCodeDetailPanel(row) {
       </details>
 
       <details class="raindrop-extra-panel">
-        <summary>Local database</summary>
+        <summary>番号索引${row.code ? ` · ${esc(row.code)}` : ''}</summary>
         <label class="code-detail-field"><span>番号</span><input data-code-detail-field="code" value="${esc(row.code || '')}"></label>
-        <label class="code-detail-field"><span>状态</span><select data-code-detail-field="status">${statusOptionsHtml(row.status || 'ok')}</select></label>
+        ${row.source_code_id ? `<label class="code-detail-field"><span>状态</span><select data-code-detail-field="status">${statusOptionsHtml(row.status || 'historical')}</select></label>
         <label class="code-detail-field"><span>女优 Tag</span><textarea data-code-detail-field="actress_tags" spellcheck="false">${esc((row.actress_tags || []).join('\n'))}</textarea></label>
-        <label class="code-detail-field"><span>类型 Tag</span><textarea data-code-detail-field="genre_tags" spellcheck="false">${esc((row.genre_tags || []).join('\n'))}</textarea></label>
+        <label class="code-detail-field"><span>类型 Tag</span><textarea data-code-detail-field="genre_tags" spellcheck="false">${esc((row.genre_tags || []).join('\n'))}</textarea></label>` : '<p class="bookmark-index-note">普通网页收藏无需番号字段；填写番号并保存后会自动加入去重索引。</p>'}
       </details>
 
       <div class="code-detail-actions raindrop-save-row">
         <button class="btn btn-success btn-sm" data-action="save-code-detail" data-id="${row.id}">保存</button>
+        <button class="btn btn-secondary btn-sm" data-action="save-code-detail-next" data-id="${row.id}">保存并下一条</button>
         <button class="btn btn-outline btn-sm" data-action="detail-revert" data-id="${row.id}">撤销</button>
-        <button class="btn btn-outline btn-sm" data-action="code-fill-detail-url" data-id="${row.id}">生成链接</button>
-        <button class="btn btn-danger btn-sm" data-action="delete-code" data-id="${row.id}" data-code="${esc(row.code)}">删除</button>
+        ${row.code ? `<button class="btn btn-outline btn-sm" data-action="code-fill-detail-url" data-id="${row.id}">生成链接</button>` : ''}
+        <button class="btn btn-danger btn-sm" data-action="delete-code" data-id="${row.id}" data-code="${esc(title)}">删除</button>
       </div>
     </aside>`;
 }
@@ -1689,6 +2102,7 @@ function pad2(n) {
 
 const CODE_STATUS_OPTIONS = [
   ['ok', 'ok'],
+  ['historical', '历史收录'],
   ['need_manual_check', '需核验'],
   ['not_found', '未找到'],
   ['no_actress_found', '无女优'],
@@ -1703,6 +2117,11 @@ function statusOptionsHtml(status) {
 
 function selectedCodeIds() {
   return [...state.codeSelected].map(Number).filter(Boolean);
+}
+
+function currentCodePageRows() {
+  const start = (Math.max(1, state.codePage) - 1) * state.codePageSize;
+  return (state.libraryCodes || []).slice(start, start + state.codePageSize);
 }
 
 function selectedCodeRows() {
@@ -1734,6 +2153,7 @@ function updateCodeSelectionUi() {
   $$('[data-code-row]').forEach(row => {
     const id = Number(row.dataset.codeRow);
     row.classList.toggle('code-row-selected', state.codeSelected.has(id));
+    row.classList.toggle('is-selected', state.codeSelected.has(id));
   });
 }
 
@@ -1858,6 +2278,80 @@ function renderRunList(runs) {
   `;
 }
 
+function closeCollectionContextMenu() {
+  document.querySelector('.collection-context-menu')?.remove();
+}
+
+function collectionMenuHtml(collection, kind) {
+  const common = `
+    <button data-action="code-filter-collection" data-collection="${esc(collection)}"><span>打开</span></button>
+    <button data-action="collection-select-scope" data-collection="${esc(collection)}"><span>选择当前范围</span></button>`;
+  if (kind === 'all') {
+    return `${common}<div class="collection-menu-separator"></div><button class="danger" data-action="collection-clear-scope" data-collection="all"><span>清空全部收藏和文件夹</span></button>`;
+  }
+  if (kind === 'unfiled') {
+    return `${common}<div class="collection-menu-separator"></div><button class="danger" data-action="collection-clear-scope" data-collection="__unfiled__"><span>清空未分类收藏</span></button>`;
+  }
+  return `${common}
+    <div class="collection-menu-separator"></div>
+    <button data-action="collection-create" data-collection="${esc(collection)}"><span>新建子文件夹</span></button>
+    <button data-action="collection-rename" data-collection="${esc(collection)}"><span>重命名</span></button>
+    <button class="danger" data-action="collection-delete" data-collection="${esc(collection)}"><span>删除文件夹及内容</span></button>`;
+}
+
+function showCollectionContextMenu(collection, kind, x, y) {
+  closeCollectionContextMenu();
+  const menu = document.createElement('div');
+  menu.className = 'collection-context-menu';
+  menu.innerHTML = `<div class="collection-context-title">${esc(kind === 'all' ? '全部收藏' : kind === 'unfiled' ? '未分类' : collection)}</div>${collectionMenuHtml(collection, kind)}`;
+  menu.addEventListener('click', handleLibraryAction);
+  document.body.appendChild(menu);
+  const maxLeft = Math.max(8, window.innerWidth - 230);
+  const maxTop = Math.max(8, window.innerHeight - 250);
+  menu.style.left = `${Math.min(Math.max(8, x), maxLeft)}px`;
+  menu.style.top = `${Math.min(Math.max(8, y), maxTop)}px`;
+}
+
+function handleLibraryContextMenu(event) {
+  const target = event.target.closest('[data-collection-context]');
+  if (!target) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showCollectionContextMenu(target.dataset.collectionContext || 'all', target.dataset.collectionKind || 'folder', event.clientX, event.clientY);
+}
+
+function rowsForCollectionScope(collection) {
+  let rows = filterCodeRows(state.libraryCodeAllRows || []);
+  if (collection !== 'all') rows = rows.filter(row => isWithinSelectedCollection(row, collection));
+  return rows;
+}
+
+async function selectCollectionScope(collection) {
+  state.codeCollectionFilter = collection || 'all';
+  state.codePage = 1;
+  for (const row of rowsForCollectionScope(state.codeCollectionFilter)) state.codeSelected.add(Number(row.id));
+  await refreshLibrary();
+}
+
+async function clearVirtualCollectionScope(scope) {
+  const info = api.dbGetBookmarkScopeInfo(scope);
+  if (!info.bookmarkCount && !info.collectionCount) {
+    toast(scope === 'all' ? '收藏库和文件夹已经为空' : '未分类中没有收藏', 'info');
+    return;
+  }
+  const message = scope === 'all'
+    ? `确认清空全部 ${info.bookmarkCount} 条收藏和 ${info.collectionCount} 个文件夹？\n永久番号索引不会删除。`
+    : `确认删除未分类中的 ${info.bookmarkCount} 条收藏？\n永久番号索引不会删除。`;
+  if (!confirm(message)) return;
+  createBulkEditBackup(scope === 'all' ? 'clear_all_bookmarks' : 'clear_unfiled_bookmarks');
+  api.dbDeleteBookmarksByScope(scope);
+  state.codeSelected.clear();
+  state.selectedCodeId = null;
+  state.codeCollectionFilter = 'all';
+  state.codeCollectionCollapsed.clear();
+  await afterDbWrite(scope === 'all' ? '已清空全部收藏和文件夹' : '已清空未分类收藏');
+}
+
 async function handleLibraryAction(event) {
   const btn = event.target.closest('[data-action]');
   if (!btn) {
@@ -1866,8 +2360,137 @@ async function handleLibraryAction(event) {
     return;
   }
   const action = btn.dataset.action;
+  if (action !== 'collection-menu-open') closeCollectionContextMenu();
 
   try {
+    if (action === 'bookmark-toggle-favorite') {
+      const id = Number(btn.dataset.id);
+      api.dbUpdateBookmarkRecord(id, { favorite: btn.dataset.favorite !== '1' });
+      state.selectedCodeId = id;
+      await afterDbWrite(btn.dataset.favorite === '1' ? '已取消收藏标记' : '已添加收藏标记');
+      return;
+    }
+
+    if (action === 'maintenance-open') {
+      switchLibraryTab(btn.dataset.tab || 'maintenance');
+      return;
+    }
+
+    if (action === 'open-import-compare') {
+      switchLibraryTab('dedupe');
+      return;
+    }
+
+    if (action === 'code-filter-collection') {
+      state.codeCollectionFilter = btn.dataset.collection || 'all';
+      state.codePage = 1;
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'collection-toggle') {
+      const path = btn.dataset.collection || '';
+      if (state.codeCollectionCollapsed.has(path)) state.codeCollectionCollapsed.delete(path);
+      else state.codeCollectionCollapsed.add(path);
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'collection-menu-open') {
+      event.stopPropagation();
+      const rect = btn.getBoundingClientRect();
+      showCollectionContextMenu(btn.dataset.collection || 'all', btn.dataset.collectionKind || 'folder', rect.right + 4, rect.top);
+      return;
+    }
+
+    if (action === 'collection-select-scope') {
+      await selectCollectionScope(btn.dataset.collection || 'all');
+      return;
+    }
+
+    if (action === 'collection-clear-scope') {
+      await clearVirtualCollectionScope(btn.dataset.collection || 'all');
+      return;
+    }
+
+    if (action === 'collection-create') {
+      await createCollectionByPrompt(btn.dataset.collection || '');
+      return;
+    }
+
+    if (action === 'collection-rename') {
+      await renameCollectionByPrompt(btn.dataset.collection || '');
+      return;
+    }
+
+    if (action === 'collection-delete') {
+      await deleteCollectionByPrompt(btn.dataset.collection || '');
+      return;
+    }
+
+    if (action === 'code-page') {
+      state.codePage = Math.max(1, Number(btn.dataset.page || 1));
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'import-compare-analyze') {
+      const input = DOM.libraryContent.querySelector('[data-import-compare-input]');
+      await analyzeImportComparison(input?.value || state.importCompare.text);
+      return;
+    }
+
+    if (action === 'import-compare-files') {
+      await importComparisonFiles();
+      return;
+    }
+
+    if (action === 'import-compare-from-process') {
+      state.importCompare.text = DOM.codeInput.value || '';
+      await analyzeImportComparison(state.importCompare.text);
+      return;
+    }
+
+    if (action === 'import-compare-clear') {
+      state.importCompare = { text: '', rows: [], policy: 'new_only', filter: 'all', selected: new Set(), metadataByKey: new Map(), sourceLabel: '' };
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'import-filter') {
+      state.importCompare.filter = btn.dataset.filter || 'all';
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'import-select-new') {
+      state.importCompare.selected = new Set((state.importCompare.rows || []).filter(row => row.classification === 'new').map(row => row.key));
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'import-select-all') {
+      state.importCompare.selected = new Set((state.importCompare.rows || []).map(row => row.key));
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'import-select-none') {
+      state.importCompare.selected.clear();
+      await refreshLibrary();
+      return;
+    }
+
+    if (action === 'import-send-process') {
+      await sendImportSelectionToProcess();
+      return;
+    }
+
+    if (action === 'import-add-history') {
+      await addImportSelectionToHistory();
+      return;
+    }
+
     if (action === 'open-url') {
       await api.openExternal(btn.dataset.url);
       return;
@@ -1896,7 +2519,7 @@ async function handleLibraryAction(event) {
     }
 
     if (action === 'detail-created-now') {
-      updateDetailField(btn, 'raindrop_created', dateToLocalInput(new Date()));
+      updateDetailField(btn, 'raindrop_created', new Date().toISOString());
       return;
     }
 
@@ -1946,9 +2569,9 @@ async function handleLibraryAction(event) {
       return;
     }
 
-    if (action === 'code-select-visible') {
+    if (action === 'code-select-filtered') {
       for (const row of state.libraryCodes || []) state.codeSelected.add(Number(row.id));
-      updateCodeSelectionUi();
+      await refreshLibrary();
       return;
     }
 
@@ -2213,12 +2836,17 @@ async function handleLibraryAction(event) {
       return;
     }
 
+    if (action === 'save-code-detail-next') {
+      await saveCodeDetailAndNext(Number(btn.dataset.id));
+      return;
+    }
+
     if (action === 'code-fill-detail-url') {
       await fillDetailUrl(Number(btn.dataset.id));
       return;
     }
     if (action === 'create-code') {
-      await createCodeByPrompt();
+      await createBookmarkByPrompt();
       return;
     }
 
@@ -2228,10 +2856,10 @@ async function handleLibraryAction(event) {
     }
 
     if (action === 'delete-code') {
-      const code = btn.dataset.code || '';
-      if (!confirm(`确认删除番号「${code}」？它的女优和类型关联也会一起删除。`)) return;
-      api.dbDeleteCodeRecord(Number(btn.dataset.id));
-      await afterDbWrite('番号已删除');
+      const title = btn.dataset.code || '';
+      if (!confirm(`确认从本地收藏库删除「${title}」？番号去重索引会继续保留。`)) return;
+      api.dbDeleteBookmarkRecord(Number(btn.dataset.id));
+      await afterDbWrite('收藏已删除');
       return;
     }
 
@@ -2279,6 +2907,23 @@ async function handleLibraryAction(event) {
 }
 
 async function handleLibraryChange(event) {
+  const importPolicy = event.target.closest('[data-import-policy]');
+  if (importPolicy) {
+    state.importCompare.policy = importPolicy.value || 'new_only';
+    applyImportComparePolicy();
+    await refreshLibrary();
+    return;
+  }
+
+  const importRow = event.target.closest('[data-import-row-key]');
+  if (importRow) {
+    const key = importRow.dataset.importRowKey || '';
+    if (importRow.checked) state.importCompare.selected.add(key);
+    else state.importCompare.selected.delete(key);
+    await refreshLibrary();
+    return;
+  }
+
   const reviewQueue = event.target.closest('[data-review-queue]');
   if (reviewQueue) {
     state.reviewDeck.queue = reviewQueue.value || 'priority';
@@ -2289,6 +2934,15 @@ async function handleLibraryChange(event) {
   const codeFilter = event.target.closest('[data-code-filter-status]');
   if (codeFilter) {
     state.codeStatusFilter = codeFilter.value || 'all';
+    state.codePage = 1;
+    await refreshLibrary();
+    return;
+  }
+
+  const codeSort = event.target.closest('[data-code-sort]');
+  if (codeSort) {
+    state.codeSort = codeSort.value || 'recent';
+    state.codePage = 1;
     await refreshLibrary();
     return;
   }
@@ -2298,7 +2952,6 @@ async function handleLibraryChange(event) {
     const id = Number(rowSelect.dataset.codeSelectRow);
     if (rowSelect.checked) {
       state.codeSelected.add(id);
-      state.selectedCodeId = id;
     } else {
       state.codeSelected.delete(id);
     }
@@ -2338,6 +2991,11 @@ async function handleLibraryChange(event) {
 }
 
 function handleLibraryInput(event) {
+  const importInput = event.target.closest('[data-import-compare-input]');
+  if (importInput) {
+    state.importCompare.text = importInput.value;
+    return;
+  }
   const field = event.target.closest('[data-code-detail-field]');
   if (!field) return;
   const panel = field.closest('[data-code-detail-id]');
@@ -2345,7 +3003,20 @@ function handleLibraryInput(event) {
   updateRaindropHeaderFromPanel(panel);
 }
 
-function handleLibraryKeydown(event) {
+async function handleLibraryKeydown(event) {
+  if (event.ctrlKey && event.key.toLowerCase() === 's') {
+    const panel = event.target.closest('[data-code-detail-id]');
+    if (panel) {
+      event.preventDefault();
+      await saveCodeDetail(Number(panel.dataset.codeDetailId));
+      return;
+    }
+  }
+  if (event.ctrlKey && event.key === 'Enter' && event.target.closest('[data-import-compare-input]')) {
+    event.preventDefault();
+    await analyzeImportComparison(event.target.value);
+    return;
+  }
   const tagInput = event.target.closest('[data-rd-tag-input]');
   if (!tagInput) return;
   if (event.key === 'Enter' || event.key === ',' || event.key === '，') {
@@ -2457,6 +3128,114 @@ async function createCodeByPrompt() {
   await afterDbWrite('番号已新增');
 }
 
+async function createBookmarkByPrompt() {
+  const url = prompt('Link（可留空）：', '');
+  if (url === null) return;
+  const title = prompt('Title：', '');
+  if (title === null) return;
+  if (!url.trim() && !title.trim()) throw new Error('Title 和 Link 至少填写一项');
+  const folder = prompt('Collection：', 'MissAV_Import');
+  if (folder === null) return;
+  const tags = prompt('Tags，多个用逗号分隔：', '');
+  if (tags === null) return;
+  const code = api.parseCodeList(`${url}\n${title}`)[0] || '';
+  const result = api.dbCreateBookmarkRecord({ url, title, folder, tags, code, created: new Date().toISOString() });
+  state.selectedCodeId = result.id || null;
+  await afterDbWrite('收藏已新增');
+}
+
+function normalizeCollectionInput(value) {
+  return String(value || '').replace(/\\/g, '/').split('/').map(part => part.trim()).filter(Boolean).join(' / ');
+}
+
+function showTextInputDialog({ title, label, value = '', placeholder = '', submitLabel = '确定' }) {
+  return new Promise(resolve => {
+    document.querySelector('.app-input-dialog-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'app-input-dialog-overlay';
+    overlay.innerHTML = `<form class="app-input-dialog" role="dialog" aria-modal="true">
+      <div class="app-input-dialog-head"><h3>${esc(title)}</h3><button type="button" data-dialog-cancel aria-label="关闭">×</button></div>
+      <label><span>${esc(label)}</span><input value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off"></label>
+      <div class="app-input-dialog-actions"><button type="button" class="btn btn-outline btn-sm" data-dialog-cancel>取消</button><button type="submit" class="btn btn-success btn-sm">${esc(submitLabel)}</button></div>
+    </form>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('input');
+    const finish = result => { overlay.remove(); resolve(result); };
+    overlay.querySelectorAll('[data-dialog-cancel]').forEach(button => button.addEventListener('click', () => finish(null)));
+    overlay.addEventListener('click', event => { if (event.target === overlay) finish(null); });
+    overlay.querySelector('form').addEventListener('submit', event => { event.preventDefault(); finish(input.value); });
+    overlay.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); finish(null); } });
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+  });
+}
+
+function collectionParentPath(value) {
+  const parts = collectionPathParts(value);
+  return parts.slice(0, -1).join(' / ');
+}
+
+function replaceCollectionPath(value, source, target) {
+  if (value === source) return target;
+  if (String(value || '').startsWith(`${source} / `)) return `${target}${String(value).slice(source.length)}`;
+  return value;
+}
+
+function updateCollectionPathState(source, target) {
+  state.codeCollectionFilter = replaceCollectionPath(state.codeCollectionFilter, source, target);
+  state.codeCollectionCollapsed = new Set([...state.codeCollectionCollapsed].map(path => replaceCollectionPath(path, source, target)));
+}
+
+async function createCollectionByPrompt(parentPath) {
+  const parent = normalizeCollectionInput(parentPath);
+  const name = await showTextInputDialog({
+    title: parent ? '新建子文件夹' : '新建 Collection',
+    label: parent ? `父文件夹：${parent}` : '文件夹名称',
+    placeholder: parent ? '输入子文件夹名称' : '例如：待读 / 稍后整理',
+    submitLabel: '新建',
+  });
+  if (name === null) return;
+  const child = normalizeCollectionInput(name);
+  if (!child) throw new Error('请输入文件夹名称');
+  const fullPath = parent ? `${parent} / ${child}` : child;
+  const result = api.dbCreateBookmarkCollection(fullPath);
+  state.codeCollectionFilter = result.path;
+  state.codePage = 1;
+  await afterDbWrite(`文件夹已新建：${result.path}`);
+}
+
+async function renameCollectionByPrompt(path) {
+  const source = normalizeCollectionInput(path);
+  if (!source) throw new Error('请选择一个文件夹');
+  const name = await showTextInputDialog({
+    title: '重命名 Collection',
+    label: `当前位置：${source}`,
+    value: collectionPathParts(source).at(-1) || '',
+    submitLabel: '保存',
+  });
+  if (name === null) return;
+  const nextName = normalizeCollectionInput(name);
+  if (!nextName) throw new Error('请输入文件夹名称');
+  const parent = collectionParentPath(source);
+  const target = parent ? `${parent} / ${nextName}` : nextName;
+  const result = api.dbRenameBookmarkCollection(source, target);
+  updateCollectionPathState(source, result.path);
+  await afterDbWrite(`已重命名 ${result.renamedCollections} 个文件夹，移动 ${result.movedBookmarks} 条收藏`);
+}
+
+async function deleteCollectionByPrompt(path) {
+  const source = normalizeCollectionInput(path);
+  if (!source) throw new Error('请选择一个文件夹');
+  const info = api.dbGetBookmarkCollectionInfo(source);
+  const message = `确认删除文件夹「${source}」及其 ${info.childCount} 个子文件夹？\n其中 ${info.bookmarkCount} 条收藏会被删除；番号历史索引会继续保留。`;
+  if (!confirm(message)) return;
+  createBulkEditBackup('delete_collection');
+  api.dbDeleteBookmarkCollection(source);
+  if (state.codeCollectionFilter === source || state.codeCollectionFilter.startsWith(`${source} / `)) state.codeCollectionFilter = 'all';
+  state.codeSelected.clear();
+  state.selectedCodeId = null;
+  await afterDbWrite(`已删除文件夹及 ${info.bookmarkCount} 条收藏`);
+}
+
 async function editCodeByPrompt(id) {
   const row = (state.libraryCodes || []).find(item => Number(item.id) === Number(id));
   if (!row) { toast('没有找到该番号记录', 'error'); return; }
@@ -2538,10 +3317,10 @@ async function saveCodeDetail(id) {
   const panel = DOM.libraryContent.querySelector(`[data-code-detail-id="${id}"]`);
   if (!panel) throw new Error('没有找到详情面板');
   const get = name => panel.querySelector(`[data-code-detail-field="${name}"]`)?.value || '';
-  api.dbUpdateCodeRecord(id, {
+  const favorite = panel.querySelector('[data-code-detail-field="favorite"]')?.checked === true;
+  const result = api.dbUpdateBookmarkRecord(id, {
     code: get('code'),
     best_url: get('best_url'),
-    status: get('status'),
     raindrop_title: get('raindrop_title'),
     raindrop_excerpt: get('raindrop_excerpt'),
     raindrop_note: get('raindrop_note'),
@@ -2549,30 +3328,59 @@ async function saveCodeDetail(id) {
     raindrop_tags: get('raindrop_tags'),
     raindrop_created: get('raindrop_created'),
     raindrop_cover: get('raindrop_cover'),
+    highlights: get('highlights'),
+    favorite,
+    raindrop_id: get('raindrop_id'),
+    last_modified: get('last_modified'),
   });
-  api.dbSetCodeActressTags(id, get('actress_tags'));
-  api.dbSetCodeGenreTags(id, get('genre_tags'));
+  const sourceCodeId = result?.sourceCodeId;
+  if (sourceCodeId) {
+    api.dbUpdateCodeRecord(sourceCodeId, {
+      code: get('code'), best_url: get('best_url'), status: get('status') || 'historical',
+      raindrop_title: get('raindrop_title'), raindrop_excerpt: get('raindrop_excerpt'),
+      raindrop_note: get('raindrop_note'), raindrop_folder: get('raindrop_folder'),
+      raindrop_tags: get('raindrop_tags'), raindrop_created: get('raindrop_created'),
+      raindrop_cover: get('raindrop_cover'),
+    });
+    api.dbSetCodeActressTags(sourceCodeId, get('actress_tags'));
+    api.dbSetCodeGenreTags(sourceCodeId, get('genre_tags'));
+  }
   state.selectedCodeId = id;
   await afterDbWrite('详情已保存');
 }
 
+async function saveCodeDetailAndNext(id) {
+  const orderedIds = (state.libraryCodes || []).map(row => Number(row.id));
+  const index = orderedIds.indexOf(Number(id));
+  const nextId = index >= 0 ? orderedIds[index + 1] : null;
+  await saveCodeDetail(id);
+  if (!nextId) {
+    toast('已保存，当前已是最后一条', 'success');
+    return;
+  }
+  state.selectedCodeId = nextId;
+  const nextIndex = (state.libraryCodes || []).findIndex(row => Number(row.id) === Number(nextId));
+  if (nextIndex >= 0) state.codePage = Math.floor(nextIndex / state.codePageSize) + 1;
+  await refreshLibrary();
+}
+
 async function fillDetailUrl(id) {
   const row = (state.libraryCodeAllRows || []).find(item => Number(item.id) === Number(id));
-  if (!row) throw new Error('没有找到番号记录');
+  if (!row || !row.code) throw new Error('该收藏没有可生成链接的番号');
   const urls = api.candidateUrls(row.code) || [];
   const url = urls[0] || `https://missav.ai/cn/${String(row.code || '').toLowerCase()}`;
   const panel = DOM.libraryContent.querySelector(`[data-code-detail-id="${id}"]`);
   const input = panel?.querySelector('[data-code-detail-field="best_url"]');
   if (input) input.value = url;
-  api.dbUpdateCodeRecord(id, { best_url: url });
+  api.dbUpdateBookmarkRecord(id, { best_url: url });
   state.selectedCodeId = id;
   await afterDbWrite('链接已生成');
 }
 
 async function copySelectedCodeList() {
   const rows = selectedCodeRows();
-  if (!rows.length) throw new Error('请先勾选要复制的番号');
-  const text = rows.map(row => row.code).join('\n');
+  if (!rows.length) throw new Error('请先勾选要复制的收藏');
+  const text = rows.map(row => row.code || row.best_url).filter(Boolean).join('\n');
   if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
   else {
     const ta = document.createElement('textarea');
@@ -2582,7 +3390,7 @@ async function copySelectedCodeList() {
     document.execCommand('copy');
     ta.remove();
   }
-  toast('已复制 ' + rows.length + ' 个番号', 'success');
+  toast('已复制 ' + rows.length + ' 条记录', 'success');
 }
 
 function createBulkEditBackup(label) {
@@ -2620,7 +3428,7 @@ async function bulkApplyRaindropCollection() {
   if (!value) throw new Error('请输入 Collection');
   if (!confirm(`把 ${rows.length} 条选中记录的 Collection 设置为「${value}」？`)) return;
   createBulkEditBackup('bulk_collection');
-  for (const row of rows) api.dbUpdateCodeRecord(row.id, { raindrop_folder: value });
+  for (const row of rows) api.dbUpdateBookmarkRecord(row.id, { raindrop_folder: value });
   await afterDbWrite(`已批量设置 Collection：${rows.length} 条`);
 }
 
@@ -2635,7 +3443,7 @@ async function bulkApplyRaindropTags() {
   for (const row of rows) {
     const current = mode === 'replace' ? [] : raindropExplicitOrAutoTags(row);
     const next = mode === 'remove' ? removeTagList(current, tags) : mergeTagLists(current, tags);
-    api.dbUpdateCodeRecord(row.id, { raindrop_tags: next.join('\n') });
+    api.dbUpdateBookmarkRecord(row.id, { raindrop_tags: next.join('\n') });
   }
   await afterDbWrite(`已批量${label} Tags：${rows.length} 条`);
 }
@@ -2644,7 +3452,7 @@ async function bulkWriteAutoRaindropTags() {
   const rows = selectedCodeRowsForBulk();
   if (!confirm(`用自动识别的女优/类型 Tag 覆盖 ${rows.length} 条选中记录的 Raindrop Tags？`)) return;
   createBulkEditBackup('bulk_auto_tags');
-  for (const row of rows) api.dbUpdateCodeRecord(row.id, { raindrop_tags: autoRaindropTagsForRow(row).join('\n') });
+  for (const row of rows) api.dbUpdateBookmarkRecord(row.id, { raindrop_tags: autoRaindropTagsForRow(row).join('\n') });
   await afterDbWrite(`已写入自动 Tags：${rows.length} 条`);
 }
 
@@ -2659,7 +3467,7 @@ async function bulkApplyRaindropCreated() {
   if (!value) throw new Error('请选择 Created 时间');
   if (!confirm(`把 ${rows.length} 条选中记录的 Created 设置为 ${value}？`)) return;
   createBulkEditBackup('bulk_created');
-  for (const row of rows) api.dbUpdateCodeRecord(row.id, { raindrop_created: value });
+  for (const row of rows) api.dbUpdateBookmarkRecord(row.id, { raindrop_created: value });
   await afterDbWrite(`已批量设置 Created：${rows.length} 条`);
 }
 
@@ -2672,8 +3480,10 @@ async function bulkApplyRaindropTitle() {
   for (const row of rows) {
     if (mode === 'fill_empty_code' && String(row.raindrop_title || '').trim()) continue;
     const firstActress = (row.actress_tags || []).find(Boolean) || '';
-    const title = mode === 'code_actress' && firstActress ? `${row.code} ${firstActress}` : row.code;
-    api.dbUpdateCodeRecord(row.id, { raindrop_title: title });
+    const fallback = row.code || row.best_url || row.raindrop_title;
+    const title = mode === 'code_actress' && row.code && firstActress ? `${row.code} ${firstActress}` : fallback;
+    if (!title) continue;
+    api.dbUpdateBookmarkRecord(row.id, { raindrop_title: title });
     changed++;
   }
   await afterDbWrite(`已批量更新 Title：${changed} 条`);
@@ -2687,7 +3497,7 @@ async function bulkClearRaindropField() {
   const label = field.replace('raindrop_', '');
   if (!confirm(`清空 ${rows.length} 条选中记录的 ${label}？`)) return;
   createBulkEditBackup('bulk_clear_' + label);
-  for (const row of rows) api.dbUpdateCodeRecord(row.id, { [field]: '' });
+  for (const row of rows) api.dbUpdateBookmarkRecord(row.id, { [field]: '' });
   await afterDbWrite(`已清空 ${label}：${rows.length} 条`);
 }
 
@@ -2747,12 +3557,12 @@ async function bulkNormalizeCodes() {
 
 async function bulkDeleteCodes() {
   const ids = ensureSelectedCodes();
-  if (!confirm(`确认删除选中的 ${ids.length} 条番号？它们的女优和类型关联也会一起删除。`)) return;
+  if (!confirm(`确认从本地收藏库删除选中的 ${ids.length} 条记录？番号去重索引会继续保留。`)) return;
   createBulkEditBackup('bulk_delete_codes');
-  for (const id of ids) api.dbDeleteCodeRecord(id);
+  for (const id of ids) api.dbDeleteBookmarkRecord(id);
   state.codeSelected.clear();
   state.selectedCodeId = null;
-  await afterDbWrite('已批量删除番号');
+  await afterDbWrite('已批量删除收藏');
 }
 async function addRawRowByPrompt() {
   const data = state.rawDbData || api.dbGetRawTableRows(state.rawDbTable, { limit: 1 });
@@ -2789,15 +3599,15 @@ async function exportLibraryRaindrop(type) {
       if (DOM.outputDirPathMirror) DOM.outputDirPathMirror.textContent = shortenPath(dir);
       updateUI();
     }
-    const rows = api.dbGetRaindropImportRows({ includeNoUrl: false });
+    const rows = api.dbExportRaindropRecords();
     if (!rows.length) {
-      toast('没有可导出的有效链接', 'info');
+      toast('本地收藏库为空', 'info');
       return;
     }
     const prefix = api.timePrefixToMinute();
     const isHtml = type === 'html';
-    const filePath = `${dir}\\${prefix}_missav_raindrop_library.${isHtml ? 'html' : 'csv'}`;
-    const content = isHtml ? api.generateRaindropHTML(rows) : '\ufeff' + api.generateRaindropCSV(rows);
+    const filePath = `${dir}\\${prefix}_raindrop_official_backup.${isHtml ? 'html' : 'csv'}`;
+    const content = isHtml ? api.generateOfficialRaindropHTML(rows) : '\ufeff' + api.generateOfficialRaindropCSV(rows);
     await api.writeFile(filePath, content, 'utf-8');
     toast(`已导出：${filePath}`, 'success');
   } catch (err) {
@@ -2806,23 +3616,7 @@ async function exportLibraryRaindrop(type) {
 }
 
 async function exportDbCSVFromLibrary() {
-  try {
-    let dir = state.outputDirPath;
-    if (!dir) {
-      dir = await api.openDirectory({ title: '选择导出目录' });
-      if (!dir) return;
-      state.outputDirPath = dir;
-      DOM.outputDirPath.textContent = shortenPath(dir);
-      if (DOM.outputDirPathMirror) DOM.outputDirPathMirror.textContent = shortenPath(dir);
-      updateUI();
-    }
-    const prefix = api.timePrefixToMinute();
-    const filePath = `${dir}\\${prefix}_女优tag合集.csv`;
-    await api.writeFile(filePath, '\ufeff' + api.dbExportCSV());
-    toast(`已导出：${filePath}`, 'success');
-  } catch (err) {
-    toast(`导出失败: ${err.message}`, 'error');
-  }
+  await exportLibraryRaindrop('csv');
 }
 
 // ─── CSV 工作台 ──────────────────────────────────────
@@ -2864,6 +3658,9 @@ async function openCsvFile(filePath) {
     state.csv.headers = parsed.headers;
     state.csv.rows = parsed.rows;
     state.csv.selectedRows = new Set();
+    state.csv.focusedRow = parsed.rows.length ? 0 : null;
+    const headerSet = new Set(parsed.headers.map(header => String(header || '').trim().toLowerCase()));
+    state.csv.isRaindrop = ['id', 'title', 'note', 'excerpt', 'url', 'folder', 'tags', 'created', 'cover', 'highlights', 'favorite'].every(header => headerSet.has(header));
     state.csv.dirty = false;
     analyzeCsv();
     addCsvRecent(selected);
@@ -2905,6 +3702,7 @@ function renderCsvMeta() {
   if (DOM.btnCsvSave) DOM.btnCsvSave.disabled = !hasData || !state.csv.dirty || !state.csv.filePath;
   if (DOM.btnCsvDeleteRows) DOM.btnCsvDeleteRows.disabled = !hasData || state.csv.selectedRows.size === 0;
 
+  renderCsvDetailEditor();
   renderCsvIssues();
 }
 
@@ -2919,6 +3717,7 @@ function renderCsvTable() {
   }
 
   const visibleRows = getFilteredCsvRowIndexes();
+  const visibleColumns = getCsvVisibleColumnIndexes();
   const issueRows = new Set((state.csv.analysis?.issues || []).map(i => i.row));
   const renderLimit = 1000;
   const rowsToRender = visibleRows.slice(0, renderLimit);
@@ -2927,17 +3726,18 @@ function renderCsvTable() {
   DOM.csvTableHead.innerHTML = `<tr>
     <th class="csv-check"><input type="checkbox" data-csv-select-visible="1" ${allVisibleSelected ? 'checked' : ''}></th>
     <th class="csv-rownum">#</th>
-    ${state.csv.headers.map((h, col) => `<th><input class="csv-header-input" data-csv-header-col="${col}" value="${esc(h)}" title="列名"></th>`).join('')}
+    ${visibleColumns.map(col => `<th><input class="csv-header-input" data-csv-header-col="${col}" value="${esc(state.csv.headers[col])}" title="列名"></th>`).join('')}
   </tr>`;
 
   DOM.csvTableBody.innerHTML = rowsToRender.map(rowIndex => {
     const row = state.csv.rows[rowIndex];
     const selected = state.csv.selectedRows.has(rowIndex);
-    const cls = issueRows.has(rowIndex) ? ' class="csv-row-issue"' : '';
+    const classes = [issueRows.has(rowIndex) ? 'csv-row-issue' : '', Number(state.csv.focusedRow) === rowIndex ? 'csv-row-focused' : ''].filter(Boolean).join(' ');
+    const cls = classes ? ` class="${classes}"` : '';
     return `<tr${cls} data-csv-row-line="${rowIndex}">
       <td class="csv-check"><input type="checkbox" data-csv-select-row="${rowIndex}" ${selected ? 'checked' : ''}></td>
       <td class="csv-rownum">${rowIndex + 1}</td>
-      ${state.csv.headers.map((_, col) => `<td><input class="csv-cell-input" data-csv-row="${rowIndex}" data-csv-col="${col}" value="${esc(row[col] ?? '')}"></td>`).join('')}
+      ${visibleColumns.map(col => `<td><input class="csv-cell-input" data-csv-row="${rowIndex}" data-csv-col="${col}" value="${esc(row[col] ?? '')}"></td>`).join('')}
     </tr>`;
   }).join('');
 
@@ -2945,19 +3745,79 @@ function renderCsvTable() {
   DOM.csvFooter.textContent = `显示 ${rowsToRender.length} / ${visibleRows.length} 行，总计 ${state.csv.rows.length} 行${more}`;
 }
 
+function getCsvVisibleColumnIndexes() {
+  if (!state.csv.isRaindrop) return state.csv.headers.map((_, index) => index);
+  const preferred = new Set(['title', 'url', 'folder', 'tags', 'created', 'favorite']);
+  return state.csv.headers.map((header, index) => ({ header: String(header || '').trim().toLowerCase(), index })).filter(item => preferred.has(item.header)).map(item => item.index);
+}
+
+function renderCsvDetailEditor() {
+  if (!DOM.csvDetailEditor) return;
+  const rowIndex = Number(state.csv.focusedRow);
+  const row = Number.isInteger(rowIndex) ? state.csv.rows[rowIndex] : null;
+  if (!state.csv.isRaindrop || !row) {
+    DOM.csvDetailEditor.innerHTML = `<div class="library-empty">${state.csv.isRaindrop ? '选择一行后编辑完整 Raindrop 字段' : 'Raindrop 官方 CSV 会在这里显示完整记录详情'}</div>`;
+    return;
+  }
+  const fields = ['id', 'title', 'url', 'folder', 'tags', 'note', 'excerpt', 'created', 'cover', 'highlights', 'favorite'];
+  const indexByName = new Map(state.csv.headers.map((header, index) => [String(header || '').trim().toLowerCase(), index]));
+  DOM.csvDetailEditor.innerHTML = `<div class="csv-detail-head"><strong>第 ${rowIndex + 1} 行</strong><span>完整官方字段</span></div><div class="csv-detail-fields">${fields.map(field => {
+    const col = indexByName.get(field);
+    if (col === undefined) return '';
+    const value = row[col] ?? '';
+    if (['note', 'excerpt', 'highlights'].includes(field)) return `<label><span>${field}</span><textarea data-csv-detail-col="${col}">${esc(value)}</textarea></label>`;
+    if (field === 'favorite') return `<label><span>favorite</span><select data-csv-detail-col="${col}"><option value="false" ${String(value).toLowerCase() !== 'true' ? 'selected' : ''}>false</option><option value="true" ${String(value).toLowerCase() === 'true' ? 'selected' : ''}>true</option></select></label>`;
+    return `<label><span>${field}</span><input data-csv-detail-col="${col}" value="${esc(value)}"></label>`;
+  }).join('')}</div>`;
+}
+
+function handleCsvTableClick(event) {
+  if (event.target.closest('input, select, textarea, button')) return;
+  const row = event.target.closest('[data-csv-row-line]');
+  if (!row) return;
+  state.csv.focusedRow = Number(row.dataset.csvRowLine);
+  renderCsvTable();
+}
+
+function handleCsvTableFocusIn(event) {
+  const field = event.target.closest('[data-csv-row][data-csv-col]');
+  if (!field) return;
+  const rowIndex = Number(field.dataset.csvRow);
+  if (!Number.isInteger(rowIndex) || !state.csv.rows[rowIndex] || Number(state.csv.focusedRow) === rowIndex) return;
+  state.csv.focusedRow = rowIndex;
+  DOM.csvTableBody?.querySelectorAll('[data-csv-row-line]').forEach(row => {
+    row.classList.toggle('csv-row-focused', Number(row.dataset.csvRowLine) === rowIndex);
+  });
+  renderCsvDetailEditor();
+}
+
+function handleCsvDetailInput(event) {
+  const field = event.target.closest('[data-csv-detail-col]');
+  const rowIndex = Number(state.csv.focusedRow);
+  const col = Number(field?.dataset.csvDetailCol);
+  if (!field || !Number.isInteger(rowIndex) || !state.csv.rows[rowIndex] || !Number.isInteger(col)) return;
+  state.csv.rows[rowIndex][col] = field.value;
+  markCsvDirty(false);
+  const tableCell = DOM.csvTableBody?.querySelector(`[data-csv-row="${rowIndex}"][data-csv-col="${col}"]`);
+  if (tableCell) tableCell.value = field.value;
+}
+
 function getFilteredCsvRowIndexes() {
   const q = (DOM.csvSearch?.value || '').trim().toLowerCase();
   const filter = DOM.csvStatusFilter?.value || 'all';
   const issueRows = new Set((state.csv.analysis?.issues || []).map(i => i.row));
+  const favoriteCol = state.csv.headers.findIndex(header => String(header || '').trim().toLowerCase() === 'favorite');
+  const highlightsCol = state.csv.headers.findIndex(header => String(header || '').trim().toLowerCase() === 'highlights');
+  const urlCol = state.csv.headers.findIndex(header => String(header || '').trim().toLowerCase() === 'url');
   const result = [];
 
   for (let i = 0; i < state.csv.rows.length; i++) {
     const text = state.csv.rows[i].map(v => String(v || '')).join(' | ');
     const lower = text.toLowerCase();
     if (q && !lower.includes(q)) continue;
-    if (filter === 'unknown' && !text.includes('#未知女优')) continue;
-    if (filter === 'need_check' && !/需要查找|待核验|可点待核验/.test(text)) continue;
-    if (filter === 'not_found' && !/未找到|not_found/i.test(text)) continue;
+    if (filter === 'favorite' && (favoriteCol < 0 || !['true', '1'].includes(String(state.csv.rows[i][favoriteCol] || '').trim().toLowerCase()))) continue;
+    if (filter === 'highlights' && (highlightsCol < 0 || !String(state.csv.rows[i][highlightsCol] || '').trim())) continue;
+    if (filter === 'missing_url' && (urlCol < 0 || String(state.csv.rows[i][urlCol] || '').trim())) continue;
     if (filter === 'issue' && !issueRows.has(i)) continue;
     result.push(i);
   }
@@ -2979,7 +3839,11 @@ function handleCsvTableInput(event) {
   const col = Number(cell.dataset.csvCol);
   if (!state.csv.rows[row]) return;
   state.csv.rows[row][col] = cell.value;
-  markCsvDirty();
+  markCsvDirty(false);
+  if (Number(state.csv.focusedRow) === row) {
+    const detailField = DOM.csvDetailEditor?.querySelector(`[data-csv-detail-col="${col}"]`);
+    if (detailField) detailField.value = cell.value;
+  }
 }
 
 function handleCsvTableChange(event) {
@@ -2997,6 +3861,7 @@ function handleCsvTableChange(event) {
   const selectRow = event.target.closest('[data-csv-select-row]');
   if (selectRow) {
     const rowIndex = Number(selectRow.dataset.csvSelectRow);
+    state.csv.focusedRow = rowIndex;
     if (selectRow.checked) state.csv.selectedRows.add(rowIndex);
     else state.csv.selectedRows.delete(rowIndex);
     renderCsvMeta();
@@ -3009,10 +3874,18 @@ function handleCsvTableChange(event) {
   }
 }
 
-function markCsvDirty() {
+function markCsvDirty(renderMeta = true) {
   if (!state.csv.headers.length) return;
   state.csv.dirty = true;
-  renderCsvMeta();
+  if (renderMeta) {
+    renderCsvMeta();
+    return;
+  }
+  if (DOM.csvDirtyBadge) {
+    DOM.csvDirtyBadge.textContent = '未保存';
+    DOM.csvDirtyBadge.classList.add('csv-dirty');
+  }
+  if (DOM.btnCsvSave) DOM.btnCsvSave.disabled = !state.csv.filePath;
 }
 
 async function saveCsvFile() {
@@ -3172,12 +4045,17 @@ async function handleCsvRecentClick(event) {
 
 async function importWorkbenchCsvToDb() {
   if (!state.csv.headers.length) return;
-  if (!confirm('把当前 CSV 导入 SQLite 本地库？请确认它是女优 Tag 合集格式。')) return;
+  const kind = state.csv.isRaindrop ? 'Raindrop 官方收藏' : '旧女优 Tag 合集';
+  if (!confirm(`把当前 ${kind} 导入本地收藏数据库？`)) return;
   try {
-    api.dbImportCSV(api.csvStringify(state.csv.headers, state.csv.rows));
+    api.dbCreateBackup('csv_workbench_import', 'import');
+    const text = api.csvStringify(state.csv.headers, state.csv.rows);
+    const result = state.csv.isRaindrop
+      ? api.dbImportRaindropRecords(api.parseRaindropCSV(text), { mode: 'merge' })
+      : api.dbImportCSV(text);
     refreshDbSummary();
     switchDataMode('library');
-    toast('已导入本地库', 'success');
+    toast(state.csv.isRaindrop ? `已导入：新增 ${result.imported}，更新 ${result.updated}` : `已导入旧合集关系 ${result.imported || 0} 条`, 'success');
   } catch (err) {
     toast('导入失败: ' + err.message, 'error');
   }

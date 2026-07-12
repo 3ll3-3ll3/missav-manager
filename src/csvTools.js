@@ -58,13 +58,58 @@ function parseCSV(text) {
 
   while (headers.length < colCount) headers.push(`Column${headers.length + 1}`);
 
+  const rowLengths = records.map(r => r.length);
   const rows = records.map(r => {
     const next = r.slice(0, colCount);
     while (next.length < colCount) next.push('');
     return next;
   });
 
-  return { headers, rows };
+  return { headers, rows: repairRaindropLineBreaks(headers, rows, rowLengths) };
+}
+
+function repairRaindropLineBreaks(headers, rows, rowLengths) {
+  const official = ['id', 'title', 'note', 'excerpt', 'url', 'folder', 'tags', 'created', 'cover', 'highlights', 'favorite'];
+  if (headers.length !== official.length || official.some((name, index) => String(headers[index] || '').toLowerCase() !== name)) return rows;
+
+  const repaired = [];
+  let current = null;
+  let continuationColumn = null;
+
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const rawLength = rowLengths[index] || 0;
+    if (/^\d+$/.test(String(row[0] || '').trim())) {
+      current = row.slice();
+      repaired.push(current);
+      continuationColumn = rawLength > 0 && rawLength < official.length ? rawLength - 1 : null;
+      continue;
+    }
+
+    if (!current || continuationColumn === null) {
+      if (row.some(value => String(value || '').trim())) repaired.push(row);
+      continue;
+    }
+
+    const sourceUrl = row.findIndex(value => /^https?:\/\//i.test(String(value || '').trim()));
+    if (sourceUrl >= 0 && continuationColumn < 4 && !String(current[4] || '').trim()) {
+      appendCsvContinuation(current, continuationColumn, row.slice(0, sourceUrl).join(','));
+      for (let source = sourceUrl, target = 4; source < rawLength && target < official.length; source++, target++) {
+        current[target] = row[source] ?? '';
+      }
+      continuationColumn = null;
+      continue;
+    }
+
+    appendCsvContinuation(current, continuationColumn, row.slice(0, rawLength).join(','));
+  }
+
+  return repaired;
+}
+
+function appendCsvContinuation(row, column, value) {
+  const current = String(row[column] || '');
+  row[column] = current ? `${current}\n${value}` : String(value || '');
 }
 
 function uniqueHeaders(headers) {
@@ -119,8 +164,9 @@ function analyzeCSV(headers, rows) {
         }
         const key = codeComparableKey(rawCode);
         if (seenCodes.has(key)) {
-          issues.push({ type: 'duplicate_code', severity: 'warning', row: rowIndex, column: codeCol, message: `疑似重复番号：${rawCode}` });
-          issues.push({ type: 'duplicate_code', severity: 'warning', row: seenCodes.get(key), column: codeCol, message: `疑似重复番号：${rawCode}` });
+          const message = `疑似重复番号：${normalized}`;
+          issues.push({ type: 'duplicate_code', severity: 'warning', row: rowIndex, column: codeCol, message });
+          issues.push({ type: 'duplicate_code', severity: 'warning', row: seenCodes.get(key), column: codeCol, message });
         } else {
           seenCodes.set(key, rowIndex);
         }
@@ -135,6 +181,7 @@ function analyzeCSV(headers, rows) {
     }
   });
 
+  const uniqueIssues = dedupeIssues(issues);
   return {
     rowCount: rows.length,
     columnCount: headers.length,
@@ -144,8 +191,8 @@ function analyzeCSV(headers, rows) {
     unknownActress,
     needCheck,
     notFound,
-    issueCount: issues.length,
-    issues: dedupeIssues(issues),
+    issueCount: uniqueIssues.length,
+    issues: uniqueIssues,
   };
 }
 

@@ -13,9 +13,10 @@
 const initSqlJs = require('sql.js');
 const path = require('path');
 const fs = require('fs');
-const { normalizeCode, codeComparableKey } = require('./parser');
+const { normalizeCode, codeComparableKey, parseCodeList } = require('./parser');
 
 const DB_FILENAME = 'missav_data.db';
+const REQUIRED_BACKUP_TABLES = ['actress_tags', 'codes', 'actress_code_map'];
 
 let DB = null;
 let SQL = null;
@@ -26,14 +27,19 @@ async function init(dbDir) {
   SQL = await initSqlJs();
   dbPath = path.join(dbDir, DB_FILENAME);
 
+  let hadBookmarkTable = false;
   if (fs.existsSync(dbPath)) {
     const buffer = fs.readFileSync(dbPath);
     DB = new SQL.Database(buffer);
+    hadBookmarkTable = Boolean(queryOne(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bookmarks'`));
   } else {
     DB = new SQL.Database();
     createTables();
   }
+  backupBeforeBookmarkMigration();
   migrateSchema();
+  if (!hadBookmarkTable) migrateLegacyCodesToBookmarks();
+  syncBookmarkCollectionPathsNoSave();
   save();
   return { loaded: true, path: dbPath };
 }
@@ -78,6 +84,9 @@ function createTables() {
     skipped_codes INTEGER DEFAULT 0, not_found_codes INTEGER DEFAULT 0,
     duplicate_codes INTEGER DEFAULT 0)`);
 
+  createBookmarkTable();
+  createBookmarkCollectionTable();
+
   DB.run(`CREATE INDEX IF NOT EXISTS idx_codes_code ON codes(code)`);
   DB.run(`CREATE INDEX IF NOT EXISTS idx_actress_tags_name ON actress_tags(tag_name)`);
   DB.run(`CREATE INDEX IF NOT EXISTS idx_acm_a ON actress_code_map(actress_id)`);
@@ -92,6 +101,221 @@ function migrateSchema() {
   ensureColumn('codes', 'raindrop_tags', "TEXT DEFAULT ''");
   ensureColumn('codes', 'raindrop_created', "TEXT DEFAULT ''");
   ensureColumn('codes', 'raindrop_cover', "TEXT DEFAULT ''");
+  createBookmarkTable();
+  createBookmarkCollectionTable();
+}
+
+function backupBeforeBookmarkMigration() {
+  if (!fs.existsSync(dbPath)) return;
+  const hasBookmarks = queryOne(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bookmarks'`);
+  if (hasBookmarks) return;
+  const dir = path.join(path.dirname(dbPath), 'backups');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const target = path.join(dir, `missav_data_${stamp}_pre_raindrop_migration.db`);
+  if (!fs.existsSync(target)) fs.copyFileSync(dbPath, target);
+}
+
+function createBookmarkTable() {
+  DB.run(`CREATE TABLE IF NOT EXISTS bookmarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    raindrop_id TEXT DEFAULT '',
+    url TEXT DEFAULT '', title TEXT DEFAULT '', note TEXT DEFAULT '', excerpt TEXT DEFAULT '',
+    folder TEXT DEFAULT '', tags TEXT DEFAULT '', created TEXT DEFAULT '', cover TEXT DEFAULT '',
+    highlights TEXT DEFAULT '', favorite INTEGER DEFAULT 0, last_modified TEXT DEFAULT '',
+    code TEXT DEFAULT '', source_code_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  DB.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bookmarks_raindrop_id ON bookmarks(raindrop_id) WHERE TRIM(raindrop_id) <> ''`);
+  DB.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_url ON bookmarks(url)`);
+  DB.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_code ON bookmarks(code)`);
+  DB.run(`DROP INDEX IF EXISTS idx_bookmarks_source_code`);
+  DB.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_source_code ON bookmarks(source_code_id)`);
+}
+
+function createBookmarkCollectionTable() {
+  DB.run(`CREATE TABLE IF NOT EXISTS bookmark_collections (
+    path TEXT PRIMARY KEY,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+}
+
+function normalizeCollectionPath(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .join(' / ');
+}
+
+function collectionDescendantPattern(value) {
+  return `${String(value || '').replace(/[\\%_]/g, match => `\\${match}`)} / %`;
+}
+
+function ensureBookmarkCollectionPathNoSave(value) {
+  const normalized = normalizeCollectionPath(value);
+  if (!normalized) return '';
+  const parts = normalized.split(' / ');
+  for (let index = 1; index <= parts.length; index++) {
+    const pathValue = parts.slice(0, index).join(' / ');
+    runSQL(`INSERT OR IGNORE INTO bookmark_collections (path) VALUES (?)`, [pathValue]);
+  }
+  return normalized;
+}
+
+function syncBookmarkCollectionPathsNoSave() {
+  const rows = readRows(`SELECT id, folder FROM bookmarks`);
+  for (const row of rows) {
+    const normalized = ensureBookmarkCollectionPathNoSave(row.folder);
+    if (normalized !== String(row.folder || '').trim()) runSQL(`UPDATE bookmarks SET folder = ? WHERE id = ?`, [normalized, row.id]);
+  }
+}
+
+function getBookmarkCollections() {
+  syncBookmarkCollectionPathsNoSave();
+  const paths = readRows(`SELECT path FROM bookmark_collections ORDER BY path COLLATE NOCASE`).map(row => row.path);
+  return paths.map(pathValue => ({ path: pathValue }));
+}
+
+function getBookmarkCollectionInfo(value) {
+  const pathValue = normalizeCollectionPath(value);
+  if (!pathValue) throw new Error('请选择一个 Collection');
+  const pattern = collectionDescendantPattern(pathValue);
+  return {
+    path: pathValue,
+    bookmarkCount: countQuery(`SELECT COUNT(*) FROM bookmarks WHERE folder = ? OR folder LIKE ? ESCAPE '\\'`, [pathValue, pattern]),
+    childCount: countQuery(`SELECT COUNT(*) FROM bookmark_collections WHERE path LIKE ? ESCAPE '\\'`, [pattern]),
+  };
+}
+
+function createBookmarkCollection(value) {
+  const pathValue = ensureBookmarkCollectionPathNoSave(value);
+  if (!pathValue) throw new Error('请输入 Collection 名称');
+  save();
+  return { path: pathValue };
+}
+
+function renameBookmarkCollection(value, nextValue) {
+  const source = normalizeCollectionPath(value);
+  const target = normalizeCollectionPath(nextValue);
+  if (!source || !target) throw new Error('Collection 名称不能为空');
+  if (source === target) return { renamedCollections: 0, movedBookmarks: 0, path: target };
+  if (target.startsWith(`${source} / `)) throw new Error('不能把 Collection 移动到自己的子文件夹中');
+  const sourcePattern = collectionDescendantPattern(source);
+  const sourceRows = readRows(`SELECT path FROM bookmark_collections WHERE path = ? OR path LIKE ? ESCAPE '\\' ORDER BY LENGTH(path) DESC`, [source, sourcePattern]);
+  const bookmarkCount = countQuery(`SELECT COUNT(*) FROM bookmarks WHERE folder = ? OR folder LIKE ? ESCAPE '\\'`, [source, sourcePattern]);
+  if (!sourceRows.length && !bookmarkCount) throw new Error('Collection 不存在');
+
+  DB.run('BEGIN TRANSACTION');
+  try {
+    runSQL(`UPDATE bookmarks SET folder = CASE WHEN folder = ? THEN ? ELSE ? || substr(folder, ?) END, updated_at = datetime('now','localtime') WHERE folder = ? OR folder LIKE ? ESCAPE '\\'`, [source, target, target, source.length + 1, source, sourcePattern]);
+    runSQL(`DELETE FROM bookmark_collections WHERE path = ? OR path LIKE ? ESCAPE '\\'`, [source, sourcePattern]);
+    for (const row of sourceRows) {
+      const nextPath = row.path === source ? target : `${target}${row.path.slice(source.length)}`;
+      ensureBookmarkCollectionPathNoSave(nextPath);
+    }
+    ensureBookmarkCollectionPathNoSave(target);
+    DB.run('COMMIT');
+  } catch (err) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw err;
+  }
+  save();
+  return { renamedCollections: sourceRows.length, movedBookmarks: bookmarkCount, path: target };
+}
+
+function deleteBookmarkCollection(value) {
+  const info = getBookmarkCollectionInfo(value);
+  const pattern = collectionDescendantPattern(info.path);
+  DB.run('BEGIN TRANSACTION');
+  try {
+    runSQL(`DELETE FROM bookmarks WHERE folder = ? OR folder LIKE ? ESCAPE '\\'`, [info.path, pattern]);
+    runSQL(`DELETE FROM bookmark_collections WHERE path = ? OR path LIKE ? ESCAPE '\\'`, [info.path, pattern]);
+    DB.run('COMMIT');
+  } catch (err) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw err;
+  }
+  save();
+  return info;
+}
+
+function getBookmarkScopeInfo(scope) {
+  const value = String(scope || '');
+  if (value === 'all') {
+    return {
+      scope: value,
+      bookmarkCount: countQuery(`SELECT COUNT(*) FROM bookmarks`),
+      collectionCount: countQuery(`SELECT COUNT(*) FROM bookmark_collections`),
+    };
+  }
+  if (value === '__unfiled__') {
+    return {
+      scope: value,
+      bookmarkCount: countQuery(`SELECT COUNT(*) FROM bookmarks WHERE TRIM(COALESCE(folder, '')) = ''`),
+      collectionCount: 0,
+    };
+  }
+  throw new Error('不允许清空该范围');
+}
+
+function deleteBookmarksByScope(scope) {
+  const info = getBookmarkScopeInfo(scope);
+  DB.run('BEGIN TRANSACTION');
+  try {
+    if (info.scope === 'all') {
+      runSQL(`DELETE FROM bookmarks`);
+      runSQL(`DELETE FROM bookmark_collections`);
+    } else {
+      runSQL(`DELETE FROM bookmarks WHERE TRIM(COALESCE(folder, '')) = ''`);
+    }
+    DB.run('COMMIT');
+  } catch (err) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw err;
+  }
+  save();
+  return info;
+}
+
+function syncCodeToBookmarkNoSave(codeId) {
+  const row = queryOne(`SELECT id, code, best_url, status, raindrop_title, raindrop_excerpt, raindrop_note, raindrop_folder, raindrop_tags, raindrop_created, raindrop_cover, created_at FROM codes WHERE id = ?`, [codeId]);
+  if (!row) return null;
+  const existing = queryOne(`SELECT id FROM bookmarks WHERE source_code_id = ?`, [row.id]);
+  if (existing) {
+    runSQL(`UPDATE bookmarks SET
+      code = CASE WHEN TRIM(COALESCE(code, '')) = '' THEN ? ELSE code END,
+      url = CASE WHEN TRIM(COALESCE(url, '')) = '' THEN ? ELSE url END,
+      title = CASE WHEN TRIM(COALESCE(title, '')) = '' THEN ? ELSE title END,
+      excerpt = CASE WHEN TRIM(COALESCE(excerpt, '')) = '' THEN ? ELSE excerpt END,
+      note = CASE WHEN TRIM(COALESCE(note, '')) = '' THEN ? ELSE note END,
+      folder = CASE WHEN TRIM(COALESCE(folder, '')) = '' THEN ? ELSE folder END,
+      tags = CASE WHEN TRIM(COALESCE(tags, '')) = '' THEN ? ELSE tags END,
+      created = CASE WHEN TRIM(COALESCE(created, '')) = '' THEN ? ELSE created END,
+      cover = CASE WHEN TRIM(COALESCE(cover, '')) = '' THEN ? ELSE cover END
+      WHERE id = ?`, [row.code, row.best_url || '', row.raindrop_title || row.code, row.raindrop_excerpt || '', row.raindrop_note || '', row.raindrop_folder || '', row.raindrop_tags || '', row.raindrop_created || row.created_at || '', row.raindrop_cover || '', existing.id]);
+    return existing.id;
+  }
+
+  const byUrl = row.best_url ? queryOne(`SELECT id FROM bookmarks WHERE url = ? LIMIT 1`, [row.best_url]) : null;
+  const byCode = queryOne(`SELECT id FROM bookmarks WHERE code <> '' AND REPLACE(code, '-', '') = REPLACE(?, '-', '') LIMIT 1`, [row.code]);
+  const match = byUrl || byCode;
+  if (match) {
+    runSQL(`UPDATE bookmarks SET source_code_id = ?, code = CASE WHEN TRIM(COALESCE(code, '')) = '' THEN ? ELSE code END WHERE id = ?`, [row.id, row.code, match.id]);
+    return match.id;
+  }
+
+  runSQL(`INSERT INTO bookmarks (url, title, note, excerpt, folder, tags, created, cover, code, source_code_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [row.best_url || '', row.raindrop_title || row.code, row.raindrop_note || '', row.raindrop_excerpt || '', row.raindrop_folder || '', row.raindrop_tags || '', row.raindrop_created || row.created_at || '', row.raindrop_cover || '', row.code, row.id]);
+  return lastInsertId();
+}
+
+function migrateLegacyCodesToBookmarks() {
+  const rows = readRows(`SELECT id FROM codes ORDER BY id`);
+  for (const row of rows) syncCodeToBookmarkNoSave(row.id);
 }
 
 function ensureColumn(table, column, definition) {
@@ -223,11 +447,13 @@ function upsertCode(code, url, status) {
   const existing = findCode(code);
   if (existing.found) {
     runSQL(`UPDATE codes SET best_url = ?, status = ? WHERE id = ?`, [url || existing.url, status || existing.status, existing.code_id]);
+    syncCodeToBookmarkNoSave(existing.code_id);
     save();
     return existing.code_id;
   }
   runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [code, url || '', status || 'ok']);
   const id = lastInsertId();
+  syncCodeToBookmarkNoSave(id);
   save();
   return id;
 }
@@ -240,10 +466,13 @@ function upsertCodeNoSave(code, url, status) {
   const existing = findCode(code);
   if (existing.found) {
     runSQL(`UPDATE codes SET best_url = ?, status = ? WHERE id = ?`, [url || existing.url, status || existing.status, existing.code_id]);
+    syncCodeToBookmarkNoSave(existing.code_id);
     return existing.code_id;
   }
   runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [code, url || '', status || 'ok']);
-  return lastInsertId();
+  const id = lastInsertId();
+  syncCodeToBookmarkNoSave(id);
+  return id;
 }
 
 function linkActressCode(actressId, codeId) {
@@ -399,7 +628,7 @@ function getActressLibrary(options = {}) {
 
 function getCodeLibrary(options = {}) {
   const search = String(options.search || '').trim();
-  const limit = normalizeLimit(options.limit, 300);
+  const limit = normalizeLimit(options.limit, 500, 50000);
   const pattern = `%${search}%`;
   return readRows(`
     SELECT c.id, c.code, c.best_url, c.status, c.raindrop_title, c.raindrop_excerpt, c.raindrop_note, c.raindrop_folder, c.raindrop_tags, c.raindrop_created, c.raindrop_cover, c.created_at,
@@ -429,6 +658,299 @@ function getCodeLibrary(options = {}) {
       actress_tags: String(row.actress_tags || '').split(',').filter(Boolean),
       genre_tags: String(row.genre_tags || '').split(',').filter(Boolean),
     }));
+}
+
+const BOOKMARK_FIELDS = ['raindrop_id', 'url', 'title', 'note', 'excerpt', 'folder', 'tags', 'created', 'cover', 'highlights', 'favorite', 'last_modified', 'code'];
+
+function extractCodeForBookmark(record) {
+  const explicit = normalizeCode(record?.code || '');
+  if (/^(FC2-PPV-\d{4,10}|[A-Z]{2,12}-\d{2,8})$/.test(explicit)) return explicit;
+  return parseCodeList([record?.url, record?.title, record?.note, record?.excerpt].filter(Boolean).join(' '))[0] || '';
+}
+
+function normalizeBookmarkRecord(record = {}, options = {}) {
+  const aliases = {
+    url: record.best_url,
+    title: record.raindrop_title,
+    note: record.raindrop_note,
+    excerpt: record.raindrop_excerpt,
+    folder: record.raindrop_folder,
+    tags: record.raindrop_tags,
+    created: record.raindrop_created,
+    cover: record.raindrop_cover,
+  };
+  const next = {};
+  for (const field of BOOKMARK_FIELDS) next[field] = String(aliases[field] !== undefined ? aliases[field] : (record[field] ?? '')).trim();
+  next.favorite = record.favorite === true || String(record.favorite || '').toLowerCase() === 'true' || Number(record.favorite) === 1 ? 1 : 0;
+  next.folder = normalizeCollectionPath(next.folder);
+  next.code = options.inferCode === false ? normalizeCode(next.code) : extractCodeForBookmark({ ...record, code: next.code });
+  return next;
+}
+
+function findBookmarkMatch(record) {
+  if (record.raindrop_id) {
+    const byId = queryOne(`SELECT id FROM bookmarks WHERE raindrop_id = ?`, [record.raindrop_id]);
+    if (byId) return byId;
+    if (record.url) {
+      const exactLegacy = queryOne(`SELECT id FROM bookmarks WHERE url = ? AND title = ? AND folder = ? AND TRIM(COALESCE(raindrop_id, '')) = '' LIMIT 1`, [record.url, record.title, record.folder]);
+      if (exactLegacy) return exactLegacy;
+      const legacyByUrl = queryOne(`SELECT id FROM bookmarks WHERE url = ? AND TRIM(COALESCE(raindrop_id, '')) = '' LIMIT 1`, [record.url]);
+      if (legacyByUrl) return legacyByUrl;
+    }
+    if (record.code) {
+      const legacyByCode = queryOne(`SELECT id FROM bookmarks WHERE code <> '' AND TRIM(COALESCE(raindrop_id, '')) = '' AND REPLACE(code, '-', '') = REPLACE(?, '-', '') LIMIT 1`, [record.code]);
+      if (legacyByCode) return legacyByCode;
+    }
+    return null;
+  }
+  if (record.url) {
+    const exact = queryOne(`SELECT id FROM bookmarks WHERE url = ? AND title = ? AND folder = ? LIMIT 1`, [record.url, record.title, record.folder]);
+    if (exact) return exact;
+    if (!record.title && !record.folder) {
+      const byUrl = queryOne(`SELECT id FROM bookmarks WHERE url = ? LIMIT 1`, [record.url]);
+      if (byUrl) return byUrl;
+    }
+  }
+  if (record.code && !record.url) {
+    const byCode = queryOne(`SELECT id FROM bookmarks WHERE code <> '' AND REPLACE(code, '-', '') = REPLACE(?, '-', '') LIMIT 1`, [record.code]);
+    if (byCode) return byCode;
+  }
+  return null;
+}
+
+function ensureCodeForBookmarkNoSave(record) {
+  if (!record.code) return null;
+  const found = findCode(record.code);
+  let codeId;
+  if (found.found) {
+    codeId = found.code_id;
+    if (record.url && !found.url) runSQL(`UPDATE codes SET best_url = ? WHERE id = ?`, [record.url, codeId]);
+  } else {
+    runSQL(`INSERT INTO codes (code, best_url, status, raindrop_title, raindrop_excerpt, raindrop_note, raindrop_folder, raindrop_tags, raindrop_created, raindrop_cover)
+      VALUES (?, ?, 'historical', ?, ?, ?, ?, ?, ?, ?)`, [record.code, record.url, record.title, record.excerpt, record.note, record.folder, record.tags, record.created, record.cover]);
+    codeId = lastInsertId();
+  }
+  return codeId;
+}
+
+function importRaindropRecords(records, options = {}) {
+  const mode = options.mode === 'skip' ? 'skip' : 'merge';
+  let imported = 0;
+  let updated = 0;
+  let skipped = 0;
+  let codeLinked = 0;
+  DB.run('BEGIN TRANSACTION');
+  try {
+    for (const raw of Array.isArray(records) ? records : []) {
+      const record = normalizeBookmarkRecord(raw);
+      if (!record.raindrop_id && !record.url && !record.title && !record.code) { skipped++; continue; }
+      const match = findBookmarkMatch(record);
+      if (match && mode === 'skip') { skipped++; continue; }
+      const sourceCodeId = ensureCodeForBookmarkNoSave(record);
+      ensureBookmarkCollectionPathNoSave(record.folder);
+      if (sourceCodeId) codeLinked++;
+
+      if (match) {
+        const current = queryOne(`SELECT * FROM bookmarks WHERE id = ?`, [match.id]) || {};
+        const effective = { ...record };
+        for (const field of ['raindrop_id', 'url', 'title', 'note', 'excerpt', 'folder', 'tags', 'created', 'cover', 'highlights', 'last_modified', 'code']) {
+          if (!String(effective[field] || '').trim()) effective[field] = current[field] || '';
+        }
+        ensureBookmarkCollectionPathNoSave(effective.folder);
+        runSQL(`UPDATE bookmarks SET raindrop_id = ?, url = ?, title = ?, note = ?, excerpt = ?, folder = ?, tags = ?, created = ?, cover = ?, highlights = ?, favorite = ?, last_modified = ?, code = ?, source_code_id = COALESCE(?, source_code_id), updated_at = datetime('now','localtime') WHERE id = ?`, [
+          effective.raindrop_id, effective.url, effective.title, effective.note, effective.excerpt, effective.folder, effective.tags, effective.created, effective.cover, effective.highlights, record.favorite, effective.last_modified, effective.code, sourceCodeId, match.id,
+        ]);
+        updated++;
+      } else {
+        runSQL(`INSERT INTO bookmarks (raindrop_id, url, title, note, excerpt, folder, tags, created, cover, highlights, favorite, last_modified, code, source_code_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [record.raindrop_id, record.url, record.title, record.note, record.excerpt, record.folder, record.tags, record.created, record.cover, record.highlights, record.favorite, record.last_modified, record.code, sourceCodeId]);
+        imported++;
+      }
+    }
+    DB.run('COMMIT');
+  } catch (err) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw err;
+  }
+  if (imported || updated) save();
+  return { total: imported + updated + skipped, imported, updated, skipped, codeLinked };
+}
+
+function getBookmarkLibrary(options = {}) {
+  const search = String(options.search || '').trim();
+  const limit = normalizeLimit(options.limit, 500, 50000);
+  const pattern = `%${search}%`;
+  return readRows(`
+    SELECT b.*, c.status,
+      GROUP_CONCAT(DISTINCT a.tag_name) AS actress_tags,
+      GROUP_CONCAT(DISTINCT g.name) AS genre_tags
+    FROM bookmarks b
+    LEFT JOIN codes c ON c.id = b.source_code_id
+    LEFT JOIN actress_code_map acm ON acm.code_id = c.id
+    LEFT JOIN actress_tags a ON a.id = acm.actress_id
+    LEFT JOIN code_genres cg ON cg.code_id = c.id
+    LEFT JOIN genre_tags g ON g.id = cg.genre_id
+    WHERE (? = '' OR b.title LIKE ? OR b.url LIKE ? OR b.folder LIKE ? OR b.tags LIKE ? OR b.note LIKE ? OR b.excerpt LIKE ? OR b.code LIKE ? OR b.raindrop_id LIKE ?)
+    GROUP BY b.id
+    ORDER BY CASE WHEN TRIM(COALESCE(b.created, '')) = '' THEN 1 ELSE 0 END, b.created DESC, b.id DESC
+    LIMIT ?`, [search, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit]).map(row => ({
+      id: row.id,
+      bookmark_id: row.id,
+      source_code_id: row.source_code_id || null,
+      raindrop_id: row.raindrop_id || '',
+      code: row.code || '',
+      best_url: row.url || '',
+      status: row.status || (row.code ? 'historical' : 'bookmark'),
+      raindrop_title: row.title || '',
+      raindrop_note: row.note || '',
+      raindrop_excerpt: row.excerpt || '',
+      raindrop_folder: row.folder || '',
+      raindrop_tags: row.tags || '',
+      raindrop_created: row.created || '',
+      raindrop_cover: row.cover || '',
+      highlights: row.highlights || '',
+      favorite: Boolean(row.favorite),
+      last_modified: row.last_modified || '',
+      created_at: row.created_at || '',
+      updated_at: row.updated_at || '',
+      actress_tags: String(row.actress_tags || '').split(',').filter(Boolean),
+      genre_tags: String(row.genre_tags || '').split(',').filter(Boolean),
+    }));
+}
+
+function getBookmarkStats() {
+  return {
+    count: countQuery(`SELECT COUNT(*) FROM bookmarks`),
+    favoriteCount: countQuery(`SELECT COUNT(*) FROM bookmarks WHERE favorite = 1`),
+    highlightCount: countQuery(`SELECT COUNT(*) FROM bookmarks WHERE TRIM(COALESCE(highlights, '')) <> ''`),
+    collectionCount: countQuery(`SELECT COUNT(DISTINCT folder) FROM bookmarks WHERE TRIM(COALESCE(folder, '')) <> ''`),
+    codeCount: countQuery(`SELECT COUNT(*) FROM bookmarks WHERE TRIM(COALESCE(code, '')) <> ''`),
+  };
+}
+
+function updateBookmarkRecord(id, patch = {}) {
+  const bookmarkId = Number(id);
+  if (!bookmarkId || !queryOne(`SELECT id FROM bookmarks WHERE id = ?`, [bookmarkId])) throw new Error('收藏记录不存在');
+  const current = queryOne(`SELECT * FROM bookmarks WHERE id = ?`, [bookmarkId]);
+  const hasExplicitCode = Object.prototype.hasOwnProperty.call(patch, 'code');
+  const next = normalizeBookmarkRecord({ ...current, ...patch }, { inferCode: !hasExplicitCode || Boolean(String(patch.code || '').trim()) });
+  const sourceCodeId = ensureCodeForBookmarkNoSave(next);
+  ensureBookmarkCollectionPathNoSave(next.folder);
+  runSQL(`UPDATE bookmarks SET raindrop_id = ?, url = ?, title = ?, note = ?, excerpt = ?, folder = ?, tags = ?, created = ?, cover = ?, highlights = ?, favorite = ?, last_modified = ?, code = ?, source_code_id = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [next.raindrop_id, next.url, next.title, next.note, next.excerpt, next.folder, next.tags, next.created, next.cover, next.highlights, next.favorite, next.last_modified, next.code, sourceCodeId, bookmarkId]);
+  save();
+  return { updated: true, sourceCodeId: sourceCodeId || current.source_code_id || null };
+}
+
+function createBookmarkRecord(record = {}) {
+  const normalized = normalizeBookmarkRecord(record);
+  if (!normalized.url && !normalized.title && !normalized.code) throw new Error('Title 和 Link 至少填写一项');
+  const match = findBookmarkMatch(normalized);
+  if (match) {
+    updateBookmarkRecord(match.id, normalized);
+    return { id: match.id, imported: 0, updated: 1 };
+  }
+  const sourceCodeId = ensureCodeForBookmarkNoSave(normalized);
+  ensureBookmarkCollectionPathNoSave(normalized.folder);
+  runSQL(`INSERT INTO bookmarks (raindrop_id, url, title, note, excerpt, folder, tags, created, cover, highlights, favorite, last_modified, code, source_code_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [normalized.raindrop_id, normalized.url, normalized.title, normalized.note, normalized.excerpt, normalized.folder, normalized.tags, normalized.created, normalized.cover, normalized.highlights, normalized.favorite, normalized.last_modified, normalized.code, sourceCodeId]);
+  const id = lastInsertId();
+  save();
+  return { id, imported: 1, updated: 0 };
+}
+
+function deleteBookmarkRecord(id) {
+  const bookmarkId = Number(id);
+  if (!bookmarkId) throw new Error('收藏记录不存在');
+  runSQL(`DELETE FROM bookmarks WHERE id = ?`, [bookmarkId]);
+  save();
+  return true;
+}
+
+function exportRaindropRecords() {
+  return readRows(`SELECT raindrop_id, title, note, excerpt, url, folder, tags, created, cover, highlights, favorite, last_modified, code FROM bookmarks ORDER BY created DESC, id DESC`).map(row => ({
+    ...row,
+    favorite: Boolean(row.favorite),
+  }));
+}
+
+function analyzeCodeImport(codes) {
+  const existingRows = readRows(`SELECT id, code, best_url, status FROM codes`);
+  const existingByKey = new Map();
+  for (const row of existingRows) {
+    const key = codeComparableKey(row.code);
+    if (key && !existingByKey.has(key)) existingByKey.set(key, row);
+  }
+
+  const seen = new Set();
+  const rows = [];
+  for (const value of Array.isArray(codes) ? codes : []) {
+    const code = normalizeCode(value);
+    const key = codeComparableKey(code);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const existing = existingByKey.get(key) || null;
+    const status = existing?.status || '';
+    rows.push({
+      code,
+      key,
+      classification: !existing ? 'new' : status === 'ok' || status === 'historical' ? 'existing' : 'review',
+      existing: existing ? {
+        id: existing.id,
+        code: existing.code,
+        url: existing.best_url || '',
+        status,
+      } : null,
+    });
+  }
+
+  return {
+    rows,
+    total: rows.length,
+    newCount: rows.filter(row => row.classification === 'new').length,
+    existingCount: rows.filter(row => row.classification === 'existing').length,
+    reviewCount: rows.filter(row => row.classification === 'review').length,
+  };
+}
+
+function importHistoricalCodes(codes) {
+  return importHistoricalRecords((Array.isArray(codes) ? codes : []).map(code => ({ code })));
+}
+
+function importHistoricalRecords(records) {
+  const source = Array.isArray(records) ? records : [];
+  const analysis = analyzeCodeImport(source.map(row => row?.code));
+  const recordByKey = new Map();
+  for (const record of source) {
+    const code = normalizeCode(record?.code);
+    const key = codeComparableKey(code);
+    if (key && !recordByKey.has(key)) recordByKey.set(key, { ...record, code });
+  }
+  let imported = 0;
+  for (const row of analysis.rows) {
+    if (row.classification !== 'new') continue;
+    const record = recordByKey.get(row.key) || {};
+    runSQL(`INSERT INTO codes (
+      code, best_url, status, raindrop_title, raindrop_excerpt, raindrop_note,
+      raindrop_folder, raindrop_tags, raindrop_created, raindrop_cover
+    ) VALUES (?, ?, 'historical', ?, ?, ?, ?, ?, ?, ?)`, [
+      row.code,
+      String(record.url || '').trim(),
+      String(record.title || '').trim(),
+      String(record.excerpt || '').trim(),
+      String(record.note || '').trim(),
+      String(record.folder || '').trim(),
+      String(record.tags || '').trim(),
+      String(record.created || '').trim(),
+      String(record.cover || '').trim(),
+    ]);
+    imported++;
+  }
+  if (imported) save();
+  return {
+    imported,
+    existing: analysis.total - imported,
+    total: analysis.total,
+  };
 }
 
 function splitStoredTags(value) {
@@ -820,6 +1342,7 @@ function createCodeRecord(code, url = '', status = 'ok') {
   if (duplicate) throw new Error('该番号已存在');
   runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [normalized, String(url || '').trim(), String(status || 'ok').trim() || 'ok']);
   const id = lastInsertId();
+  syncCodeToBookmarkNoSave(id);
   save();
   return id;
 }
@@ -849,6 +1372,7 @@ function updateCodeRecord(id, patch = {}) {
   }
   if (updates.length) {
     runSQL(`UPDATE codes SET ${updates.join(', ')} WHERE id = ?`, [...params, codeId]);
+    syncCodeToBookmarkNoSave(codeId);
     save();
   }
   return true;
@@ -1214,8 +1738,15 @@ function createBackup(label = '', reason = 'manual') {
   save();
   const dir = ensureBackupDir();
   const safeLabel = cleanBackupLabel(label) || String(reason || 'manual').replace(/[^a-z0-9_-]/gi, '_') || 'backup';
-  const fileName = `missav_data_${backupTimestamp()}_${safeLabel}.db`;
-  const filePath = path.join(dir, fileName);
+  const baseName = `missav_data_${backupTimestamp()}_${safeLabel}`;
+  let fileName = `${baseName}.db`;
+  let filePath = path.join(dir, fileName);
+  let suffix = 2;
+  while (fs.existsSync(filePath)) {
+    fileName = `${baseName}_${suffix}.db`;
+    filePath = path.join(dir, fileName);
+    suffix++;
+  }
   fs.copyFileSync(dbPath, filePath);
   const stat = fs.statSync(filePath);
   const meta = {
@@ -1253,10 +1784,18 @@ function restoreBackup(nameOrPath) {
   const before = createBackup('restore_before', 'pre_restore');
   const buffer = fs.readFileSync(filePath);
   let nextDb = null;
+  let hadBookmarkTable = false;
   try {
     nextDb = new SQL.Database(buffer);
-    const check = nextDb.exec(`SELECT name FROM sqlite_master WHERE type='table' LIMIT 1`);
-    if (!Array.isArray(check)) throw new Error('备份文件校验失败');
+    const integrity = nextDb.exec('PRAGMA integrity_check');
+    const integrityValue = integrity?.[0]?.values?.[0]?.[0];
+    if (integrityValue !== 'ok') throw new Error('数据库完整性检查失败');
+
+    const tableResult = nextDb.exec("SELECT name FROM sqlite_master WHERE type = 'table'");
+    const tableNames = new Set((tableResult?.[0]?.values || []).map(row => row[0]));
+    hadBookmarkTable = tableNames.has('bookmarks');
+    const missingTables = REQUIRED_BACKUP_TABLES.filter(name => !tableNames.has(name));
+    if (missingTables.length) throw new Error(`缺少必要数据表：${missingTables.join(', ')}`);
   } catch (err) {
     if (nextDb) try { nextDb.close(); } catch {}
     throw new Error('无法读取该备份：' + err.message);
@@ -1264,6 +1803,10 @@ function restoreBackup(nameOrPath) {
 
   if (DB) try { DB.close(); } catch {}
   DB = nextDb;
+  createTables();
+  migrateSchema();
+  if (!hadBookmarkTable) migrateLegacyCodesToBookmarks();
+  syncBookmarkCollectionPathsNoSave();
   save();
   return { restored: true, backup: readBackupMeta(filePath), preRestoreBackup: before, stats: getStats() };
 }
@@ -1281,7 +1824,8 @@ module.exports = {
   findCode, upsertCode,
   linkActressCode, linkGenreCode,
   importFromCSV, exportToCSV,
-  getStats, getActressLibrary, getCodeLibrary, getDuplicateCodeGroups, getRaindropImportRows, renameActressTag, mergeActressTags,
+  getStats, getActressLibrary, getCodeLibrary, analyzeCodeImport, importHistoricalCodes, importHistoricalRecords, getDuplicateCodeGroups, getRaindropImportRows, renameActressTag, mergeActressTags,
+  getBookmarkLibrary, getBookmarkStats, getBookmarkCollections, getBookmarkCollectionInfo, createBookmarkCollection, renameBookmarkCollection, deleteBookmarkCollection, getBookmarkScopeInfo, deleteBookmarksByScope, importRaindropRecords, exportRaindropRecords, createBookmarkRecord, updateBookmarkRecord, deleteBookmarkRecord,
   getHealthReport, cleanupOrphanTags, cleanupBrokenRelations,
   createBackup, listBackups, deleteBackup, restoreBackup, getBackupDirectory,
   getGenreLibrary, createGenreTag, renameGenreTag, deleteGenreTag,

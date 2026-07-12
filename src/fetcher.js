@@ -28,11 +28,20 @@ async function fetchPage(url, fetchImpl) {
     }
   }
 
+  if (result.redirected) {
+    return {
+      statusCode: result.statusCode || 0,
+      body: '',
+      finalUrl: result.redirectUrl || url,
+      error: '重定向次数超过限制',
+    };
+  }
+
   return {
     statusCode: result.statusCode,
     body: result.body || '',
-    finalUrl: result.finalUrl,
-    error: null,
+    finalUrl: result.finalUrl || url,
+    error: result.error || null,
   };
 }
 

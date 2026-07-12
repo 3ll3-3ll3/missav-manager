@@ -4,6 +4,33 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 
+const FETCH_HOSTS = new Set(['missav.ai', 'www.missav.ai']);
+const APP_PATH_NAMES = new Set(['userData']);
+
+if (process.env.MISSAV_USER_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.MISSAV_USER_DATA_DIR));
+}
+
+function parseWebUrl(value, { fetchTarget = false } = {}) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || ''));
+  } catch {
+    throw new Error('链接格式无效');
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('只允许打开 HTTP/HTTPS 链接');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('链接中不允许包含账号信息');
+  }
+  if (fetchTarget && !FETCH_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error('只允许抓取 MissAV 页面');
+  }
+  return parsed.href;
+}
+
 // ── 全局错误处理 ──────────────────────────────────────
 process.on('uncaughtException', (err) => {
   console.error('[Main Process Error]', err.message);
@@ -156,9 +183,21 @@ async function fetchWithElectronNet(url, options = {}) {
     const response = await net.fetch(url, {
       method: options.method || 'GET',
       headers: defaultFetchHeaders(options.headers || {}),
-      redirect: 'follow',
+      redirect: 'manual',
       signal: controller.signal,
     });
+
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (location) {
+        return {
+          redirected: true,
+          redirectUrl: new URL(location, url).href,
+          statusCode: response.status,
+          transport: 'electron-net',
+        };
+      }
+    }
 
     const body = await response.text();
     const headers = {};
@@ -225,18 +264,38 @@ function fetchWithNode(url, options = {}) {
 }
 
 ipcMain.handle('net:fetch', async (_event, url, options = {}) => {
+  let safeUrl;
   try {
-    return await fetchWithElectronNet(url, options);
+    safeUrl = parseWebUrl(url, { fetchTarget: true });
+  } catch (err) {
+    return {
+      redirected: false,
+      statusCode: 0,
+      headers: {},
+      body: '',
+      finalUrl: String(url || ''),
+      error: err.message,
+      transport: 'rejected',
+    };
+  }
+
+  const safeOptions = {
+    ...options,
+    timeout: Math.min(30000, Math.max(1000, Number(options.timeout) || 15000)),
+  };
+
+  try {
+    return await fetchWithElectronNet(safeUrl, safeOptions);
   } catch (electronErr) {
     try {
-      return await fetchWithNode(url, options);
+      return await fetchWithNode(safeUrl, safeOptions);
     } catch (nodeErr) {
       return {
         redirected: false,
         statusCode: 0,
         headers: {},
         body: '',
-        finalUrl: url,
+        finalUrl: safeUrl,
         error: `Electron net: ${electronErr.message}; Node fallback: ${nodeErr.message}`,
         transport: 'failed',
       };
@@ -245,11 +304,22 @@ ipcMain.handle('net:fetch', async (_event, url, options = {}) => {
 });
 // ── IPC: Open External ──────────────────────────────────
 ipcMain.handle('shell:openExternal', async (_event, url) => {
-  return shell.openExternal(url);
+  return shell.openExternal(parseWebUrl(url));
+});
+
+ipcMain.handle('shell:openDirectory', async (_event, dirPath) => {
+  const resolved = path.resolve(String(dirPath || ''));
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error('目录不存在');
+  }
+  const error = await shell.openPath(resolved);
+  if (error) throw new Error(error);
+  return true;
 });
 
 // ── IPC: App Info ────────────────────────────────────────
 ipcMain.handle('app:getPath', async (_event, name) => {
+  if (!APP_PATH_NAMES.has(name)) throw new Error('不允许读取该应用路径');
   return app.getPath(name);
 });
 

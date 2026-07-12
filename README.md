@@ -1,8 +1,10 @@
-# MissAV Manager v2.16
+# MissAV Manager v0.1
 
 MissAV Manager 是一个本地桌面 App，用于从文本、Telegram HTML、TXT、MD、CSV 等内容中提取番号，生成/核验 MissAV 链接，维护 SQLite 本地库，并导出 Raindrop.io 可导入的 HTML / CSV 文件。
 
 完整教程见：[使用教程.md](使用教程.md)。
+
+开发与 agent 接手请先阅读：[项目交接说明](docs/PROJECT_HANDOFF.md) 和 [2026-07-12 修改日志](docs/CHANGELOG_2026-07-12.md)。
 
 ## 给 Windows 用户
 
@@ -20,7 +22,7 @@ MissAV Manager 是一个本地桌面 App，用于从文本、Telegram HTML、TXT
 
 ## 给开发者
 
-需要 Node.js 18 或更高版本：
+需要 Node.js 22.12 或更高版本：
 
 ```bash
 npm install
@@ -33,7 +35,7 @@ npm start
 npm run dev
 ```
 
-也可以双击源码目录中的 `启动MissAV.bat`；它会在本机缺少依赖时执行 `npm install`。
+也可以双击源码目录中的 `启动MissAV.bat`；它会在缺少依赖或 Electron 运行文件时自动从国内镜像安装/修复。
 
 ## 核心功能
 
@@ -42,8 +44,10 @@ npm run dev
 | 番号处理 | 粘贴任意文本、Telegram HTML、Markdown、MissAV 链接或番号，自动提取并标准化 |
 | 运行控制 | 生成候选链接，访问 MissAV，抓取女优 tag / 类型 tag，写入本地库 |
 | 处理结果 | 查看本次处理结果，导出本次 HTML / CSV / 报告 |
-| SQLite 本地库 | 管理番号、链接、状态、女优 tag、类型 tag、Raindrop 字段 |
-| 整理卡片 | 单条聚焦整理，可快速修复链接、状态、Title、Collection、Tags、Note、Created |
+| 收藏数据库 | 保存全部历史番号，并按番号、标题、链接、Collection、Tags、Note 搜索与筛选 |
+| 导入去重 | 新内容与全部历史库一次性比对，可仅保留全新项、加入待复查项或逐条选择 |
+| Raindrop 式编辑 | Collection 树、记录列表和右侧详情编辑器；支持空文件夹、新建子文件夹、重命名/删除目录、批量选择当前目录及子目录全部记录 |
+| 历史迁入 | 文本/HTML/Markdown 建立番号索引；Raindrop CSV 还能保留完整收藏字段 |
 | 导出预览 | 导出前检查可导出记录、无链接记录、状态矛盾和缺失字段 |
 | CSV 工作台 | 打开、编辑、校验、备份、另存 CSV，并可导入本地库 |
 | 数据体检 | 检查无链接、缺 tag、孤立 tag、坏关联、疑似重复和状态矛盾 |
@@ -53,7 +57,7 @@ npm run dev
 ## 推荐流程
 
 ```text
-导入/粘贴原始文本 -> 提取番号 -> 开始处理 -> 查看结果 -> 本地库整理 -> 整理卡片/导出预览 -> 导出 Raindrop CSV 或 HTML
+导入/粘贴原始内容 -> 导入去重 -> 选择全新或待复查番号 -> 开始处理 -> 在收藏库直接编辑 -> 导出 Raindrop CSV 或 HTML
 ```
 
 ## 输出文件
@@ -68,17 +72,19 @@ npm run dev
 | `*_女优tag合集.csv` | 从本地库导出的女优 tag 合集 |
 | `*_missav_backup.json` | 本次结果备份 |
 
-Raindrop CSV 字段为：
+本地收藏库和 CSV 工作台完整兼容 Raindrop 官方备份的 11 个字段：
 
 ```text
-folder,url,title,note,tags,created
+id,title,note,excerpt,url,folder,tags,created,cover,highlights,favorite
 ```
+
+CSV 是无损主备份格式，包含 Raindrop ID 和 Excerpt；HTML 保留 Collection 层级、Notes、Highlights、Favorite 与时间信息。迁移时可同时选择同一批 CSV 和 HTML，App 会按 ID 及记录身份合并互补字段，并保留同一 URL 在不同 Collection 中的重复收藏。
 
 ## 关键规则
 
 - MissAV URL 会优先解析，可从 `/cn/xxx`、`/dm89/cn/xxx`、`/dm96/cn/xxx` 等链接中提取番号。
 - Telegram HTML 中的 `message14298`、`MESSAGE-13`、`moodyz` 等噪声会被过滤。
-- `需要查找` tag 只应对应 `not_found` 状态；如果链接可访问，请在“整理卡片”或“番号库”中修正状态。
+- `需要查找` tag 只应对应 `not_found` 状态；如果链接可访问，请在“整理卡片”或“收藏库”中修正状态。
 - SQLite 本地库是主数据库，CSV 工作台用于兼容、编辑和迁移外部 CSV。
 - 大批量修改前建议先在“备份恢复”里创建备份。
 
@@ -96,7 +102,8 @@ missav-manager/
 │   ├── parser.js        # 番号解析与 URL 生成
 │   ├── fetcher.js       # 页面状态检查与 tag 提取
 │   ├── database.js      # SQLite 本地库
-│   ├── csvTools.js      # CSV 解析、校验、导出
+│   ├── csvTools.js      # 通用 CSV 解析、校验、导出
+│   ├── raindrop.js      # Raindrop 官方 CSV / HTML 双向转换
 │   ├── exporter.js      # Raindrop 导出
 │   └── utils.js         # 通用工具
 ├── assets/              # 图标资源
@@ -115,9 +122,9 @@ npm run build:portable
 
 便携版输出到 `dist/MissAV_Manager_v<版本号>.exe`，请作为 GitHub Release 附件发布，不要提交到源码分支。
 
-仓库包含 GitHub Actions 工作流：推送形如 `v2.16.0` 的标签后，会在 Windows 环境自动构建便携版并创建同名 Release。
+仓库包含 GitHub Actions 工作流：推送形如 `v0.1.0` 的标签后，会在 Windows 环境自动构建便携版并创建同名 Release。
 
 ```bash
-git tag v2.16.0
-git push origin v2.16.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
