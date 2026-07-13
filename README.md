@@ -29,6 +29,14 @@ npm install
 npm start
 ```
 
+打包便携版：
+
+```bash
+npm run build:portable
+```
+
+该命令默认使用国内镜像、禁用签名并在打包前检查应用是否仍在运行。为避免 NSIS 高压缩在部分 Windows 环境长时间卡住，当前采用快速封装；生成的单文件 EXE 会比高压缩版本更大。
+
 开发模式：
 
 ```bash

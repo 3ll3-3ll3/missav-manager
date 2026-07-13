@@ -12,11 +12,20 @@ echo.
 
 REM Electron 默认从 GitHub 下载，部分网络环境无法访问。
 set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
+set "ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/"
+set "npm_config_registry=https://registry.npmmirror.com"
+set "NPM_CONFIG_AUDIT=false"
+set "NPM_CONFIG_FUND=false"
 
 REM 首次运行时安装全部依赖。
 if not exist "node_modules\" (
     echo [!] 首次运行，正在安装依赖...
-    call npm install --registry=https://registry.npmmirror.com
+    call npm install --prefer-offline
+    if errorlevel 1 (
+        echo [!] 首次安装失败，正在重试一次...
+        call npm cache verify
+        call npm install --prefer-offline
+    )
     if errorlevel 1 goto :install_failed
     echo.
 )

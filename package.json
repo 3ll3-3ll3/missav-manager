@@ -19,8 +19,8 @@
     "dev": "electron . --dev",
     "check": "node --check main.js && node --check preload.js && node --check renderer/app.js",
     "test": "node --test",
-    "build": "electron-builder --win",
-    "build:portable": "set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable"
+    "build": "electron-builder --win --publish never",
+    "build:portable": "node scripts/build-portable.cjs"
   },
   "build": {
     "appId": "com.wjl.missav-manager",
@@ -28,6 +28,7 @@
     "directories": {
       "output": "dist"
     },
+    "compression": "store",
     "files": [
       "main.js",
       "preload.js",
@@ -38,6 +39,7 @@
     ],
     "win": {
       "signAndEditExecutable": false,
+      "signExecutable": false,
       "target": [
         "portable"
       ]

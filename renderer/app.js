@@ -9,7 +9,15 @@ const $$ = (sel) => document.querySelectorAll(sel);
 const DOM = {};
 const api = window.electronAPI;
 const APPEARANCE_KEY = 'missav_manager_appearance';
+const APPEARANCE_VERSION = 3;
 const CSV_RECENT_KEY = 'missav_manager_csv_recent';
+const VISUAL_PACKS = {
+  none: null,
+  'neon-rain': { asset: '../assets/visual-packs/midnight/neon-rain.png' },
+  'velvet-perfume': { asset: '../assets/visual-packs/midnight/velvet-perfume.png' },
+  'vinyl-cocktail': { asset: '../assets/visual-packs/midnight/vinyl-cocktail.png' },
+  'city-after-rain': { asset: '../assets/visual-packs/midnight/city-after-rain.png' },
+};
 
 const state = {
   outputDirPath: '',
@@ -44,7 +52,7 @@ const state = {
   rawDbData: null,
   healthReport: null,
   backupRows: [],
-  appearance: { theme: 'mint', density: 'comfortable', bgImagePath: '', bgDim: 35 },
+  appearance: { theme: 'midnight', visualPack: 'neon-rain', density: 'comfortable', bgImagePath: '', bgDim: 35, version: APPEARANCE_VERSION },
   csv: { filePath: '', headers: [], rows: [], selectedRows: new Set(), focusedRow: null, isRaindrop: false, dirty: false, analysis: null, recent: [] },
 };
 
@@ -70,6 +78,8 @@ function init() {
   DOM.dbSummaryMini = $('#dbSummaryMini');
   DOM.btnOpenLibraryFromPanel = $('#btnOpenLibraryFromPanel');
   DOM.themeSelect = $('#themeSelect');
+  DOM.visualPackSelect = $('#visualPackSelect');
+  DOM.visualPackCards = $$('[data-visual-pack]');
   DOM.uiDensitySelect = $('#uiDensitySelect');
   DOM.btnSelectBgImage = $('#btnSelectBgImage');
   DOM.btnClearBgImage = $('#btnClearBgImage');
@@ -147,6 +157,12 @@ function loadAppearance() {
   try {
     const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || '{}');
     state.appearance = { ...state.appearance, ...saved };
+    if (Number(saved.version || 0) < APPEARANCE_VERSION) {
+      state.appearance.theme = 'midnight';
+      state.appearance.visualPack = 'neon-rain';
+      state.appearance.version = APPEARANCE_VERSION;
+      saveAppearance();
+    }
   } catch {}
 }
 
@@ -175,27 +191,38 @@ function renderDataWorkbench() {
 }
 
 function setAppearance(patch) {
-  state.appearance = { ...state.appearance, ...patch };
+  state.appearance = { ...state.appearance, ...patch, version: APPEARANCE_VERSION };
   applyAppearance();
   saveAppearance();
 }
 
 function applyAppearance() {
   const a = state.appearance;
-  document.body.dataset.theme = a.theme || 'mint';
+  const packKey = VISUAL_PACKS[a.visualPack] ? a.visualPack : 'none';
+  const pack = VISUAL_PACKS[packKey];
+  document.body.dataset.theme = a.theme || 'midnight';
   document.body.dataset.density = a.density || 'comfortable';
   document.body.style.setProperty('--bg-dim', `${Number(a.bgDim ?? 35)}%`);
   document.body.style.setProperty('--bg-dim-alpha', String(Number(a.bgDim ?? 35) / 100));
 
-  if (a.bgImagePath) {
-    document.body.classList.add('has-custom-bg');
-    document.body.style.setProperty('--custom-bg', `url("${toFileUrl(a.bgImagePath)}")`);
+  const backgroundUrl = a.bgImagePath
+    ? `url("${toFileUrl(a.bgImagePath)}")`
+    : pack ? `url("${toAssetUrl(pack.asset)}")` : '';
+  if (backgroundUrl) {
+    document.body.style.setProperty('--custom-bg', backgroundUrl);
   } else {
-    document.body.classList.remove('has-custom-bg');
     document.body.style.removeProperty('--custom-bg');
   }
+  document.body.classList.toggle('has-visual-pack', !a.bgImagePath && Boolean(pack));
+  if (a.bgImagePath) {
+    document.body.classList.add('has-custom-bg');
+  } else {
+    document.body.classList.remove('has-custom-bg');
+  }
 
-  if (DOM.themeSelect) DOM.themeSelect.value = a.theme || 'mint';
+  if (DOM.themeSelect) DOM.themeSelect.value = a.theme || 'midnight';
+  if (DOM.visualPackSelect) DOM.visualPackSelect.value = packKey;
+  if (DOM.visualPackCards) DOM.visualPackCards.forEach(card => card.classList.toggle('active', card.dataset.visualPack === packKey));
   if (DOM.uiDensitySelect) DOM.uiDensitySelect.value = a.density || 'comfortable';
   if (DOM.bgDimRange) DOM.bgDimRange.value = Number(a.bgDim ?? 35);
   if (DOM.bgDimValue) DOM.bgDimValue.textContent = `${Number(a.bgDim ?? 35)}%`;
@@ -207,6 +234,10 @@ function toFileUrl(filePath) {
     .split('/')
     .map(part => encodeURIComponent(part))
     .join('/');
+}
+
+function toAssetUrl(assetPath) {
+  return new URL(assetPath, window.location.href).href;
 }
 
 async function selectBackgroundImage() {
@@ -302,7 +333,12 @@ function bindEvents() {
   DOM.btnOpenFolder.addEventListener('click', openOutputFolder);
   DOM.resultBody.addEventListener('click', handleResultTableClick);
   DOM.btnOpenLibraryFromPanel.addEventListener('click', openLibraryModal);
-  DOM.themeSelect.addEventListener('change', () => setAppearance({ theme: DOM.themeSelect.value }));
+  DOM.themeSelect.addEventListener('change', () => {
+    const theme = DOM.themeSelect.value;
+    setAppearance({ theme, visualPack: theme === 'midnight' && state.appearance.visualPack === 'none' ? 'neon-rain' : state.appearance.visualPack });
+  });
+  if (DOM.visualPackSelect) DOM.visualPackSelect.addEventListener('change', () => setAppearance({ visualPack: DOM.visualPackSelect.value }));
+  if (DOM.visualPackCards) DOM.visualPackCards.forEach(card => card.addEventListener('click', () => setAppearance({ visualPack: card.dataset.visualPack })));
   DOM.uiDensitySelect.addEventListener('change', () => setAppearance({ density: DOM.uiDensitySelect.value }));
   DOM.btnSelectBgImage.addEventListener('click', selectBackgroundImage);
   DOM.btnClearBgImage.addEventListener('click', () => setAppearance({ bgImagePath: '' }));
@@ -420,7 +456,7 @@ function updateProgress(cur, total) {
 function renderTable() {
   const rows = getFilteredResults();
   if (!rows.length) {
-    DOM.resultBody.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty-state"><span class="empty-icon">🎯</span><p>输入番号并点击「开始处理」</p></div></td></tr>`;
+    DOM.resultBody.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty-state visual-empty-state"><span class="empty-icon">🎯</span><p>输入番号并点击「开始处理」</p></div></td></tr>`;
     return;
   }
   DOM.resultBody.innerHTML = rows.map(r => `
@@ -3711,7 +3747,7 @@ function renderCsvTable() {
   renderCsvMeta();
   if (!state.csv.headers.length) {
     DOM.csvTableHead.innerHTML = '';
-    DOM.csvTableBody.innerHTML = '<tr class="empty-row"><td><div class="empty-state"><span class="empty-icon">CSV</span><p>打开 CSV 后在这里浏览和编辑</p></div></td></tr>';
+    DOM.csvTableBody.innerHTML = '<tr class="empty-row"><td><div class="empty-state visual-empty-state"><span class="empty-icon">CSV</span><p>打开 CSV 后在这里浏览和编辑</p></div></td></tr>';
     DOM.csvFooter.textContent = '未载入数据';
     return;
   }

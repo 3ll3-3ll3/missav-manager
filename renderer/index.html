@@ -6,7 +6,7 @@
   <title>MissAV Manager</title>
   <link rel="stylesheet" href="styles.css">
 </head>
-<body data-theme="mint">
+<body data-theme="midnight">
   <div class="background-layer" id="backgroundLayer"></div>
 
   <header class="app-header">
@@ -134,7 +134,7 @@
               <tbody id="resultBody">
                 <tr class="empty-row">
                   <td colspan="7">
-                    <div class="empty-state">
+                    <div class="empty-state visual-empty-state">
                       <span class="empty-icon">M</span>
                       <p>等待处理</p>
                     </div>
@@ -277,12 +277,14 @@
               <label class="setting-field">
                 <span>主题</span>
                 <select id="themeSelect">
+                  <option value="midnight">午夜绯电</option>
                   <option value="mint">护眼淡绿</option>
                   <option value="sage">青柠灰绿</option>
                   <option value="paper">纸感浅色</option>
                   <option value="dusk">暮色紫灰</option>
                   <option value="graphite">石墨深色</option>
                   <option value="rose">柔粉米白</option>
+                  <option value="prism">霓虹蜜桃</option>
                 </select>
               </label>
               <label class="setting-field">
@@ -290,6 +292,16 @@
                 <select id="uiDensitySelect">
                   <option value="comfortable">舒展</option>
                   <option value="compact">紧凑</option>
+                </select>
+              </label>
+              <label class="setting-field">
+                <span>视觉包</span>
+                <select id="visualPackSelect">
+                  <option value="neon-rain">雨夜霓虹</option>
+                  <option value="velvet-perfume">酒红丝绒</option>
+                  <option value="vinyl-cocktail">黑胶鸡尾酒</option>
+                  <option value="city-after-rain">雨后城景</option>
+                  <option value="none">关闭内置图片</option>
                 </select>
               </label>
               <label class="setting-field range-field">
@@ -301,6 +313,12 @@
             <div class="btn-row wrap-row">
               <button class="btn btn-secondary btn-sm" id="btnSelectBgImage">导入背景图</button>
               <button class="btn btn-outline btn-sm" id="btnClearBgImage">清除背景</button>
+            </div>
+            <div class="visual-pack-picker" id="visualPackPicker" aria-label="内置视觉包">
+              <button class="visual-pack-tile" type="button" data-visual-pack="neon-rain"><img src="../assets/visual-packs/midnight/neon-rain.png" alt="雨夜霓虹"><span>雨夜霓虹</span></button>
+              <button class="visual-pack-tile" type="button" data-visual-pack="velvet-perfume"><img src="../assets/visual-packs/midnight/velvet-perfume.png" alt="酒红丝绒"><span>酒红丝绒</span></button>
+              <button class="visual-pack-tile" type="button" data-visual-pack="vinyl-cocktail"><img src="../assets/visual-packs/midnight/vinyl-cocktail.png" alt="黑胶鸡尾酒"><span>黑胶鸡尾酒</span></button>
+              <button class="visual-pack-tile" type="button" data-visual-pack="city-after-rain"><img src="../assets/visual-packs/midnight/city-after-rain.png" alt="雨后城景"><span>雨后城景</span></button>
             </div>
           </section>
 
