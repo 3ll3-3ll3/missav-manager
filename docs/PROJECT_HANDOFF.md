@@ -1,208 +1,186 @@
-# MissAV Manager 项目交接说明
+# TG 内容工具箱项目交接说明
 
-最后更新：2026-07-12  
-当前应用版本：`0.1.0`  
+更新时间：2026-07-24
+
+当前本地主线：`0.3.0`
+
 项目目录：`E:\Desktop\codex项目\missav-manager`
 
-## 1. 当前产品定位
+本地版本只看当前源码、正式 SQLite 和 `dist` 中实际构建的 EXE，不以 Git 提交、标签或远端 Release 判断。`0.3.0` 在 `0.2.0` 上完成工具注册表、专用入口首页、任务中心、原生 SQLite、10 万条数据库分页与渲染器安全隔离；不包含此前被丢弃的 Codex 接管、任务包或女优关注实验。
 
-MissAV Manager 已从单纯的“番号抓取和 Raindrop 导入文件生成器”，扩展成一个本地优先的 Raindrop 兼容收藏数据库：
+## 1. 产品范围
 
-- 保存用户过去收集过的全部番号，作为永久去重历史。
-- 保存普通网页和番号收藏的完整 Raindrop 字段。
-- 新内容导入前与全部历史番号比较，可选择跳过已有内容。
-- 在 App 内像 Raindrop 一样浏览 Collection、筛选记录并直接编辑详情。
-- 支持 Raindrop 官方 CSV/HTML 的双向导入导出。
-- CSV 工作台可直接编辑官方备份，同时隐藏不常用列但不丢失数据。
+应用负责：
 
-用户当前最重视两件事：
+- 以推特博主、Bad.news、MissAV、123AV 四个入口组织功能，各自保存群组绑定、输入和输出；
+- 从推特相关消息输出博主名与 x.com 主页；从 Bad.news 消息只输出规范帖子链接；
+- 从普通文本、TXT、MD、CSV、Telegram 官方 JSON/HTML、Telegram Bot API 或个人账号 API 中提取并规范番号；
+- 使用永久 SQLite 番号库去重；
+- 由用户分别启动 MissAV 与 123AV 两条独立查询支线；
+- MissAV 命中后抓取、清洗女优与类型标签，并供 Raindrop 同步或文件导出；
+- 123AV 命中后生成待收藏任务，可由 Chrome 扩展、APP 内执行器处理，或仅导出 TXT/CSV 清单；
+- 管理批次、异常重跑、表格式筛选、多选、复制、导出、日志、体检和备份恢复。
 
-1. 历史番号数据库必须足够大、稳定，导入新内容时可据此排除旧内容。
-2. 收藏数据必须可直接编辑，交互尽量接近 Raindrop，而不是只能生成一次性导入文件。
+不在当前范围：本地 Favorite/Collection 管理、女优关注、Codex 接管、任务包和自动对外执行方式对比。
 
-## 2. 当前数据架构
+## 2. 当前页面与运行顺序
 
-### 2.1 主表职责
+侧边栏只保留全局导航，工具和阶段在工作区内分级：
 
-| 表 | 职责 |
-| --- | --- |
-| `bookmarks` | 收藏主表，保存 Raindrop 字段和可选番号关联 |
-| `bookmark_collections` | Collection 目录表，保存空文件夹及父子层级 |
-| `codes` | 永久番号历史和去重索引 |
-| `actress_tags` / `actress_code_map` | 女优 Tag 及番号关系 |
-| `genre_tags` / `code_genres` | 类型 Tag 及番号关系 |
-| `processing_runs` | 处理批次统计 |
+1. `工具首页`：按文本工具、影片工具分类展示四个入口；侧栏不逐项堆工具。
+2. `任务中心`：显示 MissAV、123AV 查询、123AV 收藏、Raindrop、Telegram 的运行状态。
+3. 工具工作区：推特/Bad.news 各一个独立页面；MissAV/123AV 进入后再显示输入、执行、结果及可用同步阶段。
+4. `Telegram 来源`：Bot、个人账号 API、官方群组导出；最多选择 5 个指定群组，均为手动同步。
+5. `数据中心`：永久记录、标签、批次、维护、备份和高级表格编辑。
+6. `日志、备份与外观`：公共配置与数据库位置。
 
-`bookmarks.source_code_id` 可关联到 `codes.id`。一条番号索引可以被多条收藏引用，同一 URL 也允许出现在不同 Collection 中。
+数据库仍为每条记录保存四个固定任务槽，但 `tool_kind` 决定有效支线：
 
-### 2.2 收藏字段
+- `missavLookup`
+- `raindropSync`
+- `av123Lookup`
+- `av123Favorite`
 
-Raindrop 官方 CSV 的标准顺序是：
+- MissAV 新批次：`missavLookup` / `raindropSync` 有效，两个 123AV 槽直接 `skipped`；
+- 123AV 新批次：`av123Lookup` / `av123Favorite` 有效，两个 MissAV 槽直接 `skipped`；
+- 旧 `dual` 批次继续兼容四任务双支线。
 
-```text
-id,title,note,excerpt,url,folder,tags,created,cover,highlights,favorite
-```
+## 3. 123AV 收藏方式与站点级队列
 
-本地 `bookmarks` 还额外保存：
+`0.1.30` 保留三种明确方式：
 
-- `last_modified`：来自 HTML。
-- `code`：可选的标准番号。
-- `source_code_id`：到永久番号索引的关联。
-- `created_at` / `updated_at`：本地维护时间。
+- `Chrome 扩展`：本地 Chrome Manifest V3 扩展复用用户现有登录状态；
+- `APP 内执行器`：使用 `persist:missav-manager-123av-account` 独立会话与隐藏工作页；
+- `仅导出`：生成 TXT/CSV，不访问账号、不点击收藏。
 
-### 2.3 不可破坏的数据语义
+共同约束：
 
-- 删除一条收藏：删除 `bookmarks` 行，但不删除对应 `codes` 行。
-- 删除一个 Collection：删除该目录和子目录里的收藏，但不删除番号历史。
-- 清空收藏的番号字段：解除收藏与 `codes` 的关联，历史番号仍保留。
-- 导入带 Raindrop ID 的记录：首先按 ID 更新。
-- 导入无 ID 的 HTML：按 URL + Title + Collection 精确匹配，避免把相同 URL 的不同收藏错误合并。
-- CSV 与 HTML 同时导入：CSV 提供 ID/Excerpt 等无损字段，HTML补充层级、Notes、Highlights 和 Last Modified；空字段不覆盖已有非空字段。
+- APP 启动只绑定 `127.0.0.1` 本机端口；
+- 使用 256 位随机密钥和 Bearer 认证，密钥经 Windows `safeStorage` 加密；
+- 首次由用户在 `chrome://extensions` 手动“加载已解压的扩展程序”并粘贴配对码；
+- 扩展只读取可见账号数字、番号、标题和“保存/已保存”状态；
+- 禁止读取或输出密码、Cookie、Local Storage、Session Storage、完整 HTML；
+- “已保存”直接成功；只有明确看到“保存”才点击，点击后必须再次看到“已保存”；
+- Chrome 与 APP 远端收藏均固定 1 路；渲染层和主进程各自兜底，主进程只有一条 123AV 收藏 Promise 队列；
+- APP 模式遇到 Error 1015、网络异常或状态不明时整条 123AV 收藏队列休息 10 秒后继续，并在主轮后最多重跑一次；
+- 123AV 查询和收藏不重叠；自动收藏只在查询完全结束后启动；
+- MissAV 与未来其他网站使用自己的队列，不被 123AV 收藏暂停；
+- 登录失效或 CAPTCHA 暂停收藏；
+- 重启时遗留的 `running` 收藏必须恢复为 `verify_required`，不能盲目重复点击。
 
-## 3. Collection 目录模型
+实现文件：
 
-Collection 路径统一规范为：
+- `src/chromeFavoriteBridge.js`
+- `chrome-extension/manifest.json`
+- `chrome-extension/service-worker.js`
+- `chrome-extension/content-script.js`
+- `chrome-extension/popup.html`
+- `chrome-extension/popup.js`
 
-```text
-父文件夹 / 子文件夹 / 三级文件夹
-```
+## 4. 数据与安全边界
 
-目录行为：
+数据库默认位于 Electron `userData/data`，也可由用户迁入项目文件夹中的专用空目录。迁移必须先创建备份、执行 WAL 完整检查点、复制并校验新数据库、保留原文件，然后写入独立位置配置并重启。任何自动测试必须使用临时数据库，禁止接触正式库。
 
-- `bookmark_collections` 会自动保存每一级父目录。
-- 空文件夹可以独立存在，即使里面没有收藏。
-- App 启动迁移时会从现有 `bookmarks.folder` 自动建立目录表。
-- 重命名父目录会同步改写所有后代目录和收藏路径。
-- 点击父目录会筛选父目录本身及全部子目录记录。
-- “选择当前范围”会选中当前搜索、状态筛选和目录子树下的全部记录，不受 160 条分页限制。
-- 删除目录前 UI 会显示子目录数和收藏数，并自动创建数据库备份。
+`0.3.0` 使用 Electron/Node 内置 `node:sqlite`，数据库只在主进程核心服务中打开，启用 WAL、外键、忙等待和 FULL 同步。渲染器通过白名单 IPC 调用，不再加载数据库、文件系统或业务 Node 模块。旧 sql.js 文件是标准 SQLite，可首次原生打开；迁移前会自动在 `backups` 生成一次快照和迁移标记。
 
-注意：Raindrop CSV 没有独立的 Collection 记录，因此纯空文件夹无法通过 CSV 表达。当前 HTML 生成器也是从收藏构建目录树，空文件夹暂时不会出现在导出文件中。这是后续可完善项。
+番号管理使用数据库端搜索、筛选、排序、ID 选择和每页最多 500 条的分页，不再把 5 万条记录一次塞进渲染器。隔离压测已覆盖 100,200 条番号。
 
-## 4. 导入导出实现
+长期主数据：
 
-### 4.1 核心文件
+- `codes`：永久番号和去重索引；
+- `actresses`、`genres` 及关联表：长期标签数据；
+- `processing_runs`、`processing_run_items`、`processing_tasks`：批次、明细和四任务状态；
+- `av123_lookup_cache`：123AV 只读查询缓存；
+- `raindrop_sync_records`：远端同步映射；
+- Telegram 来源、消息指纹、群组绑定与检查点相关表。
 
-- `src/raindrop.js`：官方 CSV/HTML 解析和生成。
-- `src/csvTools.js`：通用 CSV 解析、校验、保存，以及官方异常多行修复。
-- `src/database.js`：收藏、目录、番号索引、备份和迁移。
-- `preload.js`：向 Renderer 暴露安全 API。
-- `renderer/app.js`：导入流程、收藏库、Collection 树、详情编辑和 CSV 工作台。
+`bookmarks` 与 `bookmark_collections` 只用于旧版兼容，不在当前 UI 公开，不得从 `codes` 自动重建，也不得升级时擅自删除。
 
-### 4.2 官方 CSV 异常兼容
+`0.1.32` 增加用户主动触发的“全库归零”。它与升级迁移不同：只有用户输入确认文字后才执行，先创建完整备份，然后枚举并清空 SQLite 中全部用户业务表（包括未知旧版遗留表），重置自增序号、压缩并做完整性检查。备份目录、外观设置和 Windows 安全存储凭据不属于 SQLite 业务数据，不会被删除。
 
-用户提供的官方 CSV 中有一条 Excerpt 包含未加引号的多行文本。普通 RFC CSV 解析会把该收藏拆成 13 行，并导致 URL/Collection 字段错位。
+批次删除只删除指定批次、明细和任务，必须先安全停止并自动备份；永久番号库、标签、导出文件和其他批次不能被连带删除。
 
-`src/csvTools.js` 的 `repairRaindropLineBreaks()` 只在检测到完整官方 11 列表头时启用，按数字 Raindrop ID 边界重组记录，并保留 Excerpt 换行。普通 CSV 不受此规则影响。
+## 5. 查询与速度语义
 
-## 5. UI 当前状态
+- MissAV 与 123AV 各自保存工作路、自动/固定 RPS、速率上限、学习值和网络错误策略。
+- 两站均支持 1、智能、4、6、8、12、16 路档位及 1～32 RPS 上限。
+- 123AV 不使用搜索页；访问标准详情地址及受控的已知详情后缀，必须从可见标题或代码字段精确核验番号。
+- HTTP 429、连接重置、超时、验证页等归为 `network_error`，可单条、所选或整批重跑。
+- 收藏速度与查询速度完全独立；收藏固定单路，查询仍按用户选择的高并发与 RPS 工作。
 
-### 5.1 收藏库
+## 6. Telegram 与 Raindrop
 
-当前是三栏工作区：
+- 历史底库优先使用每个自建群的 Telegram Desktop 官方 JSON/HTML 导出。
+- 今后增量优先使用 Bot API；无需 `api_id/api_hash`。个人账号 API 保留为高级补读入口。
+- 两种 API 都只允许选择最多 5 个指定群组；同步必须由用户手动发起。
+- Bot 只有一个全局更新队列；工具通过持久化的群 `sourceKey` 分别接收。一个群可同时绑定多个工具，消息不会被某个工具“消费掉”。
+- 推特与 Bad.news 不建立永久结果表；只保留当前会话结果。Telegram 来源、消息指纹、群绑定和断点继续持久化。
+- 四个工具的时间范围精确到分钟；有时间的 Telegram 消息按范围过滤，无时间的手动粘贴文本继续参与。
+- Bot Token、个人会话、API 凭据和 Raindrop Token 使用 Windows 安全存储加密。
+- 本地只保存消息身份、来源、时间、指纹、提取番号和断点，不保存完整 Telegram 消息正文。
+- MissAV 新批次创建时把当前 `actress_tags` 冻结到 `known_actresses_json`。同步时，影片任一女优命中快照进入根 Collection `missav1`；否则进入 `missav2`。缺失目录可自动创建，但必须先逐条预览、再由用户手动同步。旧批次继续使用手动 Collection。
 
-1. 左侧：真正的 Collection 树，支持展开/折叠、新建子目录、重命名和删除。
-2. 中间：收藏列表，支持分页、单选、多选、Favorite、打开链接。
-3. 右侧：直接编辑 Title、Link、Collection、Tags、Note、Created、Excerpt、Highlights、Cover、Favorite、Raindrop ID、Last Modified 和可选番号索引。
+## 7. 验证要求
 
-顶部支持搜索、筛选、排序、选择当前范围、批量删除、批量移动 Collection、批量 Tags 和导出官方 CSV/HTML。
-
-### 5.2 CSV 工作台
-
-打开官方 CSV 后：
-
-- 表格只显示 Title、URL、Folder、Tags、Created、Favorite 等高频列。
-- 右侧显示全部 11 个官方字段。
-- 隐藏列在保存时完整保留。
-- 详情编辑不会每个字符重绘，已修复焦点丢失。
-- 点击任意单元格会同步右侧详情。
-- Favorite 筛选严格读取 `favorite` 列。
-
-## 6. 启动和构建
-
-### 6.1 开发运行
-
-```powershell
-npm install
-npm start
-```
-
-源码目录的 `启动MissAV.bat` / `启动MissAV.vbs` 已加入国内 Electron 镜像修复逻辑，用于处理 `fetch failed` 和 Electron 安装不完整。
-
-### 6.2 便携版
-
-最新构建：
-
-```text
-E:\Desktop\codex项目\missav-manager\dist\MissAV_Manager_v0.1.0.exe
-```
-
-最近一次已确认文件信息：
-
-- 构建时间：2026-07-12 23:57:13
-- 大小：91,176,874 字节
-- Electron：43.1.0
-- Node.js 要求：22.12 或更高
-
-便携版内含 Electron，用户启动时不应再在线下载 Electron。
-
-## 7. 测试夹具与验证结果
-
-用户提供的官方备份文件：
-
-```text
-C:\Users\WJL\Downloads\a1f9a8ad-4477-4132-9194-cdfbe10a8d89.csv
-C:\Users\WJL\Downloads\a1f9a8ad-4477-4132-9194-cdfbe10a8d89.html
-```
-
-这些文件只能在临时数据库中测试，不能导入用户真实数据库。
-
-已验证结果：
-
-- CSV：4,532 条有效收藏。
-- HTML：4,532 条收藏。
-- CSV 导入临时库：4,532 条。
-- HTML 合并：更新 4,532 条，新增 0 条。
-- 合并后数据库：4,532 条。
-- 识别并同步到永久番号索引：3,177 条。
-- 再导出 CSV 并解析：4,532 条。
-- 再导出 HTML 并解析：4,532 条。
-
-自动测试命令：
+最低验证：
 
 ```powershell
 npm run check
 npm test
-git diff --check
 ```
 
-当前自动测试为 14 项，覆盖 CSV、数据库备份恢复、Raindrop 往返、重复 URL 收藏、番号索引解除、Collection 新建/重命名/删除、Fetcher 与 Parser。
+当前单元测试基线为 117 项。涉及 UI 时运行隔离 Electron 冒烟：
 
-## 8. 工作区状态
-
-当前修改尚未提交。`git status` 中包含大量已修改文件和新增的 `src/raindrop.js`、`test/`。不要假设所有差异都由单一 agent 产生，也不要整批回退。
-
-尤其注意：
-
-- `package-lock.json` 差异较大，提交前应单独审查其依赖和换行变化。
-- `dist/` 是构建输出，不应作为源码修改依据。
-- 用户真实数据库位于 Electron `userData` 目录，可在 App 的“外观 -> 数据位置”查看。
-- 数据库迁移前会生成备份；大批量编辑和删除 Collection 也会创建备份。
-
-2026-07-12 21:27 左右，用户连续测试了 Collection 删除和批量删除。当前真实主库状态是 `0 bookmarks / 2927 codes / 44 collections`。这不是读取错误；完整收藏仍可从以下自动备份恢复：
-
-```text
-C:\Users\WJL\AppData\Roaming\missav-manager\data\backups\missav_data_20260712_212520_delete_collection.db
+```powershell
+.\node_modules\.bin\electron.cmd .\scripts\ui-smoke.cjs
 ```
 
-该备份经只读检查包含 `4582 bookmarks / 2927 codes / 196 collections`。不要由 agent 擅自恢复，必须由用户明确选择恢复。后续各删除阶段也有 21:25-21:27 的连续备份。
+冒烟测试必须使用临时用户目录、临时 SQLite、模拟网络和模拟账号，不得连接正式数据库，不得执行真实收藏。
 
-## 9. 下一位 agent 的建议起点
+打包后运行：
 
-1. 先运行三项最低验证，确认工作区没有被后续操作破坏。
-2. 如果用户明确恢复 4582 条备份，再检查 Collection 树在真实收藏上的深层目录表现。
-3. 检查深层目录的缩进、操作按钮 hover、窄窗口响应和超长名称。
-4. 使用临时数据库测试目录新建、重命名、删除和“选择当前范围”，不要在真实库执行破坏性验收。
-5. 后续最有价值的 Raindrop 接近项：拖放移动收藏/文件夹、Shift 范围选择、右键菜单、批量移动的目录选择器、导出空文件夹、撤销最近操作。
+```powershell
+node .\scripts\verify-package.cjs
+```
 
-Windows 可视化验收已确认：应用内新建 Collection 弹窗正常；“全部收藏”右键菜单在鼠标位置显示；常显 `⋮` 和 `▸/▾` 控件正常。验收未提交新建、删除或恢复操作。数据库测试、语法检查和便携版构建均已通过。
+并检查：
+
+- EXE 文件/产品版本均为 `0.3.0`；
+- ASAR 包含工具注册表、原生 SQLite、数据库位置迁移、工具首页、任务中心和完整嵌套视觉资源；
+- ASAR 包含 Chrome 桥、APP 内执行器、仅导出入口、单路队列、10 秒恢复和自动第二轮；
+- ASAR 不包含 Codex 接管、任务包或女优关注代码；
+- 使用独立 `MISSAV_USER_DATA_DIR` 首启，确认窗口、日志、加密桥接密钥和空数据库创建成功。
+
+## 8. 构建
+
+```powershell
+$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'
+npm run build:portable
+```
+
+目标产物：`dist\TG_Content_Toolbox_v0.3.0.exe`。
+
+构建前只关闭能够通过路径、启动时间或唯一测试用户目录确认属于本项目的测试进程；不得结束用户其他 Electron 或 Chrome 进程。构建完成后把实际大小、时间、版本和 SHA-256 写回本文件。
+
+## 9. 当前构建信息
+
+- 路径：`dist\TG_Content_Toolbox_v0.3.0.exe`
+- 文件大小：`399,780,545` 字节
+- 最后写入：`2026-07-24 12:52:11`
+- 文件版本 / 产品版本：`0.3.0` / `0.3.0`
+- SHA-256：`94841863BEA9AFB9AADFB6992F92E41EAF014283DB4DAFE169ED6F4EF9530702`
+
+打包后 ASAR 关键标记和禁止标记全部通过；`src/tools` 4 个文件、5 个嵌套视觉资源均已入包，运行包不含 sql.js。使用唯一临时 `MISSAV_USER_DATA_DIR` 对最终便携 EXE 执行无界面隔离首启，退出码为 0，创建 241,664 字节原生 SQLite 空库；日志同时包含 `0.3.0`、`node:sqlite`、`app_window_ready` 和 `app_package_smoke_ready`。临时目录已安全删除，没有残留应用进程。
+
+上一版：
+
+- 路径：`dist\MissAV_Manager_v0.2.0.exe`
+- 文件大小：`418,817,176` 字节
+- 最后写入：`2026-07-24 11:41:02`
+- 文件版本 / 产品版本：`0.2.0` / `0.2.0`
+- SHA-256：`0827BFD3D8685CEDC5D945411D95603CB72FF3EA395682B3B635FA45624F2675`
+
+数据库归零和高级编辑自动测试只使用临时 SQLite；只有用户明确要求的正式归零可以写正式数据库，并且必须在所有 MissAV Manager 进程退出后执行。正式归零前后都要只读盘点表行数与 `PRAGMA integrity_check`。
+
+`0.1.32` 正式启用前归零已执行：原库先备份到 `data\backups\missav_data_20260724_001050_正式启用前完整备份.db`，随后 17 张现存用户表全部归零，总行数从 58,764 变为 0，压缩后正式库为 253,952 字节，完整性仍为 `ok`。打包 EXE 另用唯一临时用户目录完成隔离首启，成功写入 `0.1.32` 日志并创建 15 张当前版本业务表、0 行、完整性为 `ok`；测试进程和临时目录均已清理。

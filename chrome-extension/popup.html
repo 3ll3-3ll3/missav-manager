@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MissAV Manager 收藏桥</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>123AV 收藏桥</h1>
+    <p>粘贴 APP 显示的配对码。扩展只读取 123AV 页面可见状态并点击“保存”，不会读取 Cookie 或密码。</p>
+    <label for="pairingCode">配对码</label>
+    <input id="pairingCode" type="password" autocomplete="off" spellcheck="false" placeholder="MMCB1:端口:配对密钥">
+    <button id="connect" type="button">保存并连接</button>
+    <div id="status" data-kind="idle">尚未配对</div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

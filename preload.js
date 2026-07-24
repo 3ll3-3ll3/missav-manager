@@ -1,204 +1,236 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const path = require('path');
-const fs = require('fs');
 
-// ─── 加载核心模块 ────────────────────────────────────
-const parser = require('./src/parser');
-const fetcher = require('./src/fetcher');
-const exporter = require('./src/exporter');
-const utils = require('./src/utils');
-const database = require('./src/database');
-const csvTools = require('./src/csvTools');
-const raindrop = require('./src/raindrop');
-
-// ─── 数据库初始化 ────────────────────────────────────
-let dbReady = false;
-let dbInitError = '';
-
-let dbDir = '';
-
-async function resolveDbDir() {
-  const userDataDir = await ipcRenderer.invoke('app:getPath', 'userData');
-  return path.join(userDataDir, 'data');
+function coreCall(scope, method, ...args) {
+  const result = ipcRenderer.sendSync('core:call', { scope, method, args });
+  if (!result?.ok) throw new Error(result?.error || `核心调用失败：${scope}.${method}`);
+  return result.value;
 }
 
-function migrateLegacyData(targetDir) {
-  const legacyDir = path.join(__dirname, 'data');
-  const legacyDb = path.join(legacyDir, 'missav_data.db');
-  const targetDb = path.join(targetDir, 'missav_data.db');
-  if (!fs.existsSync(legacyDb) || fs.existsSync(targetDb)) return;
-
-  fs.mkdirSync(targetDir, { recursive: true });
-  fs.copyFileSync(legacyDb, targetDb);
-
-  const legacyBackups = path.join(legacyDir, 'backups');
-  const targetBackups = path.join(targetDir, 'backups');
-  if (fs.existsSync(legacyBackups) && !fs.existsSync(targetBackups)) {
-    fs.cpSync(legacyBackups, targetBackups, { recursive: true });
-  }
+function coreFn(scope, method) {
+  return (...args) => coreCall(scope, method, ...args);
 }
 
-(async () => {
-  try {
-    dbDir = await resolveDbDir();
-    migrateLegacyData(dbDir);
-    if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-    await database.init(dbDir);
-    dbReady = true;
-    console.log('[Preload] Database initialized successfully at', dbDir);
-  } catch (err) {
-    dbInitError = err.message;
-    console.error('[Preload] Database init failed:', err.message);
-  }
-})();
+function dbFn(method) {
+  return coreFn('database', method);
+}
 
-// ─── 暴露给渲染进程的安全 API ─────────────────────────
+const databaseStatus = () => coreCall('meta', 'databaseStatus');
+const exporterConstants = coreCall('meta', 'exporterConstants');
+
+const databaseApi = {
+  dbImportCSV: dbFn('importFromCSV'),
+  dbFindCode: dbFn('findCode'),
+  dbSearchActressTag: dbFn('searchActressTag'),
+  dbGetOrCreateActressTag: dbFn('getOrCreateActressTag'),
+  dbUpsertCode: dbFn('upsertCode'),
+  dbPersistProcessedCode: dbFn('persistProcessedCode'),
+  dbLinkActressCode: dbFn('linkActressCode'),
+  dbLinkGenreCode: dbFn('linkGenreCode'),
+  dbGetStats: dbFn('getStats'),
+  dbGetActressLibrary: dbFn('getActressLibrary'),
+  dbGetCodeLibrary: dbFn('getCodeLibrary'),
+  dbGetCodeLibraryPage: dbFn('getCodeLibraryPage'),
+  dbGetCodeLibraryIds: dbFn('getCodeLibraryIds'),
+  dbGetCodeLibraryByIds: dbFn('getCodeLibraryByIds'),
+  dbGetBookmarkLibrary: dbFn('getBookmarkLibrary'),
+  dbGetBookmarkStats: dbFn('getBookmarkStats'),
+  dbGetBookmarkCollections: dbFn('getBookmarkCollections'),
+  dbGetBookmarkCollectionInfo: dbFn('getBookmarkCollectionInfo'),
+  dbCreateBookmarkCollection: dbFn('createBookmarkCollection'),
+  dbRenameBookmarkCollection: dbFn('renameBookmarkCollection'),
+  dbDeleteBookmarkCollection: dbFn('deleteBookmarkCollection'),
+  dbGetBookmarkScopeInfo: dbFn('getBookmarkScopeInfo'),
+  dbDeleteBookmarksByScope: dbFn('deleteBookmarksByScope'),
+  dbImportRaindropRecords: dbFn('importRaindropRecords'),
+  dbBuildRaindropExport: dbFn('buildRaindropExport'),
+  dbExportRaindropRecords: dbFn('exportRaindropRecords'),
+  dbCreateBookmarkRecord: dbFn('createBookmarkRecord'),
+  dbUpdateBookmarkRecord: dbFn('updateBookmarkRecord'),
+  dbDeleteBookmarkRecord: dbFn('deleteBookmarkRecord'),
+  dbAnalyzeCodeImport: dbFn('analyzeCodeImport'),
+  dbImportHistoricalCodes: dbFn('importHistoricalCodes'),
+  dbImportHistoricalRecords: dbFn('importHistoricalRecords'),
+  dbGetRaindropImportRows: dbFn('getRaindropImportRows'),
+  dbGetDuplicateCodeGroups: dbFn('getDuplicateCodeGroups'),
+  dbGetHealthReport: dbFn('getHealthReport'),
+  dbCleanupOrphanTags: dbFn('cleanupOrphanTags'),
+  dbCleanupBrokenRelations: dbFn('cleanupBrokenRelations'),
+  dbCreateBackup: dbFn('createBackup'),
+  dbListBackups: dbFn('listBackups'),
+  dbDeleteBackup: dbFn('deleteBackup'),
+  dbRestoreBackup: dbFn('restoreBackup'),
+  dbGetBackupDirectory: dbFn('getBackupDirectory'),
+  dbGetDatabaseInventory: dbFn('getDatabaseInventory'),
+  dbResetAllBusinessData: dbFn('resetAllBusinessData'),
+  dbRenameActressTag: dbFn('renameActressTag'),
+  dbMergeActressTags: dbFn('mergeActressTags'),
+  dbGetGenreLibrary: dbFn('getGenreLibrary'),
+  dbCreateGenreTag: dbFn('createGenreTag'),
+  dbRenameGenreTag: dbFn('renameGenreTag'),
+  dbDeleteGenreTag: dbFn('deleteGenreTag'),
+  dbCreateActressTag: dbFn('createActressTag'),
+  dbDeleteActressTag: dbFn('deleteActressTag'),
+  dbCreateCodeRecord: dbFn('createCodeRecord'),
+  dbUpdateCodeRecord: dbFn('updateCodeRecord'),
+  dbDeleteCodeRecord: dbFn('deleteCodeRecord'),
+  dbSetCodeActressTags: dbFn('setCodeActressTags'),
+  dbSetCodeGenreTags: dbFn('setCodeGenreTags'),
+  dbGetEditableTables: dbFn('getEditableTables'),
+  dbGetRawTableRows: dbFn('getRawTableRows'),
+  dbUpdateRawCell: dbFn('updateRawCell'),
+  dbBulkUpdateRawCells: dbFn('bulkUpdateRawCells'),
+  dbInsertRawRow: dbFn('insertRawRow'),
+  dbDeleteRawRow: dbFn('deleteRawRow'),
+  dbBulkDeleteRawRows: dbFn('bulkDeleteRawRows'),
+  dbExportRawTableRows: dbFn('exportRawTableRows'),
+  dbExportCSV: dbFn('exportToCSV'),
+  dbCreateRun: dbFn('createProcessingRun'),
+  dbMarkRunItemRunning: dbFn('markProcessingRunItemRunning'),
+  dbUpdateRunItem: dbFn('updateProcessingRunItem'),
+  dbCompleteMissavRunItem: dbFn('completeMissavProcessingRunItem'),
+  dbUpdateRunTask: dbFn('updateProcessingItemTask'),
+  dbCompleteRunTaskWithCache: dbFn('completeProcessingItemTaskWithCache'),
+  dbGetRemoteSyncRecord: dbFn('getRemoteSyncRecord'),
+  dbCompleteRemoteSyncTask: dbFn('completeRemoteSyncTask'),
+  dbGetTelegramSource: dbFn('getTelegramSource'),
+  dbUpsertTelegramSource: dbFn('upsertTelegramSource'),
+  dbGetTelegramGroupSources: dbFn('getTelegramGroupSources'),
+  dbSetTelegramGroupSources: dbFn('setTelegramGroupSources'),
+  dbRecordTelegramImport: dbFn('recordTelegramImport'),
+  dbGetTelegramImportHistory: dbFn('getTelegramImportHistory'),
+  dbGetSiteLookupCache: dbFn('getSiteLookupCache'),
+  dbSetRunStatus: dbFn('setProcessingRunStatus'),
+  dbFinishRun: dbFn('finishProcessingRun'),
+  dbGetRecentRuns: dbFn('getRecentRuns'),
+  dbGetRun: dbFn('getProcessingRun'),
+  dbGetRunItem: dbFn('getProcessingRunItem'),
+  dbGetRunItems: dbFn('getProcessingRunItems'),
+  dbGetResumableRun: dbFn('getResumableProcessingRun'),
+  dbRenameRun: dbFn('renameProcessingRun'),
+  dbDeleteRun: dbFn('deleteProcessingRun'),
+  dbSetRunSpeedSettings: dbFn('setProcessingRunSpeedSettings'),
+  dbSetRunOutputDir: dbFn('setProcessingRunOutputDir'),
+};
+
 contextBridge.exposeInMainWorld('electronAPI', {
-  // ── File Dialogs ──
-  openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
-  openDirectory: (options) => ipcRenderer.invoke('dialog:openDirectory', options),
+  appVersion: ipcRenderer.sendSync('app:get-version-sync'),
+  listTools: coreFn('tools', 'listTools'),
+  getTool: coreFn('tools', 'getTool'),
 
-  // ── File System ──
+  openFile: options => ipcRenderer.invoke('dialog:openFile', options),
+  openDirectory: options => ipcRenderer.invoke('dialog:openDirectory', options),
+  getDatabaseLocation: () => ipcRenderer.invoke('database-location:status'),
+  changeDatabaseLocation: () => ipcRenderer.invoke('database-location:change'),
   readFile: (filePath, encoding) => ipcRenderer.invoke('fs:readFile', filePath, encoding),
   writeFile: (filePath, content, encoding) => ipcRenderer.invoke('fs:writeFile', filePath, content, encoding),
-  createDirectory: (dirPath) => ipcRenderer.invoke('fs:createDirectory', dirPath),
-  fileExists: (filePath) => ipcRenderer.invoke('fs:exists', filePath),
-  readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', dirPath),
+  createDirectory: dirPath => ipcRenderer.invoke('fs:createDirectory', dirPath),
+  fileExists: filePath => ipcRenderer.invoke('fs:exists', filePath),
+  readDir: dirPath => ipcRenderer.invoke('fs:readDir', dirPath),
+  parseTelegramExport: paths => ipcRenderer.invoke('telegram:parse-export', paths),
 
-  // ── Network ──
-  fetchPage: (url, options) => ipcRenderer.invoke('net:fetch', url, options),
+  extractTwitterProfiles: coreFn('toolbox', 'extractTwitterProfiles'),
+  extractBadNewsLinks: coreFn('toolbox', 'extractBadNewsLinks'),
+  filterTelegramMessagesByTime: coreFn('toolbox', 'filterMessagesByTime'),
+  telegramMessageTimeExtent: coreFn('toolbox', 'messageTimeExtent'),
 
-  // ── CSV Workbench ──
-  csvParse: (text) => csvTools.parseCSV(text),
-  csvStringify: (headers, rows) => csvTools.stringifyCSV(headers, rows),
-  csvAnalyze: (headers, rows) => csvTools.analyzeCSV(headers, rows),
-  parseRaindropCSV: (text) => raindrop.parseRaindropCSV(text),
-  parseRaindropHTML: (text) => raindrop.parseRaindropHTML(text),
-  generateOfficialRaindropCSV: (records) => raindrop.generateRaindropCSV(records),
-  generateOfficialRaindropHTML: (records) => raindrop.generateRaindropHTML(records),
+  getTelegramBotStatus: () => ipcRenderer.invoke('telegram-bot:status'),
+  connectTelegramBot: options => ipcRenderer.invoke('telegram-bot:connect', options),
+  connectTelegramBotStored: () => ipcRenderer.invoke('telegram-bot:connect-stored'),
+  clearTelegramBot: () => ipcRenderer.invoke('telegram-bot:clear'),
+  discoverTelegramBotGroups: options => ipcRenderer.invoke('telegram-bot:discover', options),
+  fetchTelegramBotUpdates: options => ipcRenderer.invoke('telegram-bot:updates', options),
+  getTelegramStatus: () => ipcRenderer.invoke('telegram:status'),
+  connectTelegramStored: () => ipcRenderer.invoke('telegram:connect-stored'),
+  startTelegramAuthorization: options => ipcRenderer.invoke('telegram:auth-start', options),
+  startTelegramQrAuthorization: options => ipcRenderer.invoke('telegram:auth-start-qr', options),
+  submitTelegramAuthorization: options => ipcRenderer.invoke('telegram:auth-submit', options),
+  cancelTelegramAuthorization: () => ipcRenderer.invoke('telegram:auth-cancel'),
+  logoutTelegram: () => ipcRenderer.invoke('telegram:logout'),
+  listTelegramGroups: () => ipcRenderer.invoke('telegram:list-groups'),
+  syncTelegramGroup: options => ipcRenderer.invoke('telegram:sync-group', options),
+  stopTelegramSync: () => ipcRenderer.invoke('telegram:sync-stop'),
+  onTelegramState: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('telegram:state', listener);
+    return () => ipcRenderer.removeListener('telegram:state', listener);
+  },
+  onTelegramProgress: callback => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('telegram:progress', listener);
+    return () => ipcRenderer.removeListener('telegram:progress', listener);
+  },
 
-  // ── Shell ──
-  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
-  showDirectory: (dirPath) => ipcRenderer.invoke('shell:openDirectory', dirPath),
+  fetchPage: (url, options) => ipcRenderer.invoke('net:fetch-page', url, options),
+  fetch123AvPage: (url, options) => ipcRenderer.invoke('net:fetch123av-page', url, options),
+  open123AvAccountWindow: options => ipcRenderer.invoke('123av-account:open', options),
+  check123AvAccount: options => ipcRenderer.invoke('123av-account:check', options),
+  favorite123AvItem: options => ipcRenderer.invoke('123av-account:favorite', options),
+  getChromeFavoriteBridgeStatus: () => ipcRenderer.invoke('chrome-favorite:status'),
+  prepareChromeFavoriteExtension: () => ipcRenderer.invoke('chrome-favorite:prepare'),
+  getRaindropAuthStatus: () => ipcRenderer.invoke('raindrop:auth-status'),
+  setRaindropToken: token => ipcRenderer.invoke('raindrop:set-token', token),
+  clearRaindropToken: () => ipcRenderer.invoke('raindrop:clear-token'),
+  testRaindropAccount: () => ipcRenderer.invoke('raindrop:test'),
+  getRaindropCollections: () => ipcRenderer.invoke('raindrop:collections'),
+  ensureRaindropCollections: names => ipcRenderer.invoke('raindrop:ensure-collections', names),
+  checkRaindropUrls: urls => ipcRenderer.invoke('raindrop:check-urls', urls),
+  upsertRaindropItem: options => ipcRenderer.invoke('raindrop:upsert', options),
 
-  // ── App ──
-  getPath: (name) => ipcRenderer.invoke('app:getPath', name),
+  csvParse: coreFn('csv', 'parseCSV'),
+  csvStringify: coreFn('csv', 'stringifyCSV'),
+  csvAnalyze: coreFn('csv', 'analyzeCSV'),
+  parseRaindropCSV: coreFn('raindrop', 'parseRaindropCSV'),
+  parseRaindropHTML: coreFn('raindrop', 'parseRaindropHTML'),
+  generateOfficialRaindropCSV: coreFn('raindrop', 'generateRaindropCSV'),
+  generateOfficialRaindropHTML: coreFn('raindrop', 'generateRaindropHTML'),
+  buildRaindropSyncPayload: coreFn('raindropApi', 'buildSyncPayload'),
+  raindropPayloadHash: coreFn('raindropApi', 'payloadHash'),
+  selectMissavRaindropCollection: coreFn('raindropApi', 'selectMissavCollectionName'),
 
-  // ═══════════════════════════════════════════
-  //  数据库操作（替代旧 CSV 读写）
-  // ═══════════════════════════════════════════
+  openExternal: url => ipcRenderer.invoke('shell:openExternal', url),
+  showDirectory: dirPath => ipcRenderer.invoke('shell:openDirectory', dirPath),
+  getPath: name => ipcRenderer.invoke('app:getPath', name),
+  logAppend: entry => ipcRenderer.invoke('logs:append', entry),
+  logReadRecent: maxBytes => ipcRenderer.invoke('logs:readRecent', maxBytes),
+  logGetInfo: () => ipcRenderer.invoke('logs:getInfo'),
 
-  // 数据库状态
-  dbIsReady: () => dbReady,
-  dbGetError: () => dbInitError,
-  dbGetPath: () => dbDir,
+  dbIsReady: () => databaseStatus().ready,
+  dbGetError: () => databaseStatus().error,
+  dbGetPath: () => databaseStatus().path,
+  dbCheckpoint: () => {
+    coreCall('database', 'save', 'FULL');
+    return true;
+  },
+  ...databaseApi,
 
-  // 导入 CSV 到数据库（首次迁移用）
-  dbImportCSV: (csvText) => database.importFromCSV(csvText),
-
-  // 番号检查（替代 parseTagCollection + findCodeInCollection）
-  dbFindCode: (code) => database.findCode(code),
-
-  // 女优 tag 搜索（替代 matchActressTag）
-  dbSearchActressTag: (name) => database.searchActressTag(name),
-  dbGetOrCreateActressTag: (name) => database.getOrCreateActressTag(name),
-
-  // 写入处理结果
-  dbUpsertCode: (code, url, status) => database.upsertCode(code, url, status),
-  dbLinkActressCode: (actressId, codeId) => database.linkActressCode(actressId, codeId),
-  dbLinkGenreCode: (genreName, codeId) => database.linkGenreCode(genreName, codeId),
-
-  // 统计
-  dbGetStats: () => database.getStats(),
-  dbGetActressLibrary: (options) => database.getActressLibrary(options),
-  dbGetCodeLibrary: (options) => database.getCodeLibrary(options),
-  dbGetBookmarkLibrary: (options) => database.getBookmarkLibrary(options),
-  dbGetBookmarkStats: () => database.getBookmarkStats(),
-  dbGetBookmarkCollections: () => database.getBookmarkCollections(),
-  dbGetBookmarkCollectionInfo: (path) => database.getBookmarkCollectionInfo(path),
-  dbCreateBookmarkCollection: (path) => database.createBookmarkCollection(path),
-  dbRenameBookmarkCollection: (path, nextPath) => database.renameBookmarkCollection(path, nextPath),
-  dbDeleteBookmarkCollection: (path) => database.deleteBookmarkCollection(path),
-  dbGetBookmarkScopeInfo: (scope) => database.getBookmarkScopeInfo(scope),
-  dbDeleteBookmarksByScope: (scope) => database.deleteBookmarksByScope(scope),
-  dbImportRaindropRecords: (records, options) => database.importRaindropRecords(records, options),
-  dbExportRaindropRecords: () => database.exportRaindropRecords(),
-  dbCreateBookmarkRecord: (record) => database.createBookmarkRecord(record),
-  dbUpdateBookmarkRecord: (id, patch) => database.updateBookmarkRecord(id, patch),
-  dbDeleteBookmarkRecord: (id) => database.deleteBookmarkRecord(id),
-  dbAnalyzeCodeImport: (codes) => database.analyzeCodeImport(codes),
-  dbImportHistoricalCodes: (codes) => database.importHistoricalCodes(codes),
-  dbImportHistoricalRecords: (records) => database.importHistoricalRecords(records),
-  dbGetRaindropImportRows: (options) => database.getRaindropImportRows(options),
-  dbGetDuplicateCodeGroups: () => database.getDuplicateCodeGroups(),
-  dbGetHealthReport: (options) => database.getHealthReport(options),
-  dbCleanupOrphanTags: (kind) => database.cleanupOrphanTags(kind),
-  dbCleanupBrokenRelations: () => database.cleanupBrokenRelations(),
-  dbCreateBackup: (label, reason) => database.createBackup(label, reason),
-  dbListBackups: () => database.listBackups(),
-  dbDeleteBackup: (fileName) => database.deleteBackup(fileName),
-  dbRestoreBackup: (fileName) => database.restoreBackup(fileName),
-  dbGetBackupDirectory: () => database.getBackupDirectory(),
-  dbRenameActressTag: (id, newName) => database.renameActressTag(id, newName),
-  dbMergeActressTags: (sourceId, targetId) => database.mergeActressTags(sourceId, targetId),
-  dbGetGenreLibrary: (options) => database.getGenreLibrary(options),
-  dbCreateGenreTag: (name) => database.createGenreTag(name),
-  dbRenameGenreTag: (id, newName) => database.renameGenreTag(id, newName),
-  dbDeleteGenreTag: (id) => database.deleteGenreTag(id),
-  dbCreateActressTag: (name) => database.createActressTag(name),
-  dbDeleteActressTag: (id) => database.deleteActressTag(id),
-  dbCreateCodeRecord: (code, url, status) => database.createCodeRecord(code, url, status),
-  dbUpdateCodeRecord: (id, patch) => database.updateCodeRecord(id, patch),
-  dbDeleteCodeRecord: (id) => database.deleteCodeRecord(id),
-  dbSetCodeActressTags: (codeId, tagNames) => database.setCodeActressTags(codeId, tagNames),
-  dbSetCodeGenreTags: (codeId, genreNames) => database.setCodeGenreTags(codeId, genreNames),
-  dbGetEditableTables: () => database.getEditableTables(),
-  dbGetRawTableRows: (table, options) => database.getRawTableRows(table, options),
-  dbUpdateRawCell: (table, pk, column, value) => database.updateRawCell(table, pk, column, value),
-  dbInsertRawRow: (table, row) => database.insertRawRow(table, row),
-  dbDeleteRawRow: (table, pk) => database.deleteRawRow(table, pk),
-  // 导出 CSV（兼容旧格式）
-  dbExportCSV: () => database.exportToCSV(),
-
-  // 处理记录
-  dbCreateRun: () => database.createProcessingRun(),
-  dbFinishRun: (runId, stats) => database.finishProcessingRun(runId, stats),
-  dbGetRecentRuns: (limit) => database.getRecentRuns(limit),
-
-  // ═══════════════════════════════════════════
-  //  核心业务函数（不变）
-  // ═══════════════════════════════════════════
-
-  // Parser
-  normalizeCode: (s) => parser.normalizeCode(s),
-  extractFC2Number: (s) => parser.extractFC2Number(s),
-  codeComparableKey: (code) => parser.codeComparableKey(code),
-  candidateUrls: (code) => parser.candidateUrls(code),
-  parseCodeList: (text) => parser.parseCodeList(text),
-
-  // Fetcher (页面解析)
-  checkPageStatus: (html, code, url) => fetcher.checkPageStatus(html, code, url),
-  extractActressTags: (html) => fetcher.extractActressTags(html),
-  extractGenreTags: (html) => fetcher.extractGenreTags(html),
-
-  // Exporter
-  buildOutputRow: (code, url, status, actresses, genres, matchedTag, skippedReason, includeInImport) =>
-    exporter.buildOutputRow(code, url, status, actresses, genres, matchedTag, skippedReason, includeInImport),
-  generateRaindropHTML: (rows) => exporter.generateRaindropHTML(rows),
-  generateRaindropCSV: (rows) => exporter.generateRaindropCSV(rows),
-  generateReportCSV: (rows) => exporter.generateReportCSV(rows),
-  // CSV 导出改为从数据库读取
-  generateTagCollectionCSV: () => database.exportToCSV(),
-  generateBackupJSON: (rows, collRows, stats) => exporter.generateBackupJSON(rows, collRows, stats),
-  isManualVerifyRow: (row) => exporter.isManualVerifyRow(row),
-  timePrefixToMinute: () => exporter.timePrefixToMinute(),
-
-  // Constants
-  MANUAL_VERIFY_FOLDER: exporter.MANUAL_VERIFY_FOLDER,
-  MAIN_FOLDER: exporter.MAIN_FOLDER,
-  NEED_CHECK_TAG: exporter.NEED_CHECK_TAG,
-  UNKNOWN_ACTRESS_TAG: exporter.UNKNOWN_ACTRESS_TAG,
-
-  // Utils
-  sleep: (ms) => utils.sleep(ms),
+  normalizeCode: coreFn('parser', 'normalizeCode'),
+  extractFC2Number: coreFn('parser', 'extractFC2Number'),
+  codeComparableKey: coreFn('parser', 'codeComparableKey'),
+  candidateUrls: coreFn('parser', 'candidateUrls'),
+  parseCodeList: coreFn('input', 'parseInputCodeList'),
+  checkPageStatus: coreFn('fetcher', 'checkPageStatus'),
+  classifyCandidateResponse: coreFn('fetcher', 'classifyCandidateResponse'),
+  resolveCandidateAttempts: coreFn('fetcher', 'resolveCandidateAttempts'),
+  shouldStopCandidateSearch: coreFn('fetcher', 'shouldStopCandidateSearch'),
+  extractActressTags: coreFn('fetcher', 'extractActressTags'),
+  extractGenreTags: coreFn('fetcher', 'extractGenreTags'),
+  build123AvSearchUrl: coreFn('av123', 'buildSearchUrl'),
+  build123AvDetailUrl: coreFn('av123', 'buildDetailUrl'),
+  build123AvDetailCandidateUrls: coreFn('av123', 'buildDetailCandidateUrls'),
+  classify123AvResponse: coreFn('av123', 'classifyResponse'),
+  buildOutputRow: coreFn('exporter', 'buildOutputRow'),
+  generateRaindropHTML: coreFn('exporter', 'generateRaindropHTML'),
+  generateRaindropCSV: coreFn('exporter', 'generateRaindropCSV'),
+  generateReportCSV: coreFn('exporter', 'generateReportCSV'),
+  buildTagExportGroups: coreFn('exporter', 'buildTagExportGroups'),
+  generateTagExportIndexCSV: coreFn('exporter', 'generateTagExportIndexCSV'),
+  generateTagCollectionCSV: dbFn('exportToCSV'),
+  generateBackupJSON: coreFn('exporter', 'generateBackupJSON'),
+  isManualVerifyRow: coreFn('exporter', 'isManualVerifyRow'),
+  timePrefixToMinute: coreFn('exporter', 'timePrefixToMinute'),
+  MANUAL_VERIFY_FOLDER: exporterConstants.MANUAL_VERIFY_FOLDER,
+  MAIN_FOLDER: exporterConstants.MAIN_FOLDER,
+  NEED_CHECK_TAG: exporterConstants.NEED_CHECK_TAG,
+  UNKNOWN_ACTRESS_TAG: exporterConstants.UNKNOWN_ACTRESS_TAG,
+  sleep: ms => new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0))),
 });

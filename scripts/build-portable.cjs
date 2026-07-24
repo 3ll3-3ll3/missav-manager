@@ -4,17 +4,19 @@ const { spawnSync } = require('child_process');
 
 const root = join(__dirname, '..');
 const builderCli = join(root, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
-const target = join(root, 'dist', 'MissAV_Manager_v0.1.0.exe');
+const { version } = require(join(root, 'package.json'));
+const target = join(root, 'dist', `TG_Content_Toolbox_v${version}.exe`);
 
 if (!existsSync(builderCli)) {
-  console.error('未找到 electron-builder。请先运行 npm install，或双击 启动MissAV.bat 修复依赖。');
+  console.error('未找到 electron-builder。请先运行 npm install 安装依赖。');
   process.exit(1);
 }
 
 if (process.platform === 'win32') {
-  const taskList = spawnSync('tasklist', ['/FI', 'IMAGENAME eq MissAV_Manager.exe', '/NH'], { encoding: 'utf8' });
-  if (taskList.status === 0 && /MissAV_Manager\.exe/i.test(taskList.stdout)) {
-    console.error('检测到 MissAV_Manager 正在运行。请先退出应用，再重新执行打包。');
+  const targetImageName = `TG_Content_Toolbox_v${version}.exe`;
+  const taskList = spawnSync('tasklist', ['/FI', `IMAGENAME eq ${targetImageName}`, '/NH'], { encoding: 'utf8' });
+  if (taskList.status === 0 && taskList.stdout.toLowerCase().includes(targetImageName.toLowerCase())) {
+    console.error(`检测到 ${targetImageName} 正在运行。请先退出该版本，再重新执行打包。`);
     process.exit(1);
   }
 }

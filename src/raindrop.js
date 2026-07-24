@@ -23,6 +23,7 @@ function parseRaindropCSV(text) {
       cover: value(row, 'cover'),
       highlights: value(row, 'highlights'),
       favorite: value(row, 'favorite').toLowerCase() === 'true',
+      favorite_present: indexes.has('favorite'),
     }))
     .filter(row => row.raindrop_id || row.url || row.title);
 }
@@ -112,6 +113,7 @@ function parseRaindropHTML(text) {
         cover: attrs['DATA-COVER'] || '',
         highlights: '',
         favorite: String(attrs['DATA-IMPORTANT'] || '').toLowerCase() === 'true',
+        favorite_present: Object.prototype.hasOwnProperty.call(attrs, 'DATA-IMPORTANT'),
         last_modified: epochToIso(attrs.LAST_MODIFIED),
       };
       records.push(current);
