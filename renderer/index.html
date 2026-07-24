@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MissAV Manager</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <title>TG 内容工具箱</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body data-theme="mint">
@@ -11,82 +12,701 @@
 
   <header class="app-header">
     <div class="header-left">
-      <span class="logo-icon">M</span>
-      <h1 class="app-title">MissAV <span class="title-highlight">Manager</span></h1>
-      <span class="version-badge">v0.1</span>
+      <span class="logo-icon">T</span>
+      <h1 class="app-title">TG 内容<span class="title-highlight">工具箱</span></h1>
+      <span class="version-badge" id="versionBadge">v0.3.0</span>
     </div>
     <div class="header-right">
-      <button class="btn-icon" id="btnHistory" title="处理历史">H</button>
-      <button class="btn-icon" id="btnSettings" title="外观设置">S</button>
-      <button class="btn-icon" id="btnHelp" title="帮助">?</button>
+      <button class="btn-icon" id="btnHistory" type="button" title="处理历史" aria-label="处理历史"><i data-lucide="history"></i></button>
+      <button class="btn-icon" id="btnSettings" type="button" title="外观设置" aria-label="外观设置"><i data-lucide="palette"></i></button>
+      <button class="btn-icon" id="btnHelp" type="button" title="帮助" aria-label="帮助"><i data-lucide="circle-help"></i></button>
     </div>
   </header>
 
   <main class="app-main">
     <aside class="side-nav" aria-label="主导航">
-      <button class="nav-btn active" data-page="process"><span>处理</span><small>输入与运行</small></button>
-      <button class="nav-btn" data-page="results"><span>结果</span><small>表格与导出</small></button>
-      <button class="nav-btn" data-page="library"><span>数据</span><small>本地库 / CSV</small></button>
-      <button class="nav-btn" data-page="settings"><span>外观</span><small>主题与背景</small></button>
+      <span class="nav-section-label">工作区</span>
+      <button class="nav-btn active" data-page="home"><span>工具首页</span><small>分类入口与最近状态</small></button>
+      <button class="nav-btn" data-page="tasks"><span>任务中心</span><small>后台运行与异常</small></button>
+      <span class="nav-section-label">全局</span>
+      <button class="nav-btn" data-page="sources"><span>Telegram 来源</span><small>群组与登录</small></button>
+      <button class="nav-btn" data-page="library"><span>数据中心</span><small>番号 / 标签 / 批次</small></button>
+      <button class="nav-btn" data-page="settings"><span>日志、备份与外观</span><small>公共设置</small></button>
     </aside>
 
     <section class="page-stack">
-      <section class="app-page active" data-page-panel="process">
+      <nav class="tool-workspace-bar" id="toolWorkspaceBar" aria-label="当前工具导航" hidden>
+        <button class="tool-workspace-back" id="btnBackToolHome" type="button"><i data-lucide="arrow-left"></i><span>工具首页</span></button>
+        <div class="tool-workspace-identity">
+          <small>当前工具</small>
+          <strong id="toolWorkspaceTitle">—</strong>
+        </div>
+        <div class="tool-workspace-stages" id="avToolStages" hidden>
+          <button class="tool-stage-btn" data-page="process"><span>输入</span></button>
+          <button class="tool-stage-btn" data-page="sites"><span>执行</span></button>
+          <button class="tool-stage-btn" data-page="results"><span>结果</span></button>
+          <button class="tool-stage-btn" data-page="sync" data-missav-stage><span>Raindrop</span></button>
+        </div>
+      </nav>
+
+      <section class="app-page active" data-page-panel="home">
+        <div class="tool-home">
+          <section class="tool-home-hero">
+            <div>
+              <span class="toolbox-eyebrow">TG 内容工具箱</span>
+              <h2>选择一个工具开始</h2>
+              <p>各工具拥有独立输入、状态和结果；网站任务离开页面后仍可继续运行。</p>
+            </div>
+            <div class="tool-home-summary">
+              <span><strong id="homeToolCount">4</strong> 个工具</span>
+              <span><strong id="homeRunningCount">0</strong> 个运行中</span>
+            </div>
+          </section>
+          <div id="toolHomeCategories" class="tool-home-categories"></div>
+          <section class="tool-home-notice" id="telegramSyncWarning" hidden>
+            <i data-lucide="triangle-alert"></i>
+            <div><strong>Telegram 增量可能需要同步</strong><span id="telegramSyncWarningText"></span></div>
+            <button class="btn btn-outline btn-sm" type="button" data-page-target="sources">查看来源</button>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="tasks">
+        <div class="task-center-page">
+          <section class="module-card">
+            <div class="module-header">
+              <div><span class="toolbox-eyebrow">全局状态</span><h2>任务中心</h2><span class="module-subtitle">不同网站可以并行；同一网站仍使用自己的受控队列</span></div>
+              <span class="badge" id="taskCenterBadge">全部空闲</span>
+            </div>
+            <div class="task-center-grid" id="taskCenterGrid">
+              <article class="task-center-card" data-task-card="missav"><div><strong>MissAV</strong><span id="taskMissavStatus">空闲</span></div><button class="btn btn-outline btn-sm" type="button" data-open-tool="missav">打开</button></article>
+              <article class="task-center-card" data-task-card="av123"><div><strong>123AV 查询</strong><span id="task123Status">空闲</span></div><button class="btn btn-outline btn-sm" type="button" data-open-tool="av123">打开</button></article>
+              <article class="task-center-card" data-task-card="favorite"><div><strong>123AV 收藏</strong><span id="taskFavoriteStatus">空闲</span></div><button class="btn btn-outline btn-sm" type="button" data-open-tool="av123" data-open-stage="sites">打开</button></article>
+              <article class="task-center-card" data-task-card="raindrop"><div><strong>Raindrop</strong><span id="taskRaindropStatus">空闲</span></div><button class="btn btn-outline btn-sm" type="button" data-open-tool="missav" data-open-stage="sync">打开</button></article>
+              <article class="task-center-card" data-task-card="telegram"><div><strong>Telegram</strong><span id="taskTelegramStatus">空闲</span></div><button class="btn btn-outline btn-sm" type="button" data-page-target="sources">打开</button></article>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="twitter">
+        <div class="toolbox-page">
+          <section class="module-card toolbox-filter-card" data-simple-tool="twitter">
+            <div class="module-header">
+              <div>
+                <span class="toolbox-eyebrow">独立工具</span>
+                <h2>推特博主过滤</h2>
+                <span class="module-subtitle">从指定 Telegram 群或手动文件提取博主名，并生成可直接访问的 X 主页链接</span>
+              </div>
+              <span class="badge" id="twitterResultCount">0 位博主</span>
+            </div>
+            <div class="toolbox-source-grid">
+              <label><span>绑定 Telegram 群组</span><select id="twitterGroupBinding"><option value="">不绑定，只用手动输入</option></select></label>
+              <label><span>开始时间（精确到分钟）</span><input id="twitterTimeStart" type="datetime-local" step="60"></label>
+              <label><span>结束时间（精确到分钟）</span><input id="twitterTimeEnd" type="datetime-local" step="60"></label>
+            </div>
+            <div class="toolbox-source-actions">
+              <button class="btn btn-primary btn-sm" id="btnTwitterSyncGroup" type="button"><i data-lucide="refresh-cw"></i><span>同步绑定群组</span></button>
+              <button class="btn btn-secondary btn-sm" id="btnTwitterImportFiles" type="button"><i data-lucide="files"></i><span>导入多个文件</span></button>
+              <button class="btn btn-outline btn-sm" id="btnTwitterFilter" type="button"><i data-lucide="filter"></i><span>重新过滤</span></button>
+              <button class="btn btn-outline btn-sm tool-button-danger" id="btnTwitterClear" type="button"><i data-lucide="trash-2"></i><span>清空本工具</span></button>
+              <span class="toolbox-source-status" id="twitterSourceStatus">当前会话尚无输入；结果不会写入永久数据库</span>
+            </div>
+            <label class="toolbox-raw-input">
+              <span><strong>消息或文件内容</strong><small>支持粘贴文本、Telegram HTML / JSON、TXT、Markdown</small></span>
+              <textarea id="twitterRawInput" spellcheck="false" placeholder="粘贴 Telegram 消息或网页文本；也可导入多个文件"></textarea>
+            </label>
+            <div class="toolbox-output-grid toolbox-output-grid-two">
+              <section>
+                <div class="toolbox-output-head"><strong>博主名</strong><button class="btn btn-outline btn-sm" id="btnCopyTwitterNames" type="button">复制</button></div>
+                <textarea id="twitterNamesOutput" readonly spellcheck="false" placeholder="一行一个博主名"></textarea>
+              </section>
+              <section>
+                <div class="toolbox-output-head"><strong>主页链接</strong><button class="btn btn-outline btn-sm" id="btnCopyTwitterUrls" type="button">复制</button></div>
+                <textarea id="twitterUrlsOutput" readonly spellcheck="false" placeholder="一行一个 https://x.com/..."></textarea>
+              </section>
+            </div>
+            <div class="toolbox-export-row">
+              <button class="btn btn-success btn-sm" id="btnSaveTwitterResults" type="button"><i data-lucide="save"></i><span>导出两个 TXT</span></button>
+              <span>按首次出现顺序输出；大小写不敏感去重。</span>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="badnews">
+        <div class="toolbox-page">
+          <section class="module-card toolbox-filter-card" data-simple-tool="badnews">
+            <div class="module-header">
+              <div>
+                <span class="toolbox-eyebrow">独立工具</span>
+                <h2>Bad.news 帖子过滤</h2>
+                <span class="module-subtitle">只保留 bad.news/t/数字 帖子链接，自动排除官网 APP 下载链接和其他页面</span>
+              </div>
+              <span class="badge" id="badnewsResultCount">0 条链接</span>
+            </div>
+            <div class="toolbox-source-grid">
+              <label><span>绑定 Telegram 群组</span><select id="badnewsGroupBinding"><option value="">不绑定，只用手动输入</option></select></label>
+              <label><span>开始时间（精确到分钟）</span><input id="badnewsTimeStart" type="datetime-local" step="60"></label>
+              <label><span>结束时间（精确到分钟）</span><input id="badnewsTimeEnd" type="datetime-local" step="60"></label>
+            </div>
+            <div class="toolbox-source-actions">
+              <button class="btn btn-primary btn-sm" id="btnBadnewsSyncGroup" type="button"><i data-lucide="refresh-cw"></i><span>同步绑定群组</span></button>
+              <button class="btn btn-secondary btn-sm" id="btnBadnewsImportFiles" type="button"><i data-lucide="files"></i><span>导入多个文件</span></button>
+              <button class="btn btn-outline btn-sm" id="btnBadnewsFilter" type="button"><i data-lucide="filter"></i><span>重新过滤</span></button>
+              <button class="btn btn-outline btn-sm tool-button-danger" id="btnBadnewsClear" type="button"><i data-lucide="trash-2"></i><span>清空本工具</span></button>
+              <span class="toolbox-source-status" id="badnewsSourceStatus">当前会话尚无输入；结果不会写入永久数据库</span>
+            </div>
+            <label class="toolbox-raw-input">
+              <span><strong>消息或文件内容</strong><small>支持粘贴文本、Telegram HTML / JSON、TXT、Markdown</small></span>
+              <textarea id="badnewsRawInput" spellcheck="false" placeholder="粘贴 Telegram 消息或网页文本；也可导入多个文件"></textarea>
+            </label>
+            <div class="toolbox-output-grid">
+              <section>
+                <div class="toolbox-output-head"><strong>Bad.news 帖子链接</strong><button class="btn btn-outline btn-sm" id="btnCopyBadnewsUrls" type="button">复制</button></div>
+                <textarea id="badnewsUrlsOutput" readonly spellcheck="false" placeholder="一行一个 https://bad.news/t/数字"></textarea>
+              </section>
+            </div>
+            <div class="toolbox-export-row">
+              <button class="btn btn-success btn-sm" id="btnSaveBadnewsResults" type="button"><i data-lucide="save"></i><span>导出 TXT</span></button>
+              <span>查询参数与片段会被移除；结果按首次出现顺序去重。</span>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="process">
         <div class="page-grid process-grid">
           <section class="module-card module-input input-panel">
             <div class="module-header">
               <div>
-                <h2>番号处理</h2>
+                <h2 id="avInputTitle">MissAV 番号输入</h2>
                 <span class="module-subtitle" id="inputSourceInfo">文本 / HTML / TXT / MD</span>
               </div>
-              <span class="badge" id="codeCount">0 条</span>
+              <div class="module-header-actions">
+                <span class="badge" id="codeCount">0 条</span>
+                <button class="btn btn-outline btn-sm" id="btnPasteSample" type="button">示例</button>
+              </div>
             </div>
-            <textarea
-              id="codeInput"
-              class="code-textarea"
-              placeholder="粘贴任意文本、Telegram HTML、Markdown、MissAV 链接或番号"
-              spellcheck="false"
-            ></textarea>
+            <div class="toolbox-source-grid toolbox-av-source-grid">
+              <label><span id="avGroupBindingLabel">MissAV 绑定 Telegram 群组</span><select id="avGroupBinding"><option value="">不绑定，只用手动输入</option></select></label>
+              <label><span>开始时间（精确到分钟）</span><input id="avTimeStart" type="datetime-local" step="60"></label>
+              <label><span>结束时间（精确到分钟）</span><input id="avTimeEnd" type="datetime-local" step="60"></label>
+            </div>
+            <div class="toolbox-source-actions">
+              <button class="btn btn-primary btn-sm" id="btnAvSyncGroup" type="button"><i data-lucide="refresh-cw"></i><span>同步本工具绑定群组</span></button>
+              <span class="toolbox-source-status" id="avGroupBindingStatus">同一个群可同时绑定 MissAV 与 123AV，消息会分别进入各自过滤器。</span>
+            </div>
+            <div class="code-input-stack">
+              <label class="code-input-section">
+                <span class="code-input-section-head"><strong>原始文字</strong><small>粘贴 TG、网页、HTML、Markdown 或混合文本</small></span>
+                <textarea
+                  id="codeInput"
+                  class="code-textarea"
+                  placeholder="粘贴任意文本、Telegram HTML、Markdown、MissAV 链接或番号"
+                  spellcheck="false"
+                ></textarea>
+              </label>
+              <label class="code-input-section filtered-code-section">
+                <span class="code-input-section-head"><strong>过滤后的番号</strong><small id="filteredCodeCount">0 条 · 一行一个</small></span>
+                <textarea
+                  id="filteredCodeOutput"
+                  class="code-textarea filtered-code-textarea"
+                  placeholder="识别结果会自动显示在这里"
+                  spellcheck="false"
+                  readonly
+                ></textarea>
+              </label>
+            </div>
             <div class="input-actions split-actions">
               <div class="btn-row">
-                <button class="btn btn-secondary btn-sm" id="btnImportTextFile">导入文件</button>
-                <button class="btn btn-secondary btn-sm" id="btnImportTextFiles">批量导入</button>
-                <button class="btn btn-outline btn-sm" id="btnCopyCodes">复制识别结果</button>
-                <button class="btn btn-outline btn-sm" id="btnExportCodeList">保存清单</button>
-                <button class="btn btn-outline btn-sm" id="btnClearInput">清空</button>
+                <button class="btn btn-secondary btn-sm tool-button" id="btnImportTextFile" type="button" title="导入一个或多个文件" aria-label="导入一个或多个文件"><i data-lucide="files"></i></button>
+                <button class="btn btn-outline btn-sm tool-button" id="btnCopyCodes" type="button" title="复制识别结果" aria-label="复制识别结果"><i data-lucide="copy"></i></button>
+                <button class="btn btn-outline btn-sm tool-button" id="btnExportCodeList" type="button" title="保存清单" aria-label="保存清单"><i data-lucide="save"></i></button>
+                <button class="btn btn-outline btn-sm tool-button tool-button-danger" id="btnClearInput" type="button" title="清空输入" aria-label="清空输入"><i data-lucide="trash-2"></i></button>
               </div>
               <div class="status-bar" id="statusBar">
                 <span class="status-dot status-idle"></span>
                 <span class="status-text">就绪</span>
               </div>
             </div>
+            <div class="input-next-strip">
+              <span>番号确认后，到站点工作台选择要运行的网站；不会自动同时联网。</span>
+              <button class="btn btn-primary btn-sm" id="btnOpenSitesFromInput" type="button"><i data-lucide="panels-top-left"></i><span>打开站点工作台</span></button>
+            </div>
           </section>
+        </div>
+      </section>
 
-          <section class="module-card run-panel">
+      <section class="app-page" data-page-panel="sources">
+        <div class="telegram-source-shell">
+          <section class="module-card telegram-source-card">
             <div class="module-header">
               <div>
-                <h2>运行控制</h2>
+                <h2>消息来源</h2>
+                <span class="module-subtitle">统一接收最多 5 个群组，再按各工具的群组绑定分别过滤</span>
+              </div>
+              <span class="badge" id="telegramSourceStateBadge">未连接</span>
+            </div>
+
+            <div class="telegram-source-layout">
+              <aside class="telegram-source-nav" aria-label="Telegram 来源方式">
+                <span>接入方式</span>
+                <button class="active" type="button" data-telegram-panel="bot" aria-pressed="true">
+                  <i data-lucide="bot"></i>
+                  <strong>机器人增量</strong>
+                  <small>无需 api_id / api_hash</small>
+                </button>
+                <button type="button" data-telegram-panel="api" aria-pressed="false">
+                  <i data-lucide="cloud-download"></i>
+                  <strong>个人账号 API</strong>
+                  <small>可补读群组历史</small>
+                </button>
+                <button type="button" data-telegram-panel="export" aria-pressed="false">
+                  <i data-lucide="folder-input"></i>
+                  <strong>官方导出文件</strong>
+                  <small>JSON / HTML / 文件夹</small>
+                </button>
+                <span class="telegram-source-nav-note">一个接收队列可同时服务多个工具；同一群也能绑定多个工具。三种方式共享历史去重，数据库不保存完整消息文字。</span>
+              </aside>
+
+              <div class="telegram-source-workspace">
+                <section class="telegram-source-panel active" data-telegram-panel-content="bot">
+                  <div class="telegram-panel-heading">
+                    <div><h3>Telegram Bot API</h3><p id="telegramBotAccountSummary">尚未配置机器人</p></div>
+                    <div class="btn-row">
+                      <button class="btn btn-outline btn-sm" id="btnTelegramBotConnectStored" type="button">连接已保存机器人</button>
+                      <button class="btn btn-outline btn-sm" id="btnTelegramBotClear" type="button">清除机器人</button>
+                    </div>
+                  </div>
+                  <div class="telegram-safety-note">
+                    <i data-lucide="shield-check"></i>
+                    <span>不需要登录 my.telegram.org。Token 仅由 Windows 安全存储加密保存，不写入日志或 SQLite；机器人统一接收最多 5 个群组，再按工具绑定分别投递，不会自动启动网站查询。</span>
+                  </div>
+                  <div class="telegram-bot-setup">
+                    <div class="telegram-bot-steps">
+                      <strong>首次设置</strong>
+                      <span>1. 在 <code>@BotFather</code> 使用 <code>/newbot</code> 创建机器人</span>
+                      <span>2. 使用 <code>/setprivacy</code> 选择机器人并设为 <code>Disable</code></span>
+                      <span>3. 把机器人加入群组；改过隐私设置时重新加入</span>
+                      <span>4. 每个群发送一条普通识别消息，再点击“发现群组”</span>
+                    </div>
+                    <div class="telegram-bot-token-row">
+                      <label><span>Bot Token</span><input id="telegramBotToken" type="password" autocomplete="off" spellcheck="false" placeholder="从 @BotFather 复制，只需填写一次"></label>
+                      <button class="btn btn-primary" id="btnTelegramBotConnect" type="button"><i data-lucide="plug-zap"></i><span>连接并安全保存</span></button>
+                      <button class="btn btn-outline btn-sm" id="btnTelegramBotFather" type="button">打开 @BotFather</button>
+                    </div>
+                  </div>
+                  <div class="telegram-group-manager">
+                    <div class="telegram-group-manager-head">
+                      <div>
+                        <strong>机器人来源群组 <span id="telegramBotGroupSelectionCount">0 / 5</span></strong>
+                        <small>机器人只能发现加入后出现过消息的群。用于发现的识别消息会作为首次基线，不进入番号结果。</small>
+                      </div>
+                      <div class="btn-row">
+                        <button class="btn btn-outline btn-sm" id="btnTelegramBotDiscover" type="button"><i data-lucide="radar"></i><span>发现群组</span></button>
+                        <button class="btn btn-primary btn-sm" id="btnTelegramBotSaveGroups" type="button"><i data-lucide="save"></i><span>保存来源</span></button>
+                      </div>
+                    </div>
+                    <input id="telegramBotGroupSearch" type="search" placeholder="搜索已发现的群名称或 @用户名" autocomplete="off">
+                    <div class="telegram-group-picker" id="telegramBotGroupPicker">
+                      <div class="telegram-history-empty">连接机器人并在群里发送识别消息后，点击“发现群组”</div>
+                    </div>
+                    <div class="telegram-selected-sources" id="telegramBotSelectedSources">
+                      <div class="telegram-history-empty">尚未绑定机器人增量来源</div>
+                    </div>
+                  </div>
+                  <div class="telegram-sync-box">
+                    <div class="telegram-sync-settings">
+                      <label><span>本次最多接收</span>
+                        <select id="telegramBotSyncLimit">
+                          <option value="500" selected>500 条更新</option>
+                          <option value="1000">1000 条更新</option>
+                          <option value="5000">5000 条更新</option>
+                          <option value="20000">20000 条更新</option>
+                        </select>
+                      </label>
+                      <div class="telegram-bot-retention-note">
+                        <strong>24 小时队列提醒</strong>
+                        <span>未被任何接收端取走的机器人更新只临时保留；同步写入本地后会永久保存。电脑长期关机时用官方导出文件补齐。</span>
+                      </div>
+                    </div>
+                    <div class="telegram-sync-actions">
+                      <button class="btn btn-success" id="btnTelegramBotSync" type="button"><i data-lucide="refresh-cw"></i><span>同步全部机器人来源</span></button>
+                      <button class="btn btn-danger" id="btnTelegramBotStopSync" type="button" hidden><i data-lucide="square"></i><span>停止同步</span></button>
+                      <span id="telegramBotSyncProgress">等待连接</span>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="telegram-source-panel" data-telegram-panel-content="api" hidden>
+                  <div class="telegram-panel-heading">
+                    <div><h3>Telegram 用户 API</h3><p id="telegramAccountSummary">尚未配置账号</p></div>
+                    <div class="btn-row">
+                      <button class="btn btn-outline btn-sm" id="btnTelegramConnectStored" type="button">连接已保存会话</button>
+                      <button class="btn btn-outline btn-sm" id="btnTelegramLogout" type="button">退出并清除</button>
+                    </div>
+                  </div>
+                  <div class="telegram-safety-note">
+                    <i data-lucide="shield-check"></i>
+                    <span>首次使用填写自己的 <code>api_id</code> 与 <code>api_hash</code>，推荐直接扫码登录。成功后会话由 Windows 安全存储加密，APP 下次启动自动重连；只读取你明确选中的最多 5 个群组。</span>
+                  </div>
+                  <div class="telegram-auth-grid telegram-credential-grid">
+                    <label><span>api_id</span><input id="telegramApiId" inputmode="numeric" autocomplete="off" placeholder="例如 12345678"></label>
+                    <label><span>api_hash</span><input id="telegramApiHash" type="password" autocomplete="off" spellcheck="false" placeholder="32 位字符串"></label>
+                    <div class="telegram-auth-actions">
+                      <button class="btn btn-primary" id="btnTelegramStartQrAuth" type="button"><i data-lucide="scan-line"></i><span>显示登录二维码</span></button>
+                      <button class="btn btn-outline btn-sm" id="btnTelegramApiDocs" type="button">申请 API 凭据</button>
+                    </div>
+                  </div>
+                  <div class="telegram-qr-login" id="telegramQrLogin" hidden>
+                    <div class="telegram-qr-frame">
+                      <img id="telegramQrImage" alt="Telegram 登录二维码">
+                    </div>
+                    <div class="telegram-qr-copy">
+                      <strong>使用手机 Telegram 扫码确认</strong>
+                      <span>手机 Telegram → 设置 → 设备 → 连接桌面设备。二维码会在过期后自动刷新。</span>
+                      <small id="telegramQrCountdown">正在生成二维码…</small>
+                      <button class="btn btn-outline btn-sm" id="btnTelegramCancelQr" type="button">取消扫码</button>
+                    </div>
+                  </div>
+                  <details class="telegram-phone-fallback" id="telegramPhoneFallback">
+                    <summary>无法扫码？使用手机号验证码登录</summary>
+                    <div class="telegram-phone-fallback-body">
+                      <label><span>手机号</span><input id="telegramPhone" type="tel" autocomplete="tel" placeholder="+86..."></label>
+                      <button class="btn btn-outline" id="btnTelegramStartAuth" type="button"><i data-lucide="message-square-key"></i><span>发送验证码</span></button>
+                    </div>
+                  </details>
+                  <div class="telegram-auth-challenge" id="telegramAuthChallenge" hidden>
+                    <label><span id="telegramAuthPrompt">输入验证码</span><input id="telegramAuthValue" autocomplete="one-time-code"></label>
+                    <button class="btn btn-primary btn-sm" id="btnTelegramSubmitAuth" type="button">提交</button>
+                    <button class="btn btn-outline btn-sm" id="btnTelegramCancelAuth" type="button">取消</button>
+                  </div>
+                  <div class="telegram-group-manager">
+                    <div class="telegram-group-manager-head">
+                      <div>
+                        <strong>增量来源群组 <span id="telegramGroupSelectionCount">0 / 5</span></strong>
+                        <small>首次绑定默认从群组当前最新消息开始；既有历史请用下方官方导出文件建立底库。</small>
+                      </div>
+                      <div class="btn-row">
+                        <button class="btn btn-outline btn-sm" id="btnTelegramLoadGroups" type="button"><i data-lucide="list-filter"></i><span>加载/刷新群组</span></button>
+                        <button class="btn btn-primary btn-sm" id="btnTelegramSaveGroups" type="button"><i data-lucide="save"></i><span>保存来源</span></button>
+                      </div>
+                    </div>
+                    <input id="telegramGroupSearch" type="search" placeholder="搜索群名称或 @用户名" autocomplete="off">
+                    <div class="telegram-group-picker" id="telegramGroupPicker">
+                      <div class="telegram-history-empty">连接账号后加载群组列表</div>
+                    </div>
+                    <div class="telegram-selected-sources" id="telegramSelectedSources">
+                      <div class="telegram-history-empty">尚未绑定增量来源</div>
+                    </div>
+                  </div>
+                  <div class="telegram-sync-box">
+                    <div class="telegram-sync-settings">
+                      <label><span>每个群最多读取</span>
+                        <select id="telegramSyncLimit">
+                          <option value="500" selected>500 条</option>
+                          <option value="1000">1000 条</option>
+                          <option value="5000">5000 条</option>
+                          <option value="20000">20000 条</option>
+                        </select>
+                      </label>
+                      <label><span>补查起始日期（可选）</span><input id="telegramSyncSince" type="date"></label>
+                      <label><span>已处理消息回看</span>
+                        <select id="telegramSyncLookback">
+                          <option value="0">不回看</option>
+                          <option value="20" selected>20 条</option>
+                          <option value="50">50 条</option>
+                          <option value="200">200 条</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="telegram-sync-actions">
+                      <button class="btn btn-success" id="btnTelegramSync" type="button"><i data-lucide="refresh-cw"></i><span>同步全部来源群</span></button>
+                      <button class="btn btn-danger" id="btnTelegramStopSync" type="button" hidden><i data-lucide="square"></i><span>停止同步</span></button>
+                      <span id="telegramSyncProgress">等待连接</span>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="telegram-source-panel" data-telegram-panel-content="export" hidden>
+                  <div class="telegram-panel-heading">
+                    <div><h3>Telegram Desktop 官方导出</h3><p>支持 result.json、messages.html、多文件或完整导出文件夹。</p></div>
+                  </div>
+                  <div class="telegram-export-guide">
+                    <strong>建议导出范围</strong>
+                    <span>在需要处理的群组中使用“导出聊天记录”，每个群分别导出 JSON 或 HTML；这里可一次选择多个文件或文件夹建立历史底库。</span>
+                  </div>
+                  <div class="telegram-export-actions">
+                    <button class="btn btn-primary" id="btnTelegramImportFiles" type="button"><i data-lucide="files"></i><span>选择 JSON / HTML</span></button>
+                    <button class="btn btn-outline" id="btnTelegramImportDirectory" type="button"><i data-lucide="folder-open"></i><span>选择导出文件夹</span></button>
+                    <span id="telegramExportStatus">尚未选择导出内容</span>
+                  </div>
+                </section>
+
+                <section class="telegram-import-result">
+                  <div class="telegram-result-heading">
+                    <div><h3>本次新增番号</h3><p id="telegramImportSummary">同步或导入后先预览，不会自动开始网站查询。</p></div>
+                    <button class="btn btn-success" id="btnTelegramUseCodes" type="button" disabled><i data-lucide="arrow-right"></i><span>送入番号处理</span></button>
+                  </div>
+                  <div class="telegram-result-metrics">
+                    <div><strong id="telegramMetricMessages">0</strong><span>读取消息</span></div>
+                    <div><strong id="telegramMetricNew">0</strong><span>新增消息</span></div>
+                    <div><strong id="telegramMetricDuplicate">0</strong><span>历史重复</span></div>
+                    <div><strong id="telegramMetricUpdated">0</strong><span>内容更新</span></div>
+                    <div><strong id="telegramMetricCodes">0</strong><span>新增番号</span></div>
+                  </div>
+                  <textarea id="telegramCodePreview" readonly spellcheck="false" placeholder="本次新消息或内容更新中识别出的番号会显示在这里，一行一个"></textarea>
+                  <div class="telegram-history-head"><strong>最近导入记录</strong><span>跨 API 与导出文件统一查重</span></div>
+                  <div class="telegram-history-list" id="telegramHistoryList"><div class="telegram-history-empty">暂无记录</div></div>
+                </section>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="sites">
+        <div class="sites-page-shell">
+          <section class="module-card run-panel site-hub-panel">
+            <div class="module-header">
+              <div>
+                <h2>站点工作台</h2>
                 <span class="module-subtitle" id="dbSummaryMini">数据库加载中</span>
               </div>
-              <button class="btn btn-outline btn-sm" id="btnPasteSample">示例</button>
+              <div class="site-hub-header-meta"><span class="badge">2 个站点</span><small>独立运行 · 可继续扩展</small></div>
             </div>
-            <div class="library-metrics compact-metrics">
-              <div><strong id="statTotal">0</strong><span>本次输入</span></div>
-              <div><strong id="statNew">0</strong><span>新增导入</span></div>
-              <div><strong id="statExists">0</strong><span>已存在</span></div>
-              <div><strong id="statNotFound">0</strong><span>需核验</span></div>
-              <div><strong id="statDuplicate">0</strong><span>重复</span></div>
-            </div>
-            <div class="file-row">
-              <label class="file-label">输出目录</label>
-              <div class="file-selector">
-                <span class="file-path" id="outputDirPath">未选择...</span>
-                <button class="btn btn-outline btn-sm" id="btnSelectOutputDir">选择目录</button>
+            <div class="site-hub-intro"><i data-lucide="network"></i><span>左侧选择一个网站，右侧只显示该站点的任务与配置；新增网站时只增加一个目录项。</span></div>
+            <div class="site-workbench-layout">
+              <aside class="site-catalog" aria-label="站点工作台目录">
+                <span class="site-catalog-title">网站</span>
+                <button type="button" class="active" data-site-workspace="missav" aria-pressed="true">
+                  <span><i data-lucide="tags"></i><strong>MissAV</strong></span>
+                  <small id="siteMissavCatalogSummary">查询与标签</small>
+                </button>
+                <button type="button" data-site-workspace="av123" aria-pressed="false">
+                  <span><i data-lucide="bookmark-check"></i><strong>123AV</strong></span>
+                  <small id="site123AvCatalogSummary">查询与账号</small>
+                </button>
+                <span class="site-catalog-title site-catalog-title-tools">管理</span>
+                <button type="button" data-site-workspace="batch" aria-pressed="false">
+                  <span><i data-lucide="layers-3"></i><strong>批次</strong></span>
+                  <small id="siteBatchCatalogSummary">输入与续跑</small>
+                </button>
+                <div class="site-catalog-future"><i data-lucide="plus"></i><span>后续站点从这里扩展</span></div>
+              </aside>
+              <div class="site-workbench-main">
+                <section class="site-workspace-panel active" data-site-workspace-panel="missav">
+                  <div class="site-workspace-heading"><div><span>当前网站</span><h3>MissAV</h3><p>查询详情页、抓取并清洗标签，为 Raindrop 导出准备数据。</p></div><span class="site-workspace-chip">标签支线</span></div>
+                  <article class="site-provider-panel site-provider-missav" data-site-provider="missav">
+                <section class="site-operation-card site-operation-missav" data-site-operation="missav">
+                  <div class="site-operation-head">
+                    <span class="site-operation-icon"><i data-lucide="tags"></i></span>
+                    <div><strong>MissAV</strong><small>查询与标签</small></div>
+                  </div>
+                  <div class="site-operation-stages"><span>页面查询</span><span>Raindrop 待同步</span></div>
+                  <b id="runMissavStageSummary">等待批次</b>
+                  <small class="site-operation-timing" id="runMissavTiming">未启动 · 独享所选速度档位</small>
+                  <div class="site-operation-actions">
+                    <button class="btn btn-primary btn-sm" id="btnStartMissav" type="button" disabled><i data-lucide="play"></i><span>开始 MissAV</span></button>
+                    <button class="btn btn-danger btn-sm" id="btnStopMissav" type="button" hidden><i data-lucide="square"></i><span>停止 MissAV</span></button>
+                  </div>
+                </section>
+                <section class="speed-mode-panel" data-speed-panel="missav" aria-label="MissAV 处理速度">
+                  <div class="speed-mode-header">
+                    <div><strong>MissAV 速度</strong><span>独立保存</span></div>
+                    <span data-speed-badge="missav">推荐</span>
+                  </div>
+                  <div class="speed-mode-buttons" role="group" aria-label="选择 MissAV 处理速度">
+                    <button type="button" data-speed-site="missav" data-speed-mode="safe"><strong>稳妥</strong><span>1×</span></button>
+                    <button type="button" data-speed-site="missav" data-speed-mode="smart" class="active"><strong>智能</strong><span>推荐</span></button>
+                    <button type="button" data-speed-site="missav" data-speed-mode="fast"><strong>高速</strong><span>4 路</span></button>
+                    <button type="button" data-speed-site="missav" data-speed-mode="quick" class="speed-mode-risk"><strong>极速</strong><span>6 路</span></button>
+                    <button type="button" data-speed-site="missav" data-speed-mode="turbo" class="speed-mode-risk"><strong>飞速</strong><span>8 路</span></button>
+                    <button type="button" data-speed-site="missav" data-speed-mode="rocket" class="speed-mode-risk"><strong>狂飙</strong><span>12 路</span></button>
+                    <button type="button" data-speed-site="missav" data-speed-mode="extreme" class="speed-mode-risk"><strong>极限</strong><span>16 路</span></button>
+                  </div>
+                  <section class="site-rate-control av123-rate-control" aria-label="MissAV 实际请求速率">
+                    <div class="av123-rate-control-head">
+                      <div><strong>请求调度目标</strong><span>与工作路数独立 · 运行中也可调整</span></div>
+                      <output id="missavRateCapValue" for="missavRateCap">16 请求/秒</output>
+                    </div>
+                    <div class="av123-rate-mode-row">
+                      <label><span>调速方式</span><select id="missavRateMode"><option value="adaptive">自动探速（推荐）</option><option value="fixed">固定速率</option></select></label>
+                      <div class="av123-rate-live" id="missavRateLive">预计从 8.0 RPS 开始 · 上限 16.0 RPS</div>
+                    </div>
+                    <input id="missavRateCap" type="range" min="1" max="32" step="1" value="16" aria-label="MissAV 每秒请求上限">
+                    <div class="av123-rate-presets" role="group" aria-label="选择 MissAV 请求速率上限">
+                      <button type="button" data-missav-rate-cap="4">稳 4</button>
+                      <button type="button" data-missav-rate-cap="8">快 8</button>
+                      <button type="button" data-missav-rate-cap="12">高 12</button>
+                      <button type="button" data-missav-rate-cap="16" class="active">推荐 16</button>
+                      <button type="button" data-missav-rate-cap="24">冲刺 24</button>
+                      <button type="button" data-missav-rate-cap="32">上限 32</button>
+                    </div>
+                    <p id="missavRateDescription">自动模式按真实延迟和错误率探速；慢响应会被硬超时终止，不再重复补请求。</p>
+                  </section>
+                  <label class="av123-speed-policy-field">
+                    <span>网络错误策略</span>
+                    <select id="missavSpeedPolicy">
+                      <option value="stable">稳定自适应：延迟或错误升高时保护（推荐）</option>
+                      <option value="fixed">只跑一轮：保持工作路，错误手动重跑</option>
+                      <option value="balanced">动态半速：最低保留一半工作路</option>
+                    </select>
+                  </label>
+                  <p data-speed-description="missav">从 2 路开始，稳定后升到 3；网络异常时使用原保护策略。</p>
+                </section>
+                <div class="file-row site-provider-output">
+                  <label class="file-label">MissAV 输出目录</label>
+                  <div class="file-selector">
+                    <span class="file-path" id="outputDirPath">未选择...</span>
+                    <button class="btn btn-outline btn-sm tool-button" id="btnSelectOutputDir" type="button" title="选择输出目录" aria-label="选择输出目录"><i data-lucide="folder-open"></i></button>
+                  </div>
+                </div>
+                  </article>
+                </section>
+                <section class="site-workspace-panel" data-site-workspace-panel="av123" hidden>
+                  <div class="site-workspace-heading"><div><span>当前网站</span><h3>123AV</h3><p>番号查询与账号收藏独立运行，可分别停止。</p></div><span class="site-workspace-chip site-workspace-chip-warning">账号支线</span></div>
+                  <article class="site-provider-panel site-provider-av123" data-site-provider="av123">
+                <div class="site-subworkspace-switch" role="group" aria-label="123AV 工作区">
+                  <button type="button" class="active" data-av123-site-tab="lookup" aria-pressed="true"><i data-lucide="search"></i><span>番号查询</span></button>
+                  <button type="button" data-av123-site-tab="favorite" aria-pressed="false"><i data-lucide="bookmark-check"></i><span>账号收藏</span></button>
+                </div>
+                <section class="av123-site-subpanel active" data-av123-site-tab-panel="lookup">
+                <section class="site-operation-card site-operation-av123" data-site-operation="av123">
+                  <div class="site-operation-head">
+                    <span class="site-operation-icon"><i data-lucide="bookmark-check"></i></span>
+                    <div><strong>123AV</strong><small>查询与账号</small></div>
+                  </div>
+                  <div class="site-operation-stages"><span>精确查询</span><span>收藏状态</span></div>
+                  <b id="run123AvStageSummary">等待批次</b>
+                  <small class="site-operation-timing" id="run123AvTiming">未启动 · 独享所选速度档位</small>
+                  <div class="site-operation-actions">
+                    <button class="btn btn-primary btn-sm" id="btnStart123Av" type="button" disabled><i data-lucide="play"></i><span>开始 123AV</span></button>
+                    <button class="btn btn-danger btn-sm" id="btnStop123Av" type="button" hidden><i data-lucide="square"></i><span>停止 123AV</span></button>
+                  </div>
+                </section>
+                <section class="speed-mode-panel speed-mode-panel-av123" data-speed-panel="av123" aria-label="123AV 处理速度">
+                  <div class="speed-mode-header">
+                    <div><strong>123AV 速度</strong><span>独立保存</span></div>
+                    <span data-speed-badge="av123">推荐</span>
+                  </div>
+                  <div class="speed-mode-buttons" role="group" aria-label="选择 123AV 处理速度">
+                    <button type="button" data-speed-site="av123" data-speed-mode="safe"><strong>稳妥</strong><span>1×</span></button>
+                    <button type="button" data-speed-site="av123" data-speed-mode="smart"><strong>智能</strong><span>3 路</span></button>
+                    <button type="button" data-speed-site="av123" data-speed-mode="fast"><strong>高速</strong><span>4 路</span></button>
+                    <button type="button" data-speed-site="av123" data-speed-mode="quick" class="speed-mode-risk"><strong>极速</strong><span>6 路</span></button>
+                    <button type="button" data-speed-site="av123" data-speed-mode="turbo" class="speed-mode-risk active"><strong>飞速</strong><span>8 路 · 推荐</span></button>
+                    <button type="button" data-speed-site="av123" data-speed-mode="rocket" class="speed-mode-risk"><strong>狂飙</strong><span>12 路</span></button>
+                    <button type="button" data-speed-site="av123" data-speed-mode="extreme" class="speed-mode-risk"><strong>极限</strong><span>16 路</span></button>
+                  </div>
+                  <section class="av123-rate-control" aria-label="123AV 实际请求速率">
+                    <div class="av123-rate-control-head">
+                      <div><strong>请求调度目标</strong><span>与工作路数独立 · 运行中也可调整</span></div>
+                      <output id="av123RateCapValue" for="av123RateCap">16 请求/秒</output>
+                    </div>
+                    <div class="av123-rate-mode-row">
+                      <label><span>调速方式</span><select id="av123RateMode"><option value="adaptive">自动探速（推荐）</option><option value="fixed">固定速率</option></select></label>
+                      <div class="av123-rate-live" id="av123RateLive">预计从 5.0 RPS 开始 · 上限 16.0 RPS</div>
+                    </div>
+                    <input id="av123RateCap" type="range" min="1" max="32" step="1" value="16" aria-label="123AV 每秒请求上限">
+                    <div class="av123-rate-presets" role="group" aria-label="选择123AV请求速率上限">
+                      <button type="button" data-av123-rate-cap="4">稳 4</button>
+                      <button type="button" data-av123-rate-cap="8">快 8</button>
+                      <button type="button" data-av123-rate-cap="12">高 12</button>
+                      <button type="button" data-av123-rate-cap="16" class="active">推荐 16</button>
+                      <button type="button" data-av123-rate-cap="24">冲刺 24</button>
+                      <button type="button" data-av123-rate-cap="32">上限 32</button>
+                    </div>
+                    <p id="av123RateDescription">自动模式会从已学习的稳定速率起步，连续稳定后升速；429 后记住更低的安全值。</p>
+                  </section>
+                  <label class="av123-speed-policy-field">
+                    <span>网络错误策略</span>
+                    <select id="av123SpeedPolicy">
+                      <option value="staged">高速收尾：主轮保持并发，仅错误降速（推荐）</option>
+                      <option value="fixed">只跑一轮：保持并发，错误手动重跑</option>
+                      <option value="balanced">动态半速，最低保留一半并发</option>
+                    </select>
+                  </label>
+                  <p data-speed-description="av123">从 2 路开始，稳定后升到 3；可单独选择失败时是否降速。</p>
+                </section>
+                </section>
+                <section class="av123-site-subpanel" data-av123-site-tab-panel="favorite" hidden>
+                    <section class="favorite-method-picker" aria-label="123AV 收藏方式">
+                      <div><strong>收藏方式</strong><span>三种方式独立保留，可随时切换</span></div>
+                      <div class="favorite-method-buttons" role="group">
+                        <button type="button" class="active" data-av123-favorite-method="chrome" aria-pressed="true"><i data-lucide="puzzle"></i><strong>Chrome 扩展</strong><small>复用本地 Chrome 登录</small></button>
+                        <button type="button" data-av123-favorite-method="app" aria-pressed="false"><i data-lucide="app-window"></i><strong>APP 内执行器</strong><small>固定 1 路稳定运行</small></button>
+                        <button type="button" data-av123-favorite-method="export" aria-pressed="false"><i data-lucide="file-down"></i><strong>仅导出</strong><small>不访问账号、不点击收藏</small></button>
+                      </div>
+                    </section>
+                    <section class="site-account-control" id="siteAv123AccountControl" aria-label="123AV 账号状态">
+                      <div class="site-account-state">
+                        <span>当前账号</span>
+                        <strong id="siteAv123AccountStatus">未检查</strong>
+                        <small id="siteAv123AccountDetail">收藏使用本地 Chrome 已登录账号</small>
+                      </div>
+                      <div class="site-account-actions">
+                        <button class="btn btn-outline btn-sm" id="btnPrepareChromeFavoriteSite" type="button"><i data-lucide="puzzle"></i><span>安装/配对扩展</span></button>
+                        <button class="btn btn-outline btn-sm" id="btnOpen123AvAccountSite" type="button"><i data-lucide="chrome"></i><span>打开本地 Chrome</span></button>
+                        <button class="btn btn-outline btn-sm" id="btnCheck123AvAccountSite" type="button"><i data-lucide="shield-check"></i><span>检查登录</span></button>
+                      </div>
+                    </section>
+                    <section class="chrome-favorite-bridge" id="chromeFavoriteBridgePanel" data-state="offline" aria-live="polite">
+                      <div><span>本地 Chrome 收藏桥</span><strong id="chromeFavoriteBridgeStatus">扩展未连接</strong><small id="chromeFavoriteBridgeDetail">首次使用：点击“安装/配对扩展”，在 Chrome 扩展页加载文件夹，再把配对码粘贴到扩展中。</small></div>
+                      <button class="btn btn-outline btn-sm" id="btnCopyChromePairing" type="button" hidden><i data-lucide="copy"></i><span>复制配对码</span></button>
+                    </section>
+                    <section class="favorite-method-info" id="appFavoriteStabilityPanel" hidden>
+                      <div><i data-lucide="shield-check"></i><strong>APP 内执行器：固定单路串行</strong></div>
+                      <p>始终只打开 1 个收藏工作页。遇到网络异常、Error 1015 或状态不明确时，全队暂停 10 秒后自动继续；同一条最多进入第 2 轮一次。</p>
+                    </section>
+                    <section class="favorite-export-panel" id="favoriteExportPanel" hidden>
+                      <div><i data-lucide="file-down"></i><span><strong>仅导出待收藏任务</strong><small>生成一行一个的番号 TXT 和带详情链接、状态的 CSV；不会检查登录或修改远端账号。</small></span></div>
+                      <button class="btn btn-success btn-sm" id="btnExport123AvFavoriteSite" type="button"><i data-lucide="download"></i><span>导出当前待收藏</span></button>
+                    </section>
+                    <label class="favorite-auto-toggle" id="favoriteAutoTogglePanel">
+                      <input id="av123AutoFavorite" type="checkbox">
+                      <span><strong>查询完成后自动收藏</strong><small>123AV 查询全部结束后才启动单路收藏；同一网站不会同时查询和收藏。</small></span>
+                    </label>
+                    <section class="favorite-speed-panel" id="favoriteSpeedPanel" aria-label="123AV 收藏脚本速度">
+                      <div><strong>站内执行策略</strong><span>同一网站固定串行</span></div>
+                      <div class="favorite-speed-buttons" role="group">
+                        <button type="button" data-favorite-concurrency="1" class="active"><strong>稳定串行</strong><span>固定 1 路</span></button>
+                      </div>
+                      <p id="favoriteSpeedDescription">123AV 收藏固定单路执行；MissAV 与以后其他网站仍可使用自己的队列并发工作。</p>
+                    </section>
+                    <section class="favorite-runtime-panel" id="favoriteRuntimePanel" data-state="idle" aria-live="polite">
+                      <div class="favorite-runtime-head"><div><span>收藏队列</span><strong id="favoriteRuntimeStatus">未启动</strong></div><b id="favoriteRuntimeRate">0.0 条/秒</b></div>
+                      <div class="favorite-runtime-progress"><i id="favoriteRuntimeProgressFill"></i></div>
+                      <div class="favorite-runtime-meta"><span id="favoriteRuntimeSummary">待收藏会保留在当前批次</span><span id="favoriteRuntimeEta">预计剩余 —</span></div>
+                      <button class="btn btn-danger btn-sm" id="btnStop123AvFavoriteSite" type="button" hidden><i data-lucide="square"></i><span>停止收藏</span></button>
+                    </section>
+                </section>
+                  </article>
+                </section>
+                <section class="site-workspace-panel site-batch-workspace" data-site-workspace-panel="batch" hidden>
+                  <div class="site-workspace-heading"><div><span>任务管理</span><h3>批次</h3><p>这里只管理输入规模、批次名称、续跑和删除，不混入任何网站配置。</p></div><span class="site-workspace-chip">公共数据</span></div>
+                  <div class="library-metrics compact-metrics">
+                    <div><strong id="statTotal">0</strong><span>本次输入</span></div>
+                    <div><strong id="statNew">0</strong><span>新增导入</span></div>
+                    <div><strong id="statExists">0</strong><span>已存在</span></div>
+                    <div><strong id="statNotFound">0</strong><span>未找到</span></div>
+                    <div><strong id="statDuplicate">0</strong><span>重复</span></div>
+                  </div>
+                  <label class="batch-name-field">
+                    <span>批次名称</span>
+                    <input id="batchName" type="text" maxlength="80" placeholder="留空则自动命名，例如：TG 7月21日晚">
+                  </label>
+                  <section class="resume-batch-panel" id="resumeBatchPanel" hidden aria-live="polite">
+                    <div><strong id="resumeBatchName">未完成批次</strong><span id="resumeBatchSummary">等待载入</span></div>
+                    <div class="resume-batch-actions">
+                      <button class="btn btn-warning btn-sm" id="btnResumeMissavBatch" type="button">继续 MissAV</button>
+                      <button class="btn btn-warning btn-sm" id="btnResume123AvBatch" type="button">继续 123AV</button>
+                      <button class="btn btn-danger btn-sm" id="btnDeleteResumableBatch" type="button"><i data-lucide="trash-2"></i><span>删除批次</span></button>
+                    </div>
+                  </section>
+                </section>
               </div>
-            </div>
-            <div class="run-actions">
-              <button class="btn btn-primary btn-lg btn-full" id="btnStart" disabled>开始处理</button>
-              <button class="btn btn-danger btn-lg btn-full" id="btnStop" style="display:none;">停止处理</button>
             </div>
             <div class="progress-container" id="progressContainer" style="display:none;">
               <div class="progress-bar">
@@ -97,9 +717,106 @@
                 <span class="progress-percent" id="progressPercent">0%</span>
               </div>
             </div>
+            <section class="processing-forecast" data-processing-forecast hidden aria-live="polite">
+              <div class="processing-forecast-header">
+                <div><span class="processing-forecast-kicker">动态估算</span><strong><span data-eta-site>当前站点</span>预计剩余时间</strong></div>
+                <span class="processing-forecast-state" data-eta-state>准备中</span>
+              </div>
+              <div class="processing-forecast-grid">
+                <div class="processing-forecast-primary"><span>预计剩余</span><strong data-eta-remaining>计算中…</strong></div>
+                <div><span>预计完成</span><strong data-eta-finish>计算中…</strong></div>
+                <div><span>已用时间</span><strong data-eta-elapsed>0 秒</strong></div>
+                <div><span>单条平均</span><strong data-eta-average>计算中…</strong></div>
+              </div>
+              <p data-eta-note>完成首条记录后开始估算</p>
+            </section>
             <div class="panel-actions">
-              <button class="btn btn-outline btn-sm" id="btnOpenLibraryFromPanel">打开本地库</button>
+              <button class="btn btn-outline btn-sm" id="btnOpenLibraryFromPanel">打开番号库</button>
             </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="sync">
+        <div class="raindrop-sync-layout">
+          <section class="module-card raindrop-sync-card">
+            <div class="module-header raindrop-sync-header">
+              <div>
+                <h2>Raindrop 直接同步</h2>
+                <span class="module-subtitle">从 MissAV 已完成结果创建或更新书签</span>
+              </div>
+              <span class="badge" id="raindropSyncStateBadge">未配置</span>
+            </div>
+
+            <div class="raindrop-sync-notice">
+              <i data-lucide="shield-check"></i>
+              <div><strong>令牌只在主进程解密</strong><span>系统加密保存；界面、数据库和运行日志均不记录令牌明文。</span></div>
+            </div>
+
+            <section class="raindrop-auth-panel">
+              <div class="raindrop-section-heading">
+                <div><span>01</span><strong>账号认证</strong></div>
+                <small id="raindropAccountStatus">等待检查</small>
+              </div>
+              <div class="raindrop-auth-row">
+                <input id="raindropTokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 Raindrop Test Token / OAuth Access Token">
+                <button class="btn btn-success btn-sm" id="btnSaveRaindropToken" type="button">验证并保存</button>
+                <button class="btn btn-outline btn-sm" id="btnTestRaindropAccount" type="button">测试连接</button>
+                <button class="btn btn-outline btn-sm" id="btnClearRaindropToken" type="button">清除令牌</button>
+              </div>
+              <button class="raindrop-doc-link" id="btnOpenRaindropTokenDocs" type="button">如何取得个人 Test Token</button>
+            </section>
+
+            <section class="raindrop-config-panel">
+              <div class="raindrop-section-heading">
+                <div><span>02</span><strong>批次与目标</strong></div>
+                <small id="raindropBatchStatus">请选择批次</small>
+              </div>
+              <div class="raindrop-config-grid">
+                <label><span>处理批次</span><select id="raindropBatchSelect"><option value="">暂无可用批次</option></select></label>
+                <label><span id="raindropCollectionLabel">目标 Collection</span><select id="raindropCollectionSelect" disabled><option value="-1">Unsorted</option></select></label>
+                <button class="btn btn-outline btn-sm" id="btnRefreshRaindropCollections" type="button">刷新 Collection</button>
+              </div>
+              <small class="raindrop-routing-note" id="raindropRoutingNote">新版 MissAV 批次会自动按批次开始前的女优底库快照分流到 missav1 / missav2；旧批次仍使用手动目标。</small>
+            </section>
+
+            <div class="raindrop-sync-metrics">
+              <div><strong id="raindropMetricEligible">0</strong><span>可同步</span></div>
+              <div><strong id="raindropMetricCreate">0</strong><span>新建</span></div>
+              <div><strong id="raindropMetricUpdate">0</strong><span>更新</span></div>
+              <div><strong id="raindropMetricSkip">0</strong><span>无需变化</span></div>
+              <div><strong id="raindropMetricError">0</strong><span>异常</span></div>
+            </div>
+
+            <section class="raindrop-sync-actions">
+              <div>
+                <strong id="raindropPlanTitle">尚未生成同步预览</strong>
+                <span id="raindropPlanDetail">选择批次和 Collection 后，先核对远端再执行。</span>
+              </div>
+              <div>
+                <button class="btn btn-outline" id="btnPreviewRaindropSync" type="button"><i data-lucide="scan-search"></i><span>生成预览</span></button>
+                <button class="btn btn-success" id="btnStartRaindropSync" type="button" disabled><i data-lucide="cloud-upload"></i><span>开始同步</span></button>
+                <button class="btn btn-danger" id="btnStopRaindropSync" type="button" hidden><i data-lucide="square"></i><span>停止同步</span></button>
+              </div>
+            </section>
+
+            <div class="raindrop-progress" id="raindropSyncProgress" hidden>
+              <div><span id="raindropProgressText">准备中</span><strong id="raindropProgressPercent">0%</strong></div>
+              <div class="progress-bar"><div class="progress-fill" id="raindropProgressFill"></div></div>
+            </div>
+
+            <section class="raindrop-preview-panel" id="raindropPreviewPanel">
+              <div class="raindrop-preview-toolbar">
+                <div><strong>同步明细</strong><span>可拖动表格下边缘调整高度</span></div>
+                <button class="btn btn-outline btn-sm" id="btnToggleRaindropPreviewSize" type="button"><i data-lucide="maximize-2"></i><span>展开表格</span></button>
+              </div>
+              <div class="raindrop-preview-table-wrap">
+                <table class="result-table raindrop-preview-table">
+                  <thead><tr><th>番号</th><th>动作</th><th>目标</th><th>Tags</th><th>状态 / 说明</th></tr></thead>
+                  <tbody id="raindropPreviewBody"><tr class="empty-row"><td colspan="5"><div class="empty-state"><p>等待同步预览</p></div></td></tr></tbody>
+                </table>
+              </div>
+            </section>
           </section>
         </div>
       </section>
@@ -108,33 +825,121 @@
         <section class="module-card results-shell">
           <div class="module-header table-header">
             <div>
-              <h2>处理结果</h2>
-              <span class="module-subtitle">导入前预览</span>
+              <h2 id="resultWorkspaceTitle">MissAV 处理结果</h2>
+              <span class="module-subtitle" id="resultBatchSummary">导入前预览</span>
             </div>
-            <div class="table-tabs">
+            <div class="table-tabs" id="resultTabs">
               <button class="tab-btn active" data-tab="all">全部</button>
               <button class="tab-btn" data-tab="new">新增</button>
               <button class="tab-btn" data-tab="skipped">已跳过</button>
               <button class="tab-btn" data-tab="manual">需核验</button>
             </div>
           </div>
+          <section class="processing-forecast processing-forecast-results" data-processing-forecast hidden aria-live="polite">
+            <div class="processing-forecast-header">
+              <div><span class="processing-forecast-kicker">动态估算</span><strong><span data-eta-site>当前站点</span>预计剩余时间</strong></div>
+              <span class="processing-forecast-state" data-eta-state>准备中</span>
+            </div>
+            <div class="processing-forecast-grid">
+              <div class="processing-forecast-primary"><span>预计剩余</span><strong data-eta-remaining>计算中…</strong></div>
+              <div><span>预计完成</span><strong data-eta-finish>计算中…</strong></div>
+              <div><span>已用时间</span><strong data-eta-elapsed>0 秒</strong></div>
+              <div><span>单条平均</span><strong data-eta-average>计算中…</strong></div>
+            </div>
+            <p data-eta-note>完成首条记录后开始估算</p>
+          </section>
+          <div class="result-workbench" id="resultWorkbench">
+            <div class="result-site-switch" role="group" aria-label="选择站点板块">
+              <button type="button" class="active" data-result-workspace="missav" aria-pressed="true">
+                <span><i data-lucide="tags"></i><strong>MissAV</strong></span>
+                <small id="resultMissavWorkspaceSummary">查询与 Raindrop 同步</small>
+              </button>
+              <button type="button" data-result-workspace="av123" aria-pressed="false">
+                <span><i data-lucide="bookmark-check"></i><strong>123AV</strong></span>
+                <small id="result123AvWorkspaceSummary">查询与账号收藏</small>
+              </button>
+            </div>
+            <section class="av123-account-strip" id="av123AccountPanel" hidden aria-live="polite">
+              <div class="av123-account-state">
+                <span>123AV 账号</span>
+                <strong id="av123AccountStatus">未检查</strong>
+                <small id="av123AccountDetail">收藏使用本地 Chrome 已登录账号</small>
+              </div>
+              <div class="av123-account-actions">
+                <button class="btn btn-outline btn-sm" id="btnPrepareChromeFavorite" type="button"><i data-lucide="puzzle"></i><span>配对扩展</span></button>
+                <button class="btn btn-outline btn-sm" id="btnOpen123AvAccount" type="button"><i data-lucide="chrome"></i><span>打开本地 Chrome</span></button>
+                <button class="btn btn-outline btn-sm" id="btnCheck123AvAccount" type="button"><i data-lucide="shield-check"></i><span>检查登录</span></button>
+              </div>
+            </section>
+            <div class="result-filter-row">
+              <input id="resultSearch" class="result-search" type="search" placeholder="搜索番号、MissAV 链接、状态、标签或备注">
+              <select id="resultStageFilter" class="result-filter-select" aria-label="选择处理环节">
+                <option value="missavLookup">MissAV 查询</option>
+                <option value="raindropSync">Raindrop 同步</option>
+              </select>
+              <select id="resultStatusFilter" class="result-filter-select" aria-label="按状态筛选">
+                <option value="all">全部状态</option>
+                <option value="queued">等待执行</option>
+                <option value="running">执行中</option>
+                <option value="succeeded">已完成</option>
+                <option value="ready">已准备</option>
+                <option value="blocked">等待前序</option>
+                <option value="network_error">网络错误</option>
+                <option value="not_found">未找到</option>
+                <option value="manual">需核验</option>
+                <option value="not_logged_in">未登录</option>
+                <option value="verify_required">需核对远端</option>
+                <option value="failed">执行失败</option>
+                <option value="skipped">不需要执行</option>
+                <option value="not_configured">旧版未启用</option>
+              </select>
+              <select id="resultTagFilter" class="result-filter-select" aria-label="按标签筛选">
+                <option value="all">全部标签</option>
+              </select>
+              <select id="resultSort" class="result-filter-select" aria-label="排序方式">
+                <option value="original">原始顺序</option>
+                <option value="code_asc">番号 A-Z</option>
+                <option value="code_desc">番号 Z-A</option>
+                <option value="status_asc">状态排序</option>
+                <option value="status_desc">状态倒序</option>
+                <option value="tag_asc">标签排序</option>
+                <option value="tag_desc">标签倒序</option>
+              </select>
+            </div>
+            <div class="result-action-row">
+              <span class="result-range-summary" id="resultRangeSummary">显示 0 条 · 已选 0 条</span>
+              <button class="btn btn-outline btn-sm" id="btnSelectVisibleResults">全选当前范围</button>
+              <button class="btn btn-outline btn-sm" id="btnClearResultSelection">清除选择</button>
+              <button class="btn btn-outline btn-sm" id="btnCopyResultTSV">复制为表格</button>
+              <button class="btn btn-warning btn-sm" id="btnRetrySelectedResults">重跑选中网络错误</button>
+              <button class="btn btn-warning btn-sm" id="btnRetryAllNetworkResults">重跑全部网络错误</button>
+              <button class="btn btn-danger btn-sm" id="btnStopResults" style="display:none;">停止重跑</button>
+              <button class="btn btn-danger btn-sm" id="btnDeleteCurrentRun" type="button" hidden><i data-lucide="trash-2"></i><span>删除整个批次</span></button>
+              <button class="btn btn-success btn-sm" id="btnFavoriteSelected123Av" type="button" hidden><i data-lucide="bookmark-plus"></i><span>收藏所选</span></button>
+              <button class="btn btn-success btn-sm" id="btnFavoriteAll123Av" type="button" hidden><i data-lucide="bookmarks"></i><span>收藏全部待收藏</span></button>
+              <button class="btn btn-outline btn-sm" id="btnVerifySelected123Av" type="button" hidden><i data-lucide="scan-search"></i><span>复查所选</span></button>
+              <button class="btn btn-outline btn-sm" id="btnVerifyAll123Av" type="button" hidden><i data-lucide="list-checks"></i><span>复查全部待核对</span></button>
+              <button class="btn btn-danger btn-sm" id="btnStop123AvFavorite" type="button" hidden><i data-lucide="square"></i><span>停止收藏</span></button>
+            </div>
+          </div>
           <div class="table-wrapper">
-            <table class="result-table" id="resultTable">
-              <thead>
+            <table class="result-table" id="resultTable" data-sheet-key="processing-results-pipeline-v2">
+              <thead id="resultTableHead">
                 <tr>
-                  <th class="col-code">番号</th>
-                  <th class="col-url">链接</th>
-                  <th class="col-status">状态</th>
+                  <th class="col-select"><input type="checkbox" id="resultSelectVisible" aria-label="选择当前显示记录"></th>
+                  <th class="col-code"><button class="sheet-sort-button" data-result-sort-key="code">番号</button></th>
+                  <th class="col-task"><button class="sheet-sort-button" data-result-sort-key="status">MissAV 查询</button></th>
+                  <th class="col-task">Raindrop 同步</th>
                   <th class="col-actress">女优 Tag</th>
                   <th class="col-genre">类型 Tag</th>
-                  <th class="col-final">最终 Tags</th>
-                  <th class="col-note">备注</th>
+                  <th class="col-final"><button class="sheet-sort-button" data-result-sort-key="tag">最终 Tags</button></th>
+                  <th class="col-note">错误 / 备注</th>
                 </tr>
               </thead>
               <tbody id="resultBody">
                 <tr class="empty-row">
-                  <td colspan="7">
-                    <div class="empty-state">
+                  <td colspan="8">
+                    <div class="empty-state visual-empty-state">
                       <span class="empty-icon">M</span>
                       <p>等待处理</p>
                     </div>
@@ -146,6 +951,8 @@
           <div class="export-bar" id="exportBar" style="display:none;">
             <span class="export-label">导出文件</span>
             <button class="btn btn-success btn-sm" id="btnExportAll">全部导出</button>
+            <button class="btn btn-outline btn-sm" id="btnExportCurrent">导出所选/筛选</button>
+            <button class="btn btn-outline btn-sm" id="btnExportByTags">按标签拆分</button>
             <button class="btn btn-outline btn-sm" id="btnExportHTML">仅 HTML</button>
             <button class="btn btn-outline btn-sm" id="btnExportCSV">仅 CSV</button>
             <button class="btn btn-outline btn-sm" id="btnOpenFolder">打开输出目录</button>
@@ -154,114 +961,26 @@
       </section>
 
       <section class="app-page" data-page-panel="library">
-        <div class="data-workbench">
-          <div class="data-mode-tabs">
-            <button class="tab-btn active" data-data-mode="library">本地收藏库</button>
-            <button class="tab-btn" data-data-mode="csv">CSV 文件</button>
-          </div>
-          <div class="data-mode-panel active" data-data-mode-panel="library">
         <section class="module-card library-page-card">
           <div class="module-header">
             <div>
-              <h2>收藏数据库</h2>
-              <span class="module-subtitle" id="tagCollectionPath">历史番号与 Raindrop 字段</span>
-            </div>
-            <div class="btn-row">
-              <button class="btn btn-outline btn-sm" id="btnSelectTagFile">导入 Raindrop</button>
-              <button class="btn btn-success btn-sm" id="btnExportDbCSV">导出官方 CSV</button>
+              <h2>番号数据库</h2>
+              <span class="module-subtitle" id="librarySectionPath">永久历史、标签和处理状态</span>
             </div>
           </div>
           <div class="library-toolbar">
-            <input id="librarySearch" class="library-search" type="search" placeholder="搜索番号、标题、链接、Collection、Tags 或 Note">
+            <input id="librarySearch" class="library-search" type="search" placeholder="搜索番号、链接、状态或标签">
             <button class="btn btn-outline btn-sm" id="btnRefreshLibrary">刷新</button>
           </div>
           <div class="library-tabs">
-            <button class="tab-btn active" data-library-tab="codes">收藏库</button>
+            <button class="tab-btn active" data-library-tab="codes">番号管理</button>
             <button class="tab-btn" data-library-tab="dedupe">导入去重</button>
+            <button class="tab-btn" data-library-tab="runs">处理批次</button>
             <button class="tab-btn" data-library-tab="tags">标签管理</button>
             <button class="tab-btn" data-library-tab="maintenance">维护</button>
           </div>
           <div id="libraryContent" class="library-content"></div>
         </section>
-          </div>
-          <div class="data-mode-panel" data-data-mode-panel="csv">
-        <div class="csv-workbench-layout">
-          <section class="module-card csv-main-card">
-            <div class="module-header">
-              <div>
-                <h2>CSV 工作台</h2>
-                <span class="module-subtitle" id="csvFileInfo">未打开 CSV 文件</span>
-              </div>
-              <span class="badge" id="csvDirtyBadge">未载入</span>
-            </div>
-            <div class="csv-toolbar">
-              <button class="btn btn-secondary btn-sm" id="btnCsvOpen">打开 CSV</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvSave" disabled>保存</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvSaveAs" disabled>另存为</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvBackup" disabled>备份</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvAddRow" disabled>新增行</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvAddColumn" disabled>新增列</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvDeleteRows" disabled>删除选中</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvNormalizeCodes" disabled>规范番号</button>
-              <button class="btn btn-outline btn-sm" id="btnCsvReplace" disabled>批量替换</button>
-              <button class="btn btn-success btn-sm" id="btnCsvImportDb" disabled>导入本地库</button>
-            </div>
-            <div class="csv-path-row">
-              <span class="file-path" id="csvFilePath">未选择文件</span>
-            </div>
-            <div class="csv-table-shell">
-              <table class="csv-table" id="csvTable">
-                <thead id="csvTableHead"></thead>
-                <tbody id="csvTableBody">
-                  <tr class="empty-row"><td><div class="empty-state"><span class="empty-icon">CSV</span><p>打开 CSV 后在这里浏览和编辑</p></div></td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="csv-footer" id="csvFooter">未载入数据</div>
-          </section>
-
-          <section class="module-card csv-side-card">
-            <div class="module-header">
-              <div>
-                <h2>筛选与校验</h2>
-                <span class="module-subtitle">搜索 / 状态 / 数据问题</span>
-              </div>
-              <button class="btn btn-outline btn-sm" id="btnCsvValidate" disabled>重新校验</button>
-            </div>
-            <div class="settings-grid csv-filter-grid">
-              <label class="setting-field">
-                <span>搜索</span>
-                <input id="csvSearch" class="library-search" type="search" placeholder="番号、女优、链接、状态">
-              </label>
-              <label class="setting-field">
-                <span>状态筛选</span>
-                <select id="csvStatusFilter">
-                  <option value="all">全部</option>
-                  <option value="favorite">Favorite</option>
-                  <option value="highlights">有 Highlights</option>
-                  <option value="missing_url">缺 URL</option>
-                  <option value="issue">有校验问题</option>
-                </select>
-              </label>
-            </div>
-            <div class="csv-metrics">
-              <div><strong id="csvMetricRows">0</strong><span>行</span></div>
-              <div><strong id="csvMetricCols">0</strong><span>列</span></div>
-              <div><strong id="csvMetricIssues">0</strong><span>问题</span></div>
-              <div><strong id="csvMetricSelected">0</strong><span>选中</span></div>
-            </div>
-            <div class="csv-detail-editor" id="csvDetailEditor">
-              <div class="library-empty">选择一行后编辑完整 Raindrop 字段</div>
-            </div>
-            <div class="csv-issues" id="csvIssueList">
-              <div class="library-empty">暂无校验结果</div>
-            </div>
-            <h3 class="library-section-title">最近 CSV</h3>
-            <div class="csv-recent-list" id="csvRecentList"></div>
-          </section>
-        </div>
-          </div>
-        </div>
       </section>
 
       <section class="app-page" data-page-panel="settings">
@@ -277,12 +996,14 @@
               <label class="setting-field">
                 <span>主题</span>
                 <select id="themeSelect">
+                  <option value="midnight">午夜绯电</option>
                   <option value="mint">护眼淡绿</option>
                   <option value="sage">青柠灰绿</option>
                   <option value="paper">纸感浅色</option>
                   <option value="dusk">暮色紫灰</option>
                   <option value="graphite">石墨深色</option>
                   <option value="rose">柔粉米白</option>
+                  <option value="prism">霓虹蜜桃</option>
                 </select>
               </label>
               <label class="setting-field">
@@ -290,6 +1011,16 @@
                 <select id="uiDensitySelect">
                   <option value="comfortable">舒展</option>
                   <option value="compact">紧凑</option>
+                </select>
+              </label>
+              <label class="setting-field">
+                <span>视觉包</span>
+                <select id="visualPackSelect">
+                  <option value="neon-rain">雨夜霓虹</option>
+                  <option value="velvet-perfume">酒红丝绒</option>
+                  <option value="vinyl-cocktail">黑胶鸡尾酒</option>
+                  <option value="city-after-rain">雨后城景</option>
+                  <option value="none">关闭内置图片</option>
                 </select>
               </label>
               <label class="setting-field range-field">
@@ -302,6 +1033,12 @@
               <button class="btn btn-secondary btn-sm" id="btnSelectBgImage">导入背景图</button>
               <button class="btn btn-outline btn-sm" id="btnClearBgImage">清除背景</button>
             </div>
+            <div class="visual-pack-picker" id="visualPackPicker" aria-label="内置视觉包">
+              <button class="visual-pack-tile" type="button" data-visual-pack="neon-rain"><img src="../assets/visual-packs/midnight/neon-rain.png" alt="雨夜霓虹"><span>雨夜霓虹</span></button>
+              <button class="visual-pack-tile" type="button" data-visual-pack="velvet-perfume"><img src="../assets/visual-packs/midnight/velvet-perfume.png" alt="酒红丝绒"><span>酒红丝绒</span></button>
+              <button class="visual-pack-tile" type="button" data-visual-pack="vinyl-cocktail"><img src="../assets/visual-packs/midnight/vinyl-cocktail.png" alt="黑胶鸡尾酒"><span>黑胶鸡尾酒</span></button>
+              <button class="visual-pack-tile" type="button" data-visual-pack="city-after-rain"><img src="../assets/visual-packs/midnight/city-after-rain.png" alt="雨后城景"><span>雨后城景</span></button>
+            </div>
           </section>
 
           <section class="module-card utility-panel">
@@ -313,9 +1050,12 @@
             </div>
             <div class="file-row">
               <label class="file-label">数据库目录</label>
-              <div class="file-selector single-line">
+              <div class="file-selector">
                 <span class="file-path" id="dbPathValue">加载中...</span>
+                <button class="btn btn-outline btn-sm" id="btnOpenDbLocation" type="button">打开</button>
+                <button class="btn btn-secondary btn-sm" id="btnChangeDbLocation" type="button">更改位置</button>
               </div>
+              <small class="setting-note">可选择项目文件夹内的专用空目录；迁移前自动备份，原数据库保留，完成后软件自动重启。</small>
             </div>
             <div class="file-row">
               <label class="file-label">当前输出目录</label>
@@ -361,6 +1101,12 @@
     </div>
   </div>
 
+  <script src="../node_modules/lucide/dist/umd/lucide.min.js"></script>
+  <script src="explorer-selection.js"></script>
+  <script src="sheet-table.js"></script>
+  <script src="processing-speed.js"></script>
+  <script src="processing-eta.js"></script>
+  <script src="tool-shell.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

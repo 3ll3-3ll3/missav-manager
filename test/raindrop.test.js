@@ -11,7 +11,7 @@ test('round-trips the official Raindrop CSV columns', () => {
     highlights: 'First\nSecond', favorite: true,
   }];
   const parsed = raindrop.parseRaindropCSV(raindrop.generateRaindropCSV(records));
-  assert.deepEqual(parsed, records);
+  assert.deepEqual(parsed, [{ ...records[0], favorite_present: true }]);
 });
 
 test('parses and generates nested Raindrop bookmark HTML', () => {
@@ -21,6 +21,7 @@ test('parses and generates nested Raindrop bookmark HTML', () => {
   assert.equal(parsed[0].folder, 'Root / Child');
   assert.equal(parsed[0].url, 'https://example.com/?a=1&b=2');
   assert.equal(parsed[0].favorite, true);
+  assert.equal(parsed[0].favorite_present, true);
   assert.equal(parsed[0].note, 'Note text');
   assert.equal(parsed[0].highlights, 'Highlight');
 

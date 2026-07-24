@@ -50,7 +50,7 @@ function extractCodeFromUrl(input) {
   const fc2 = slug.match(/^fc2(?:-?ppv)?-?(\d{4,10})$/i);
   if (fc2) return `FC2-PPV-${fc2[1]}`;
 
-  const normal = slug.match(/^([a-z]{2,12})-?(\d{2,8})$/i);
+  const normal = slug.match(/^([a-z]{2,8})-?(\d{2,5})$/i);
   if (normal) return `${normal[1].toUpperCase()}-${normal[2]}`;
 
   return '';
@@ -75,7 +75,7 @@ function normalizeCode(s) {
   }
 
   // 标准番号: ABF-354, SONE-314, ABF354 等
-  const m = s.match(/^([A-Z]{2,12})[-_]?(\d{2,8})$/);
+  const m = s.match(/^([A-Z]{2,8})[-_]?(\d{2,5})$/);
   if (m) return `${m[1]}-${m[2]}`;
 
   return s;
@@ -148,6 +148,10 @@ const NOISE_CODE_PREFIXES = new Set([
   'PAGINATION', 'DETAILS', 'STATUS', 'TITLE', 'BODY', 'CLASS', 'STYLE',
   'DATE', 'HTML', 'BUTTON', 'INPUT', 'IMAGE', 'THUMB', 'THUMBNAIL',
   'AV', 'TOP', 'BEST', 'FUCK', 'MOODYZ', 'TAMEIKE',
+  'ALL', 'PDF', 'TELEGRAM', 'LOGO', 'JOHREN', 'IEOR', 'PROBABILITY',
+  'STATISTICS', 'PYTHON', 'OFFICE', 'GITHUB', 'SERIES', 'WEIXIN',
+  'RESULT', 'RELATED', 'THREAD', 'XIUREN', 'WXSYNC', 'JAVA', 'LARGE',
+  'RJ', 'NO',
 ]);
 
 const DATE_WORD_PREFIXES = new Set([
@@ -162,7 +166,8 @@ function isNoiseCodePrefix(code) {
   const prefix = m[1];
   const num = Number(m[2]);
   if (NOISE_CODE_PREFIXES.has(prefix)) return true;
-  return DATE_WORD_PREFIXES.has(prefix) && num >= 1900 && num <= 2099;
+  if (DATE_WORD_PREFIXES.has(prefix) && num >= 1900 && num <= 2099) return true;
+  return ['SPRING', 'SUMMER', 'FALL', 'AUTUMN', 'WINTER'].includes(prefix) && num >= 1900 && num <= 2099;
 }
 function decodeLooseText(text) {
   return String(text || '')
@@ -179,12 +184,48 @@ function decodeLooseText(text) {
 function isLikelyStandardCode(code) {
   if (/^PPV-\d+/i.test(code)) return false;
   if (isNoiseCodePrefix(code)) return false;
-  return /^(FC2-PPV-\d{4,10}|[A-Z]{2,12}-\d{2,8})$/.test(code);
+  return /^(FC2-PPV-\d{4,10}|[A-Z]{2,8}-\d{2,5})$/.test(code);
 }
 
 function addCode(codes, raw, index = 0) {
   const code = normalizeCode(raw);
   if (isLikelyStandardCode(code)) codes.push({ code, index });
+}
+
+const TRUSTED_AV_HOSTS = [
+  'missav.ai', '123av.com', 'avbase.net', 'javdb.com', 'javbus.com',
+  'javlibrary.com', 'supjav.com', 'njav.tv', 'jable.tv', 'jav.guru',
+];
+
+function isTrustedAvHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  return TRUSTED_AV_HOSTS.some(domain => host === domain || host.endsWith(`.${domain}`));
+}
+
+function extractCodesFromTrustedAvUrl(input) {
+  const raw = String(input || '').trim().replace(/[.,;!?]+$/, '');
+  if (!/^https?:\/\//i.test(raw)) return [];
+  let url;
+  try { url = new URL(raw); } catch { return []; }
+  if (!isTrustedAvHost(url.hostname)) return [];
+
+  const source = decodeURIComponent(url.pathname);
+  const matches = [];
+  const fc2Pattern = /(?:^|[^a-z0-9])fc2(?:[\s_-]*ppv)?[\s_-]*(\d{4,10})(?=$|[^0-9])/gi;
+  for (const match of source.matchAll(fc2Pattern)) matches.push(`FC2-PPV-${match[1]}`);
+  const standardPattern = /(?:^|[^a-z])([a-z]{2,8})[\s_-]+(\d{2,5})(?=$|[^0-9])/gi;
+  for (const match of source.matchAll(standardPattern)) {
+    const code = normalizeCode(`${match[1]}-${match[2]}`);
+    if (isLikelyStandardCode(code)) matches.push(code);
+  }
+  return [...new Set(matches)];
+}
+
+function maskGenericNoise(text) {
+  const preserveLength = match => match.replace(/[^\r\n]/g, ' ');
+  return String(text || '')
+    .replace(/https?:\/\/[^\s"'<>)]*/gi, preserveLength)
+    .replace(/<[^>]*>/g, preserveLength);
 }
 
 /**
@@ -195,27 +236,29 @@ function parseCodeList(text) {
   const decoded = decodeLooseText(raw);
   const codes = [];
 
-  // MissAV URL 优先：能处理 HTML href、Markdown 链接、普通粘贴链接。
-  const urlPattern = /https?:\/\/missav\.[^\s"'<>)]*/gi;
+  // 可信 AV URL 优先；普通网页 URL 和图片路径不参与通用番号匹配。
+  const urlPattern = /https?:\/\/[^\s"'<>)]*/gi;
   for (const match of decoded.matchAll(urlPattern)) {
-    addCode(codes, match[0], match.index || 0);
+    for (const code of extractCodesFromTrustedAvUrl(match[0])) addCode(codes, code, match.index || 0);
   }
+
+  const visibleText = maskGenericNoise(decoded);
 
   // FC2 系列：FC2-PPV-1234567、FC2 1234567、FC2_1234567。
   const fc2Pattern = /(^|[^A-Za-z0-9])FC2(?:[\s_-]*PPV)?[\s_-]*(\d{4,10})(?=$|[^A-Za-z0-9])/gi;
-  for (const match of decoded.matchAll(fc2Pattern)) {
+  for (const match of visibleText.matchAll(fc2Pattern)) {
     addCode(codes, `FC2-PPV-${match[2]}`, (match.index || 0) + match[1].length);
   }
 
   // 带分隔符的普通番号：ABF-354、sone_314、ABF 354。
-  const separatedPattern = /(^|[^A-Za-z0-9])([A-Za-z]{2,12})[\s_-]+(\d{2,8})(?=$|[^A-Za-z0-9])/g;
-  for (const match of decoded.matchAll(separatedPattern)) {
+  const separatedPattern = /(^|[^A-Za-z0-9])([A-Za-z]{2,8})[\s_-]+(\d{2,5})(?=$|[^A-Za-z0-9])/g;
+  for (const match of visibleText.matchAll(separatedPattern)) {
     addCode(codes, `${match[2]}-${match[3]}`, (match.index || 0) + match[1].length);
   }
 
   // 无分隔符只接受原文大写前缀，避免 message14298、userpic6、media_video 等 HTML class/id 误判。
-  const compactUpperPattern = /(^|[^A-Za-z0-9])([A-Z]{2,12})(\d{2,8})(?=$|[^A-Za-z0-9])/g;
-  for (const match of decoded.matchAll(compactUpperPattern)) {
+  const compactUpperPattern = /(^|[^A-Za-z0-9])([A-Z]{2,8})(\d{2,5})(?=$|[^A-Za-z0-9])/g;
+  for (const match of visibleText.matchAll(compactUpperPattern)) {
     addCode(codes, `${match[2]}-${match[3]}`, (match.index || 0) + match[1].length);
   }
 
@@ -234,6 +277,7 @@ function parseCodeList(text) {
 module.exports = {
   extractFC2Number,
   extractCodeFromUrl,
+  extractCodesFromTrustedAvUrl,
   normalizeCode,
   codeComparableKey,
   codeVariants,

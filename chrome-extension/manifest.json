@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "MissAV Manager - 123AV 收藏桥",
+  "version": "1.0.0",
+  "description": "把 MissAV Manager 的收藏任务交给本地 Chrome 中已登录的 123AV 账号执行。",
+  "permissions": ["tabs", "storage", "alarms"],
+  "host_permissions": [
+    "https://123av.com/*",
+    "https://www.123av.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "MissAV Manager 收藏桥",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://123av.com/*", "https://www.123av.com/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

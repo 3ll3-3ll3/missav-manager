@@ -16,6 +16,8 @@ output/
 
 # Electron and operating-system local files
 .electron/
+.tmp-userdata/
+artifacts/
 .DS_Store
 Thumbs.db
 

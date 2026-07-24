@@ -11,10 +11,11 @@ const UNKNOWN_ACTRESS_TAG = '#未知女优';
 
 /**
  * 判断某条记录是否应放入「需要手动核验」文件夹
- * 规则：只有 status === 'not_found' 才进
+ * 规则：明确未找到，以及页面成功返回但证据不足的记录进入人工核验。
+ * 网络错误不会进入导出，因此即使状态属于未完成，也不会污染 Raindrop 文件。
  */
 function isManualVerifyRow(row) {
-  return row.includeInImport === true && row.status === 'not_found';
+  return row.includeInImport === true && ['not_found', 'need_manual_check', 'page_ok_play_unknown'].includes(row.status);
 }
 
 function folderForRow(row) {
@@ -100,6 +101,53 @@ function generateReportCSV(rows) {
     ].join(','));
   }
 
+  return lines.join('\n');
+}
+
+/**
+ * 将标签转换成 Windows 可用、且适合批量导出的短文件名。
+ */
+function safeExportFileName(value, fallback = '未命名标签') {
+  let name = String(value || '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '').trim();
+  if (!name) name = fallback;
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name)) name = `_${name}`;
+  return name.slice(0, 72) || fallback;
+}
+
+/**
+ * 把可导入记录按最终 Tag 拆分。多 Tag 记录会出现在每个对应 Tag 文件中。
+ */
+function buildTagExportGroups(rows) {
+  const byTag = new Map();
+  for (const row of (rows || []).filter(item => item?.includeInImport === true)) {
+    const tags = [...new Set((row.finalTags || []).map(tag => String(tag || '').trim()).filter(Boolean))];
+    for (const tag of tags) {
+      if (!byTag.has(tag)) byTag.set(tag, []);
+      byTag.get(tag).push(row);
+    }
+  }
+
+  const usedNames = new Map();
+  return [...byTag.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, 'zh-CN', { numeric: true, sensitivity: 'base' }))
+    .map(([tag, groupedRows]) => {
+      const safeBase = safeExportFileName(tag);
+      const used = (usedNames.get(safeBase.toLowerCase()) || 0) + 1;
+      usedNames.set(safeBase.toLowerCase(), used);
+      return { tag, fileBase: used === 1 ? safeBase : `${safeBase}_${used}`, rows: groupedRows };
+    });
+}
+
+function generateTagExportIndexCSV(groups) {
+  const lines = ['tag,count,html_file,csv_file'];
+  for (const group of groups || []) {
+    lines.push([
+      csvCell(group.tag),
+      String(group.rows?.length || 0),
+      csvCell(`${group.fileBase}.html`),
+      csvCell(`${group.fileBase}.csv`),
+    ].join(','));
+  }
   return lines.join('\n');
 }
 
@@ -214,6 +262,9 @@ module.exports = {
   generateRaindropHTML,
   generateRaindropCSV,
   generateReportCSV,
+  safeExportFileName,
+  buildTagExportGroups,
+  generateTagExportIndexCSV,
   generateTagCollectionCSV,
   generateBackupJSON,
   buildOutputRow,

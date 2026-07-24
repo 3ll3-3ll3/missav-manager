@@ -1,7 +1,7 @@
 {
-  "name": "missav-manager",
-  "version": "0.1.0",
-  "description": "MissAV 收藏管理桌面工具 — 番号 → MissAV 元数据抓取 → Raindrop 导入文件生成",
+  "name": "tg-content-toolbox",
+  "version": "0.3.0",
+  "description": "TG 内容工具箱 — 按群组独立过滤推特博主、Bad.news 帖子、MissAV 番号与 123AV 番号",
   "main": "main.js",
   "repository": {
     "type": "git",
@@ -17,42 +17,49 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js && node --check renderer/tool-shell.js && node --check renderer/explorer-selection.js && node --check renderer/sheet-table.js && node --check renderer/processing-speed.js && node --check renderer/processing-eta.js && node --check src/coreService.js && node --check src/nativeSqlite.js && node --check src/userDataPath.js && node --check src/databaseLocation.js && node --check src/inputExtractor.js && node --check src/toolboxFilters.js && node --check src/tools/common.js && node --check src/tools/twitter.js && node --check src/tools/badnews.js && node --check src/tools/registry.js && node --check src/fetcher.js && node --check src/av123.js && node --check src/av123Account.js && node --check src/chromeFavoriteBridge.js && node --check chrome-extension/service-worker.js && node --check chrome-extension/content-script.js && node --check chrome-extension/popup.js && node --check src/raindropApi.js && node --check src/telegramSource.js && node --check src/telegramClient.js && node --check src/telegramBot.js && node --check src/logger.js && node --check src/networkTransport.js && node --check scripts/database-admin.cjs && node --check scripts/network-smoke.cjs && node --check scripts/network-timeout-smoke.cjs && node --check scripts/av123-account-smoke.cjs && node --check scripts/parallel-lookup-smoke.cjs && node --check scripts/av123-speed-smoke.cjs && node --check scripts/av123-live-ab-smoke.cjs && node --check scripts/ui-smoke.cjs && node --check scripts/telegram-ui-smoke.cjs && node --check scripts/verify-package.cjs && node --check scripts/analyze-parser-feedback.cjs && node --check scripts/analyze-av123-runtime.cjs && node --check scripts/persistence-benchmark.cjs",
+    "test:network-transport": "electron scripts/network-timeout-smoke.cjs",
     "test": "node --test",
-    "build": "electron-builder --win",
-    "build:portable": "set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable"
+    "build": "electron-builder --win --publish never",
+    "build:portable": "node scripts/build-portable.cjs"
   },
   "build": {
     "appId": "com.wjl.missav-manager",
-    "productName": "MissAV_Manager",
+    "productName": "TG_Content_Toolbox",
     "directories": {
       "output": "dist"
     },
+    "compression": "store",
     "files": [
       "main.js",
       "preload.js",
-      "renderer/**",
-      "src/**",
-      "assets/**",
-      "node_modules/**"
+      "renderer/**/*",
+      "chrome-extension/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
     ],
     "win": {
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
+      "signExecutable": false,
       "target": [
         "portable"
       ]
     },
     "portable": {
-      "artifactName": "MissAV_Manager_v${version}.exe"
+      "artifactName": "TG_Content_Toolbox_v${version}.exe"
     }
   },
   "dependencies": {
     "electron-store": "^8.1.0",
-    "sql.js": "^1.14.1"
+    "lucide": "^0.468.0",
+    "qrcode": "^1.5.4",
+    "teleproto": "^1.228.4"
   },
   "devDependencies": {
     "electron": "^43.1.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "sql.js": "^1.14.1"
   },
   "author": "WJL",
   "license": "MIT"

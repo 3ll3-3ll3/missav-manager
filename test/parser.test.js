@@ -32,3 +32,18 @@ test('generates unique candidate URLs for a normalized code', () => {
   assert.equal(urls[0], 'https://missav.ai/cn/abf-354');
   assert.equal(new Set(urls).size, urls.length);
 });
+
+test('ignores ordinary web URLs and image asset names while accepting trusted AV URLs', () => {
+  const input = `
+    https://hostloc.com/thread-1285447-1-1.html
+    https://example.com/assets/mark_1232.jpg
+    https://docs.github.com/assets/cb-345/images/copilot.png
+    https://123av.com/cn/v/393otim-648-uncensored-leaked
+    https://missav.ai/cn/ofes-022-uncensored-leak
+  `;
+  assert.deepEqual(parser.parseCodeList(input), ['OTIM-648', 'OFES-022']);
+});
+
+test('rejects common product, course and website version tokens', () => {
+  assert.deepEqual(parser.parseCodeList('PDF24 Office 365 Java 11 IEOR 6711 Fall 2013 RJ01393321'), []);
+});

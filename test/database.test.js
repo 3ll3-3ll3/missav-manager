@@ -17,6 +17,7 @@ test('persists records and safely creates and restores backups', async t => {
   await database.init(dir);
   const codeId = database.createCodeRecord('abf354', 'https://missav.ai/cn/abf-354', 'ok');
   database.setCodeActressTags(codeId, ['Example Actress']);
+  assert.equal(database.getBookmarkStats().count, 0, '番号记录不应再自动生成本地收藏');
 
   const first = database.createBackup('same label');
   const second = database.createBackup('same label');
@@ -127,4 +128,108 @@ test('persists records and safely creates and restores backups', async t => {
   await database.init(dir);
   assert.equal(database.getBookmarkStats().count, 0);
   assert.equal(database.findCode('ABP-721').found, true);
+});
+
+test('manages complete bookmark tables and builds the same data shown by export preview', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'missav-manager-complete-db-'));
+  t.after(() => {
+    database.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  await database.init(dir);
+  const codeId = database.createCodeRecord('DASS-720', 'https://missav.ai/cn/dass-720', 'ok');
+  database.setCodeActressTags(codeId, ['Actress One']);
+  database.setCodeGenreTags(codeId, ['Drama']);
+
+  database.createBookmarkRecord({ title: 'DASS-720', url: 'https://missav.ai/cn/dass-720', code: 'DASS-720' });
+  const codeBookmark = database.getBookmarkLibrary({ search: 'DASS-720', limit: 10 })[0];
+  database.updateBookmarkRecord(codeBookmark.id, {
+    title: '', folder: '', tags: '', created: '', note: 'Local note', highlights: 'Local highlight', favorite: true,
+  });
+
+  database.importRaindropRecords([{
+    raindrop_id: 'favorite-1', title: 'Favorite page', url: 'https://example.com/favorite', folder: 'Web', favorite: true, favorite_present: true,
+  }]);
+  database.importRaindropRecords([{
+    title: 'Favorite page', url: 'https://example.com/favorite', folder: 'Web', note: 'HTML supplement', favorite: false, favorite_present: false,
+  }]);
+  assert.equal(database.getBookmarkLibrary({ search: 'Favorite page', limit: 10 })[0].favorite, true);
+
+  database.createBookmarkRecord({ title: 'Same URL A', url: 'https://example.com/same', folder: 'A' });
+  const distinct = database.importRaindropRecords([{
+    raindrop_id: 'same-b', title: 'Same URL B', url: 'https://example.com/same', folder: 'B', favorite: false, favorite_present: true,
+  }]);
+  assert.equal(distinct.imported, 1);
+  assert.equal(database.getBookmarkLibrary({ search: 'https://example.com/same', limit: 10 }).length, 2);
+
+  database.createBookmarkRecord({ title: 'Missing URL' });
+  database.createBookmarkRecord({ title: 'Bad URL', url: 'not-a-url' });
+  database.createBookmarkRecord({ title: 'Ordinary Article 2026', url: 'https://example.com/article/2026' });
+  assert.equal(database.getBookmarkLibrary({ search: 'Ordinary Article 2026', limit: 10 })[0].code, '');
+
+  const exportBundle = database.buildRaindropExport();
+  const exportedCode = exportBundle.records.find(row => row.code === 'DASS-720');
+  assert.equal(exportedCode.title, 'DASS-720');
+  assert.equal(exportedCode.folder, 'MissAV_Import');
+  assert.deepEqual(exportedCode.tags.split(','), ['Actress One', 'Drama']);
+  assert.equal(exportedCode.note, 'Local note');
+  assert.equal(exportedCode.highlights, 'Local highlight');
+  assert.equal(exportedCode.favorite, true);
+  assert.match(exportedCode.created, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(exportBundle.summary.missingUrl, 1);
+  assert.equal(exportBundle.summary.invalidUrl, 1);
+  assert.equal(exportBundle.summary.blocked, 2);
+  assert.equal(exportBundle.records.some(row => row.title === 'Missing URL'), false);
+
+  assert.equal(database.getBookmarkLibrary({ search: 'Actress One', limit: 10 }).some(row => row.code === 'DASS-720'), true);
+  const stats = database.getBookmarkStats();
+  assert.equal(stats.count >= 7, true);
+  assert.equal(stats.noUrlCount, 1);
+  assert.equal(stats.invalidUrlCount, 1);
+
+  const editable = database.getEditableTables().map(row => row.name);
+  assert.equal(editable.includes('bookmarks'), true);
+  assert.equal(editable.includes('bookmark_collections'), true);
+  const rawPage = database.getRawTableRows('bookmarks', { limit: 2, offset: 2 });
+  assert.equal(rawPage.rows.length, 2);
+  assert.equal(rawPage.total, stats.count);
+  assert.equal(rawPage.filteredTotal, stats.count);
+  database.updateRawCell('bookmarks', { id: codeBookmark.id }, 'title', 'Edited through full database');
+  assert.equal(database.getBookmarkLibrary({ search: 'Edited through full database', limit: 10 }).length, 1);
+
+  const cleared = database.updateBookmarkRecord(codeBookmark.id, { code: '' });
+  assert.equal(cleared.sourceCodeId, null);
+  assert.equal(database.findCode('DASS-720').found, true);
+
+  const favoriteRow = database.getBookmarkLibrary({ search: 'Favorite page', limit: 10 })[0];
+  database.deleteCodeRecord(codeId);
+  assert.equal(database.getBookmarkLibrary({ search: 'Favorite page', limit: 10 })[0].id, favoriteRow.id);
+});
+
+test('persists one processed MissAV row with all tags in a single durable operation', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'missav-manager-processed-row-'));
+  t.after(() => {
+    database.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  await database.init(dir);
+  const codeId = database.persistProcessedCode({
+    code: 'IPX-999',
+    url: 'https://missav.ai/cn/ipx-999',
+    status: 'ok',
+    matchedActressTags: ['Actress A', 'Actress B'],
+    genres: ['剧情', '高清'],
+  });
+  assert.ok(codeId > 0);
+  const row = database.getCodeLibrary({ search: 'IPX-999', limit: 10 })[0];
+  assert.deepEqual(row.actress_tags.sort(), ['Actress A', 'Actress B']);
+  assert.deepEqual(row.genre_tags.sort(), ['剧情', '高清'].sort());
+
+  database.close();
+  await database.init(dir);
+  const restored = database.getCodeLibrary({ search: 'IPX-999', limit: 10 })[0];
+  assert.deepEqual(restored.actress_tags.sort(), ['Actress A', 'Actress B']);
+  assert.deepEqual(restored.genre_tags.sort(), ['剧情', '高清'].sort());
 });
