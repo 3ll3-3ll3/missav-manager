@@ -24,7 +24,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.12
           cache: npm
 
       - name: Install dependencies
@@ -46,10 +46,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
           RELEASE_ASSET: ${{ steps.asset.outputs.path }}
+          RELEASE_NOTES: RELEASE_NOTES.md
         shell: pwsh
         run: |
           if (gh release view $env:RELEASE_TAG 2>$null) {
+            gh release edit $env:RELEASE_TAG --title "TG 内容工具箱 $env:RELEASE_TAG" --notes-file $env:RELEASE_NOTES
             gh release upload $env:RELEASE_TAG $env:RELEASE_ASSET --clobber
           } else {
-            gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --title "MissAV Manager $env:RELEASE_TAG" --generate-notes
+            gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --title "TG 内容工具箱 $env:RELEASE_TAG" --notes-file $env:RELEASE_NOTES --latest
           }
