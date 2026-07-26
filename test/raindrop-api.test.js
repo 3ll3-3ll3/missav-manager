@@ -62,6 +62,13 @@ test('Raindrop URL-exists response preserves positional mapping', () => {
     { url: 'https://example.com/a', remoteId: 765 },
     { url: 'https://example.com/b', remoteId: null },
   ]);
+  assert.deepEqual(api.parseExistsResponse({ result: false, ids: [] }, urls), [
+    { url: 'https://example.com/a', remoteId: null },
+    { url: 'https://example.com/b', remoteId: null },
+  ]);
+  assert.equal(api.isSuccessfulApiResponse(true, { result: false }), false);
+  assert.equal(api.isSuccessfulApiResponse(true, { result: false }, { allowResultFalse: true }), true);
+  assert.equal(api.isSuccessfulApiResponse(false, { result: true }, { allowResultFalse: true }), false);
   assert.throws(() => api.sanitizeUrls(Array.from({ length: 101 }, (_, i) => `https://example.com/${i}`)), /1-100/);
 });
 
@@ -76,4 +83,41 @@ test('Raindrop rate-limit parser understands epoch and retry-after headers', () 
   assert.equal(parsed.limit, 120);
   assert.equal(parsed.remaining, 0);
   assert.equal(parsed.resetAt, now + 60_000);
+});
+
+test('Raindrop selected Collections and paged remote rows are normalized', () => {
+  assert.deepEqual(api.normalizeCollectionSelection([12, '12', -1, 18]), [12, -1, 18]);
+  assert.throws(() => api.normalizeCollectionSelection([]), /1-100/);
+  assert.throws(() => api.normalizeCollectionSelection([0]), /Collection/);
+  assert.throws(
+    () => api.normalizeCollectionSelection(Array.from({ length: 101 }, (_, index) => index + 1)),
+    /1-100/,
+  );
+
+  assert.deepEqual(api.parseRaindropsResponse({
+    items: [{
+      _id: 701,
+      link: 'https://missav.ai/dm15/abf-354-uncensored-leak',
+      title: 'ABF-354',
+      tags: ['Test Actress', '剧情', '剧情'],
+      collection: { $id: 12 },
+      lastUpdate: '2026-07-25T01:02:03.000Z',
+    }, {
+      _id: 0,
+      link: 'https://missav.ai/cn/invalid',
+    }],
+  }), [{
+    id: 701,
+    link: 'https://missav.ai/dm15/abf-354-uncensored-leak',
+    title: 'ABF-354',
+    tags: ['Test Actress', '剧情'],
+    excerpt: '',
+    note: '',
+    cover: '',
+    created: '',
+    lastUpdate: '2026-07-25T01:02:03.000Z',
+    collectionId: 12,
+    important: false,
+    type: 'link',
+  }]);
 });

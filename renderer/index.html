@@ -14,7 +14,7 @@
     <div class="header-left">
       <span class="logo-icon">T</span>
       <h1 class="app-title">TG 内容<span class="title-highlight">工具箱</span></h1>
-      <span class="version-badge" id="versionBadge">v0.3.0</span>
+      <span class="version-badge" id="versionBadge">v0.4.5</span>
     </div>
     <div class="header-right">
       <button class="btn-icon" id="btnHistory" type="button" title="处理历史" aria-label="处理历史"><i data-lucide="history"></i></button>
@@ -47,6 +47,7 @@
           <button class="tool-stage-btn" data-page="results"><span>结果</span></button>
           <button class="tool-stage-btn" data-page="sync" data-missav-stage><span>Raindrop</span></button>
         </div>
+        <button class="tool-stage-btn tool-history-stage" id="btnToolHistoryPage" data-page="tool-history" type="button"><i data-lucide="history"></i><span>处理历史</span></button>
       </nav>
 
       <section class="app-page active" data-page-panel="home">
@@ -101,7 +102,7 @@
               <span class="badge" id="twitterResultCount">0 位博主</span>
             </div>
             <div class="toolbox-source-grid">
-              <label><span>绑定 Telegram 群组</span><select id="twitterGroupBinding"><option value="">不绑定，只用手动输入</option></select></label>
+              <label><span>绑定 Telegram 群组/频道</span><select id="twitterGroupBinding" multiple size="5"><option value="">不绑定，只用手动输入</option></select><small>点击打开选择器，可搜索、勾选多个来源并随时清空。</small></label>
               <label><span>开始时间（精确到分钟）</span><input id="twitterTimeStart" type="datetime-local" step="60"></label>
               <label><span>结束时间（精确到分钟）</span><input id="twitterTimeEnd" type="datetime-local" step="60"></label>
             </div>
@@ -110,7 +111,7 @@
               <button class="btn btn-secondary btn-sm" id="btnTwitterImportFiles" type="button"><i data-lucide="files"></i><span>导入多个文件</span></button>
               <button class="btn btn-outline btn-sm" id="btnTwitterFilter" type="button"><i data-lucide="filter"></i><span>重新过滤</span></button>
               <button class="btn btn-outline btn-sm tool-button-danger" id="btnTwitterClear" type="button"><i data-lucide="trash-2"></i><span>清空本工具</span></button>
-              <span class="toolbox-source-status" id="twitterSourceStatus">当前会话尚无输入；结果不会写入永久数据库</span>
+              <span class="toolbox-source-status" id="twitterSourceStatus">当前会话尚无输入；处理后可手动保存到本工具历史</span>
             </div>
             <label class="toolbox-raw-input">
               <span><strong>消息或文件内容</strong><small>支持粘贴文本、Telegram HTML / JSON、TXT、Markdown</small></span>
@@ -128,6 +129,8 @@
             </div>
             <div class="toolbox-export-row">
               <button class="btn btn-success btn-sm" id="btnSaveTwitterResults" type="button"><i data-lucide="save"></i><span>导出两个 TXT</span></button>
+              <button class="btn btn-primary btn-sm" id="btnStoreTwitterHistory" type="button"><i data-lucide="archive"></i><span>保存本次历史</span></button>
+              <button class="btn btn-outline btn-sm" type="button" data-page-target="tool-history"><i data-lucide="history"></i><span>查看历史</span></button>
               <span>按首次出现顺序输出；大小写不敏感去重。</span>
             </div>
           </section>
@@ -146,7 +149,7 @@
               <span class="badge" id="badnewsResultCount">0 条链接</span>
             </div>
             <div class="toolbox-source-grid">
-              <label><span>绑定 Telegram 群组</span><select id="badnewsGroupBinding"><option value="">不绑定，只用手动输入</option></select></label>
+              <label><span>绑定 Telegram 群组/频道</span><select id="badnewsGroupBinding" multiple size="5"><option value="">不绑定，只用手动输入</option></select><small>点击打开选择器，可搜索、勾选多个来源并随时清空。</small></label>
               <label><span>开始时间（精确到分钟）</span><input id="badnewsTimeStart" type="datetime-local" step="60"></label>
               <label><span>结束时间（精确到分钟）</span><input id="badnewsTimeEnd" type="datetime-local" step="60"></label>
             </div>
@@ -155,7 +158,7 @@
               <button class="btn btn-secondary btn-sm" id="btnBadnewsImportFiles" type="button"><i data-lucide="files"></i><span>导入多个文件</span></button>
               <button class="btn btn-outline btn-sm" id="btnBadnewsFilter" type="button"><i data-lucide="filter"></i><span>重新过滤</span></button>
               <button class="btn btn-outline btn-sm tool-button-danger" id="btnBadnewsClear" type="button"><i data-lucide="trash-2"></i><span>清空本工具</span></button>
-              <span class="toolbox-source-status" id="badnewsSourceStatus">当前会话尚无输入；结果不会写入永久数据库</span>
+              <span class="toolbox-source-status" id="badnewsSourceStatus">当前会话尚无输入；处理后可手动保存到本工具历史</span>
             </div>
             <label class="toolbox-raw-input">
               <span><strong>消息或文件内容</strong><small>支持粘贴文本、Telegram HTML / JSON、TXT、Markdown</small></span>
@@ -169,7 +172,82 @@
             </div>
             <div class="toolbox-export-row">
               <button class="btn btn-success btn-sm" id="btnSaveBadnewsResults" type="button"><i data-lucide="save"></i><span>导出 TXT</span></button>
+              <button class="btn btn-primary btn-sm" id="btnStoreBadnewsHistory" type="button"><i data-lucide="archive"></i><span>保存本次历史</span></button>
+              <button class="btn btn-outline btn-sm" type="button" data-page-target="tool-history"><i data-lucide="history"></i><span>查看历史</span></button>
               <span>查询参数与片段会被移除；结果按首次出现顺序去重。</span>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="haijiao">
+        <div class="toolbox-page">
+          <section class="module-card toolbox-filter-card" data-simple-tool="haijiao">
+            <div class="module-header">
+              <div>
+                <span class="toolbox-eyebrow">独立工具</span>
+                <h2>海角帖子过滤</h2>
+                <span class="module-subtitle">只保留海角 7 类正文帖直达链接，自动排除广告、机器人、栏目首页和其他垃圾页面</span>
+              </div>
+              <span class="badge" id="haijiaoResultCount">0 条链接</span>
+            </div>
+            <div class="toolbox-source-grid">
+              <label><span>绑定 Telegram 群组/频道</span><select id="haijiaoGroupBinding" multiple size="5"><option value="">不绑定，只用手动输入</option></select><small>点击打开选择器，可搜索、勾选多个来源；本工具绑定独立保存。</small></label>
+              <label><span>开始时间（精确到分钟）</span><input id="haijiaoTimeStart" type="datetime-local" step="60"></label>
+              <label><span>结束时间（精确到分钟）</span><input id="haijiaoTimeEnd" type="datetime-local" step="60"></label>
+            </div>
+            <div class="toolbox-source-actions">
+              <button class="btn btn-primary btn-sm" id="btnHaijiaoSyncGroup" type="button"><i data-lucide="refresh-cw"></i><span>同步绑定群组</span></button>
+              <button class="btn btn-secondary btn-sm" id="btnHaijiaoImportFiles" type="button"><i data-lucide="files"></i><span>导入多个文件</span></button>
+              <button class="btn btn-outline btn-sm" id="btnHaijiaoFilter" type="button"><i data-lucide="filter"></i><span>重新过滤</span></button>
+              <button class="btn btn-outline btn-sm tool-button-danger" id="btnHaijiaoClear" type="button"><i data-lucide="trash-2"></i><span>清空本工具</span></button>
+              <span class="toolbox-source-status" id="haijiaoSourceStatus">当前会话尚无输入；处理后可手动保存到本工具历史</span>
+            </div>
+            <label class="toolbox-raw-input">
+              <span><strong>消息或文件内容</strong><small>支持粘贴文本、Telegram HTML / JSON、TXT、Markdown</small></span>
+              <textarea id="haijiaoRawInput" spellcheck="false" placeholder="粘贴 Telegram 消息或网页文本；也可一次导入多个 Telegram 导出文件"></textarea>
+            </label>
+            <div class="toolbox-output-grid">
+              <section>
+                <div class="toolbox-output-head"><strong>海角帖子链接</strong><button class="btn btn-outline btn-sm" id="btnCopyHaijiaoUrls" type="button">复制</button></div>
+                <textarea id="haijiaoUrlsOutput" readonly spellcheck="false" placeholder="一行一个 https://www.haijiaolove.xyz/栏目/数字.html"></textarea>
+              </section>
+            </div>
+            <div class="toolbox-export-row">
+              <button class="btn btn-success btn-sm" id="btnSaveHaijiaoResults" type="button"><i data-lucide="save"></i><span>导出 TXT</span></button>
+              <button class="btn btn-primary btn-sm" id="btnStoreHaijiaoHistory" type="button"><i data-lucide="archive"></i><span>保存本次历史</span></button>
+              <button class="btn btn-outline btn-sm" type="button" data-page-target="tool-history"><i data-lucide="history"></i><span>查看历史</span></button>
+              <span>统一为 HTTPS + www；移除查询参数与片段，并按首次出现顺序去重。</span>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-page" data-page-panel="tool-history">
+        <div class="tool-history-page">
+          <section class="module-card">
+            <div class="module-header">
+              <div>
+                <span class="toolbox-eyebrow">当前工具</span>
+                <h2 id="toolHistoryTitle">处理历史</h2>
+                <span class="module-subtitle" id="toolHistorySubtitle">保存后可回看、恢复和导出；不同工具的历史彼此隔离</span>
+              </div>
+              <span class="badge" id="toolHistoryCount">0 次</span>
+            </div>
+            <div class="tool-history-toolbar">
+              <label class="tool-history-search"><i data-lucide="search"></i><input id="toolHistorySearch" type="search" placeholder="搜索名称、来源或历史结果"></label>
+              <button class="btn btn-outline btn-sm" id="btnRefreshToolHistory" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+              <button class="btn btn-outline btn-sm" type="button" data-open-data-table="active-tool-history"><i data-lucide="table-properties"></i><span>管理历史数据</span></button>
+            </div>
+            <div class="tool-history-layout">
+              <aside class="tool-history-list" id="toolHistoryList"><div class="library-empty">暂无处理历史</div></aside>
+              <section class="tool-history-detail" id="toolHistoryDetail">
+                <div class="tool-history-empty">
+                  <i data-lucide="history"></i>
+                  <strong>选择左侧记录查看明细</strong>
+                  <span>文本工具显示保存的规范化结果；MissAV 与 123AV 显示现有处理批次。</span>
+                </div>
+              </section>
             </div>
           </section>
         </div>
@@ -189,13 +267,14 @@
               </div>
             </div>
             <div class="toolbox-source-grid toolbox-av-source-grid">
-              <label><span id="avGroupBindingLabel">MissAV 绑定 Telegram 群组</span><select id="avGroupBinding"><option value="">不绑定，只用手动输入</option></select></label>
+              <label><span id="avGroupBindingLabel">MissAV 绑定 Telegram 群组/频道</span><select id="avGroupBinding" multiple size="5"><option value="">不绑定，只用手动输入</option></select><small>点击打开选择器，可搜索、勾选多个来源；各工具绑定彼此独立。</small></label>
               <label><span>开始时间（精确到分钟）</span><input id="avTimeStart" type="datetime-local" step="60"></label>
               <label><span>结束时间（精确到分钟）</span><input id="avTimeEnd" type="datetime-local" step="60"></label>
             </div>
             <div class="toolbox-source-actions">
               <button class="btn btn-primary btn-sm" id="btnAvSyncGroup" type="button"><i data-lucide="refresh-cw"></i><span>同步本工具绑定群组</span></button>
-              <span class="toolbox-source-status" id="avGroupBindingStatus">同一个群可同时绑定 MissAV 与 123AV，消息会分别进入各自过滤器。</span>
+              <button class="btn btn-outline btn-sm" type="button" data-page-target="tool-history"><i data-lucide="history"></i><span>查看本工具历史</span></button>
+              <span class="toolbox-source-status" id="avGroupBindingStatus">一个工具可绑定多个来源；同一来源也能同时绑定 MissAV 与 123AV。</span>
             </div>
             <div class="code-input-stack">
               <label class="code-input-section">
@@ -244,9 +323,12 @@
             <div class="module-header">
               <div>
                 <h2>消息来源</h2>
-                <span class="module-subtitle">统一接收最多 5 个群组，再按各工具的群组绑定分别过滤</span>
+                <span class="module-subtitle">统一接收最多 100 个群组或频道，再按各工具的来源绑定分别过滤</span>
               </div>
-              <span class="badge" id="telegramSourceStateBadge">未连接</span>
+              <div class="btn-row">
+                <button class="btn btn-outline btn-sm" type="button" data-open-data-table="telegram_sources"><i data-lucide="table-properties"></i><span>管理来源数据</span></button>
+                <span class="badge" id="telegramSourceStateBadge">未连接</span>
+              </div>
             </div>
 
             <div class="telegram-source-layout">
@@ -281,7 +363,7 @@
                   </div>
                   <div class="telegram-safety-note">
                     <i data-lucide="shield-check"></i>
-                    <span>不需要登录 my.telegram.org。Token 仅由 Windows 安全存储加密保存，不写入日志或 SQLite；机器人统一接收最多 5 个群组，再按工具绑定分别投递，不会自动启动网站查询。</span>
+                    <span>不需要登录 my.telegram.org。Token 仅由 Windows 安全存储加密保存，不写入日志或 SQLite；机器人统一接收最多 100 个群组或频道，再按工具绑定分别投递，不会自动启动网站查询。</span>
                   </div>
                   <div class="telegram-bot-setup">
                     <div class="telegram-bot-steps">
@@ -300,8 +382,8 @@
                   <div class="telegram-group-manager">
                     <div class="telegram-group-manager-head">
                       <div>
-                        <strong>机器人来源群组 <span id="telegramBotGroupSelectionCount">0 / 5</span></strong>
-                        <small>机器人只能发现加入后出现过消息的群。用于发现的识别消息会作为首次基线，不进入番号结果。</small>
+                        <strong>机器人来源群组/频道 <span id="telegramBotGroupSelectionCount">0 / 100</span></strong>
+                        <small>机器人只能发现加入后出现过消息的群或频道。用于发现的识别消息会作为首次基线，不进入番号结果。</small>
                       </div>
                       <div class="btn-row">
                         <button class="btn btn-outline btn-sm" id="btnTelegramBotDiscover" type="button"><i data-lucide="radar"></i><span>发现群组</span></button>
@@ -349,8 +431,34 @@
                   </div>
                   <div class="telegram-safety-note">
                     <i data-lucide="shield-check"></i>
-                    <span>首次使用填写自己的 <code>api_id</code> 与 <code>api_hash</code>，推荐直接扫码登录。成功后会话由 Windows 安全存储加密，APP 下次启动自动重连；只读取你明确选中的最多 5 个群组。</span>
+                    <span>首次使用填写自己的 <code>api_id</code> 与 <code>api_hash</code>，推荐直接扫码登录。成功后会话由 Windows 安全存储加密；可从账号的群组、超级群组和频道中选择最多 100 个来源。</span>
                   </div>
+                  <section class="telegram-network-panel">
+                    <div class="telegram-network-heading">
+                      <div>
+                        <strong>Telegram 网络与 Clash 代理</strong>
+                        <small>Clash 中查看“Mixed Port / 混合端口”或“Socks Port”；主机填 <code>127.0.0.1</code>，端口填 Clash 显示的数字。</small>
+                      </div>
+                      <span class="badge" id="telegramNetworkStatus">尚未测试</span>
+                    </div>
+                    <div class="telegram-network-grid">
+                      <label><span>连接模式</span>
+                        <select id="telegramNetworkMode">
+                          <option value="auto">自动：代理 → WebSocket → 直连（推荐）</option>
+                          <option value="socks5">SOCKS5 / Clash 混合端口</option>
+                          <option value="websocket">Telegram WebSocket</option>
+                          <option value="direct">TCP 直连</option>
+                        </select>
+                      </label>
+                      <label><span>代理主机</span><input id="telegramProxyHost" value="127.0.0.1" autocomplete="off" spellcheck="false"></label>
+                      <label><span>代理端口</span><input id="telegramProxyPort" value="7890" inputmode="numeric" autocomplete="off"></label>
+                      <div class="telegram-network-actions">
+                        <button class="btn btn-outline btn-sm" id="btnTelegramNetworkSave" type="button">保存配置</button>
+                        <button class="btn btn-primary btn-sm" id="btnTelegramNetworkTest" type="button">测试连接</button>
+                      </div>
+                    </div>
+                    <p>Clash 开启“Allow LAN”不是本机使用的必需条件；只要 Clash 核心正在运行且端口一致即可。保存后对下次连接/重连生效。</p>
+                  </section>
                   <div class="telegram-auth-grid telegram-credential-grid">
                     <label><span>api_id</span><input id="telegramApiId" inputmode="numeric" autocomplete="off" placeholder="例如 12345678"></label>
                     <label><span>api_hash</span><input id="telegramApiHash" type="password" autocomplete="off" spellcheck="false" placeholder="32 位字符串"></label>
@@ -385,17 +493,17 @@
                   <div class="telegram-group-manager">
                     <div class="telegram-group-manager-head">
                       <div>
-                        <strong>增量来源群组 <span id="telegramGroupSelectionCount">0 / 5</span></strong>
-                        <small>首次绑定默认从群组当前最新消息开始；既有历史请用下方官方导出文件建立底库。</small>
+                        <strong>增量来源群组/频道 <span id="telegramGroupSelectionCount">0 / 100</span></strong>
+                        <small>群组、超级群组和广播频道都会列出。首次绑定默认从当前最新消息开始；既有历史请用官方导出文件建底库。</small>
                       </div>
                       <div class="btn-row">
                         <button class="btn btn-outline btn-sm" id="btnTelegramLoadGroups" type="button"><i data-lucide="list-filter"></i><span>加载/刷新群组</span></button>
                         <button class="btn btn-primary btn-sm" id="btnTelegramSaveGroups" type="button"><i data-lucide="save"></i><span>保存来源</span></button>
                       </div>
                     </div>
-                    <input id="telegramGroupSearch" type="search" placeholder="搜索群名称或 @用户名" autocomplete="off">
+                    <input id="telegramGroupSearch" type="search" placeholder="搜索群组/频道名称或 @用户名" autocomplete="off">
                     <div class="telegram-group-picker" id="telegramGroupPicker">
-                      <div class="telegram-history-empty">连接账号后加载群组列表</div>
+                      <div class="telegram-history-empty">连接账号后加载群组/频道列表</div>
                     </div>
                     <div class="telegram-selected-sources" id="telegramSelectedSources">
                       <div class="telegram-history-empty">尚未绑定增量来源</div>
@@ -419,6 +527,11 @@
                           <option value="50">50 条</option>
                           <option value="200">200 条</option>
                         </select>
+                      </label>
+                      <label class="telegram-mark-read-toggle">
+                        <span>成功后标记已读</span>
+                        <input id="telegramMarkReadAfterSync" type="checkbox">
+                        <small>默认关闭；仅个人账号 API 生效。当前来源完整同步并成功写入本地后，才标记到本次最高消息。</small>
                       </label>
                     </div>
                     <div class="telegram-sync-actions">
@@ -732,6 +845,7 @@
             </section>
             <div class="panel-actions">
               <button class="btn btn-outline btn-sm" id="btnOpenLibraryFromPanel">打开番号库</button>
+              <button class="btn btn-outline btn-sm" type="button" data-open-data-table="processing_runs"><i data-lucide="table-properties"></i><span>管理批次数据</span></button>
             </div>
           </section>
         </div>
@@ -742,8 +856,8 @@
           <section class="module-card raindrop-sync-card">
             <div class="module-header raindrop-sync-header">
               <div>
-                <h2>Raindrop 直接同步</h2>
-                <span class="module-subtitle">从 MissAV 已完成结果创建或更新书签</span>
+                <h2>Raindrop 同步中心</h2>
+                <span class="module-subtitle">选择 Pull、Push 或双向同步；所选 Collection 决定处理范围，全账号只用于番号查重</span>
               </div>
               <span class="badge" id="raindropSyncStateBadge">未配置</span>
             </div>
@@ -769,24 +883,49 @@
 
             <section class="raindrop-config-panel">
               <div class="raindrop-section-heading">
-                <div><span>02</span><strong>批次与目标</strong></div>
-                <small id="raindropBatchStatus">请选择批次</small>
+                <div><span>02</span><strong>同步模式与本地范围</strong></div>
+                <small id="raindropBatchStatus">读取永久番号库</small>
               </div>
               <div class="raindrop-config-grid">
-                <label><span>处理批次</span><select id="raindropBatchSelect"><option value="">暂无可用批次</option></select></label>
-                <label><span id="raindropCollectionLabel">目标 Collection</span><select id="raindropCollectionSelect" disabled><option value="-1">Unsorted</option></select></label>
+                <label><span>同步模式</span><select id="raindropModeSelect">
+                  <option value="pull">Pull · 官网 → 本地</option>
+                  <option value="push">Push · 本地 → 官网</option>
+                  <option value="bidirectional">双向同步</option>
+                </select></label>
+                <label><span>全局数据范围</span><select id="raindropBatchSelect"><option value="pending">全部待同步与需重试</option><option value="errors">仅异常重试</option><option value="all">全部 APP 管理的 MissAV 记录</option></select></label>
+                <label><span id="raindropCollectionLabel">Push 默认目标 Collection</span><select id="raindropCollectionSelect" disabled><option value="-1">Unsorted</option></select></label>
                 <button class="btn btn-outline btn-sm" id="btnRefreshRaindropCollections" type="button">刷新 Collection</button>
               </div>
-              <small class="raindrop-routing-note" id="raindropRoutingNote">新版 MissAV 批次会自动按批次开始前的女优底库快照分流到 missav1 / missav2；旧批次仍使用手动目标。</small>
+              <label class="raindrop-manual-target-toggle"><input id="raindropManualTarget" type="checkbox"><span>Push 时整个当前范围统一使用上方默认 Collection</span></label>
+              <small class="raindrop-routing-note" id="raindropRoutingNote">关闭时沿用每条永久记录的 missav1 / missav2 目标；Pull 不会向官网写入。</small>
+            </section>
+
+            <section class="raindrop-config-panel raindrop-collection-scope-panel">
+              <div class="raindrop-section-heading">
+                <div><span>03</span><strong>Collection 同步范围</strong></div>
+                <small id="raindropSelectedCollectionSummary">尚未选择 Collection</small>
+              </div>
+              <div class="raindrop-collection-scope-toolbar">
+                <input id="raindropCollectionSearch" type="search" placeholder="搜索 Collection 名称或路径">
+                <button class="btn btn-outline btn-sm" id="btnSelectAllRaindropCollections" type="button">全选可见</button>
+                <button class="btn btn-outline btn-sm" id="btnClearRaindropCollections" type="button">清空</button>
+              </div>
+              <div class="raindrop-collection-picker" id="raindropCollectionPicker" role="listbox" aria-multiselectable="true">
+                <div class="group-picker-empty">连接账号并刷新 Collection 后选择同步范围</div>
+              </div>
+              <label class="raindrop-manual-target-toggle"><input id="raindropIncludeNested" type="checkbox"><span>读取所选 Collection 时同时包含其子 Collection</span></label>
+              <small class="raindrop-routing-note">未选择的 Collection 只参与全账号番号查重，不会被 Pull、导入或修改；重复番号只保留一条同步计划。</small>
             </section>
 
             <div class="raindrop-sync-metrics">
-              <div><strong id="raindropMetricEligible">0</strong><span>可同步</span></div>
-              <div><strong id="raindropMetricCreate">0</strong><span>新建</span></div>
-              <div><strong id="raindropMetricUpdate">0</strong><span>更新</span></div>
-              <div><strong id="raindropMetricSkip">0</strong><span>无需变化</span></div>
-              <div><strong id="raindropMetricError">0</strong><span>异常</span></div>
+              <div><strong id="raindropMetricEligible">0</strong><span>计划记录</span></div>
+              <div><strong id="raindropMetricPull">0</strong><span>Pull 到本地</span></div>
+              <div><strong id="raindropMetricPush">0</strong><span>Push 到官网</span></div>
+              <div title="包括双方已有番号，以及同步内容完全一致；这些记录都不会发出写入请求"><strong id="raindropMetricSkip">0</strong><span>无需写入</span></div>
+              <div><strong id="raindropMetricConflict">0</strong><span>冲突</span></div>
+              <div><strong id="raindropMetricError">0</strong><span>异常/忽略</span></div>
             </div>
+            <small class="raindrop-routing-note">同步前会扫描本地永久库和 Raindrop 全账号（回收站除外）。“双方已有·不写入”只比较番号，忽略 Collection 和内容差异；“内容一致·不写入”表示完整同步内容一致。</small>
 
             <section class="raindrop-sync-actions">
               <div>
@@ -795,7 +934,8 @@
               </div>
               <div>
                 <button class="btn btn-outline" id="btnPreviewRaindropSync" type="button"><i data-lucide="scan-search"></i><span>生成预览</span></button>
-                <button class="btn btn-success" id="btnStartRaindropSync" type="button" disabled><i data-lucide="cloud-upload"></i><span>开始同步</span></button>
+                <button class="btn btn-outline" id="btnExportRaindropCsv" type="button"><i data-lucide="file-down"></i><span>导出官网 CSV</span></button>
+                <button class="btn btn-success" id="btnStartRaindropSync" type="button" disabled><i data-lucide="refresh-cw"></i><span>执行同步</span></button>
                 <button class="btn btn-danger" id="btnStopRaindropSync" type="button" hidden><i data-lucide="square"></i><span>停止同步</span></button>
               </div>
             </section>
@@ -805,14 +945,29 @@
               <div class="progress-bar"><div class="progress-fill" id="raindropProgressFill"></div></div>
             </div>
 
+            <section class="raindrop-failed-panel" id="raindropFailedPanel" hidden>
+              <div>
+                <strong>本轮失败番号</strong>
+                <span>一行一个，可复制或导出后重新处理</span>
+              </div>
+              <textarea id="raindropFailedCodesOutput" readonly spellcheck="false" aria-label="Raindrop 同步失败番号"></textarea>
+              <div class="btn-row">
+                <button class="btn btn-outline btn-sm" id="btnCopyRaindropFailedCodes" type="button">复制失败番号</button>
+                <button class="btn btn-outline btn-sm" id="btnExportRaindropFailedCodes" type="button">导出 TXT</button>
+              </div>
+            </section>
+
             <section class="raindrop-preview-panel" id="raindropPreviewPanel">
               <div class="raindrop-preview-toolbar">
                 <div><strong>同步明细</strong><span>可拖动表格下边缘调整高度</span></div>
-                <button class="btn btn-outline btn-sm" id="btnToggleRaindropPreviewSize" type="button"><i data-lucide="maximize-2"></i><span>展开表格</span></button>
+                <div class="btn-row">
+                  <button class="btn btn-outline btn-sm" type="button" data-open-data-table="remote_sync_records"><i data-lucide="table-properties"></i><span>管理同步数据</span></button>
+                  <button class="btn btn-outline btn-sm" id="btnToggleRaindropPreviewSize" type="button"><i data-lucide="maximize-2"></i><span>展开表格</span></button>
+                </div>
               </div>
               <div class="raindrop-preview-table-wrap">
                 <table class="result-table raindrop-preview-table">
-                  <thead><tr><th>番号</th><th>动作</th><th>目标</th><th>Tags</th><th>状态 / 说明</th></tr></thead>
+                  <thead><tr><th>番号</th><th>方向 / 动作</th><th>Collection</th><th>Tags</th><th>状态 / 冲突处理</th></tr></thead>
                   <tbody id="raindropPreviewBody"><tr class="empty-row"><td colspan="5"><div class="empty-state"><p>等待同步预览</p></div></td></tr></tbody>
                 </table>
               </div>
@@ -911,6 +1066,8 @@
               <button class="btn btn-outline btn-sm" id="btnSelectVisibleResults">全选当前范围</button>
               <button class="btn btn-outline btn-sm" id="btnClearResultSelection">清除选择</button>
               <button class="btn btn-outline btn-sm" id="btnCopyResultTSV">复制为表格</button>
+              <button class="btn btn-outline btn-sm" type="button" data-open-data-table="processing_run_items" data-open-data-search="current-run"><i data-lucide="table-properties"></i><span>管理本批数据</span></button>
+              <button class="btn btn-outline btn-sm" id="btnToggleResultTableSize" type="button" aria-pressed="false"><i data-lucide="maximize-2"></i><span>展开表格</span></button>
               <button class="btn btn-warning btn-sm" id="btnRetrySelectedResults">重跑选中网络错误</button>
               <button class="btn btn-warning btn-sm" id="btnRetryAllNetworkResults">重跑全部网络错误</button>
               <button class="btn btn-danger btn-sm" id="btnStopResults" style="display:none;">停止重跑</button>
@@ -922,7 +1079,17 @@
               <button class="btn btn-danger btn-sm" id="btnStop123AvFavorite" type="button" hidden><i data-lucide="square"></i><span>停止收藏</span></button>
             </div>
           </div>
-          <div class="table-wrapper">
+          <section class="result-text-outputs" aria-label="当前站点文本结果">
+            <label>
+              <span><strong id="resultCodeListTitle">MissAV 番号清单</strong><button class="btn btn-outline btn-sm" id="btnCopyResultCodes" type="button">复制番号</button></span>
+              <textarea id="resultCodeListOutput" readonly spellcheck="false" placeholder="处理结果番号将按一行一个显示"></textarea>
+            </label>
+            <label>
+              <span><strong id="resultLinkListTitle">MissAV 链接清单</strong><button class="btn btn-outline btn-sm" id="btnCopyResultLinks" type="button">复制链接</button></span>
+              <textarea id="resultLinkListOutput" readonly spellcheck="false" placeholder="成功、未找到和网络错误均保留对应链接"></textarea>
+            </label>
+          </section>
+          <div class="table-wrapper result-table-wrapper" id="resultTableWrapper" tabindex="0" aria-label="处理结果表格，可滚轮浏览并拖动右下角调整高度">
             <table class="result-table" id="resultTable" data-sheet-key="processing-results-pipeline-v2">
               <thead id="resultTableHead">
                 <tr>
@@ -977,6 +1144,7 @@
             <button class="tab-btn" data-library-tab="dedupe">导入去重</button>
             <button class="tab-btn" data-library-tab="runs">处理批次</button>
             <button class="tab-btn" data-library-tab="tags">标签管理</button>
+            <button class="tab-btn" data-library-tab="raw">高级表格</button>
             <button class="tab-btn" data-library-tab="maintenance">维护</button>
           </div>
           <div id="libraryContent" class="library-content"></div>

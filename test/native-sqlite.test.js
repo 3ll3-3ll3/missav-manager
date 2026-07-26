@@ -28,7 +28,7 @@ test('backs up a legacy SQLite file once before native SQLite migration', async 
 
   const first = await database.init(dir);
   assert.equal(first.engine, 'node:sqlite');
-  assert.equal(first.schemaVersion, 300);
+  assert.equal(first.schemaVersion, 302);
   assert.ok(first.migrationBackup);
   assert.equal(fs.existsSync(first.migrationBackup.filePath), true);
   assert.equal(database.findCode('ABF-354').found, true);

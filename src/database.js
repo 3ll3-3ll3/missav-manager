@@ -16,11 +16,12 @@
 const path = require('path');
 const fs = require('fs');
 const { normalizeCode, codeComparableKey, parseCodeList } = require('./parser');
+const { normalizeTrustedMissavUrl } = require('./inputExtractor');
 const { NativeSqliteDatabase } = require('./nativeSqlite');
 
 const DB_FILENAME = 'missav_data.db';
 const NATIVE_MIGRATION_MARKER = '.native-sqlite-v3.json';
-const SCHEMA_VERSION = 300;
+const SCHEMA_VERSION = 302;
 const REQUIRED_BACKUP_TABLES = ['actress_tags', 'codes', 'actress_code_map'];
 const RESET_CONFIRMATION_TEXT = '清空全部数据';
 const DATABASE_TABLE_CATALOG = Object.freeze([
@@ -32,9 +33,11 @@ const DATABASE_TABLE_CATALOG = Object.freeze([
   { name: 'processing_runs', label: '处理批次', category: '任务历史', description: '批次名称、来源、速度、进度和输出目录' },
   { name: 'processing_run_items', label: '批次逐条结果', category: '任务历史', description: '每个批次中逐条番号的 MissAV 结果与标签快照' },
   { name: 'processing_item_tasks', label: '四阶段任务状态', category: '任务历史', description: 'MissAV、Raindrop、123AV 查询和收藏的独立状态' },
+  { name: 'tool_history_runs', label: '文本工具处理历史', category: '任务历史', description: '推特、Bad.news、海角每次保存的处理快照' },
+  { name: 'tool_history_items', label: '文本工具历史明细', category: '任务历史', description: '历史快照中的逐条博主或链接结果' },
   { name: 'site_lookup_cache', label: '站点查询缓存', category: '缓存与同步', description: '跨批次复用的站点查询结果' },
   { name: 'remote_sync_records', label: '远端同步映射', category: '缓存与同步', description: 'Raindrop 等远端 ID、Collection 与幂等状态' },
-  { name: 'telegram_sources', label: 'Telegram 来源', category: 'Telegram', description: '最多 5 个群组的来源、基线与断点' },
+  { name: 'telegram_sources', label: 'Telegram 来源', category: 'Telegram', description: '最多 100 个群组/频道的来源、基线与断点' },
   { name: 'telegram_message_refs', label: 'Telegram 消息指纹', category: 'Telegram', description: '消息去重指纹、日期和已提取番号；不保存正文' },
   { name: 'telegram_import_runs', label: 'Telegram 导入历史', category: 'Telegram', description: '每次导入或增量同步的统计与错误摘要' },
   { name: 'av123_account_runs', label: '旧 123AV 账号运行记录', category: '旧版兼容', description: '已弃用版本遗留的账号操作批次记录' },
@@ -45,6 +48,8 @@ const DATABASE_TABLE_CATALOG = Object.freeze([
 // Child tables must be cleared before their parents. This list intentionally
 // includes compatibility data so a user-requested fresh start is genuinely empty.
 const BUSINESS_DATA_TABLES = Object.freeze([
+  'tool_history_items',
+  'tool_history_runs',
   'processing_item_tasks',
   'processing_run_items',
   'processing_runs',
@@ -150,12 +155,18 @@ function createTables() {
 
   DB.run(`CREATE TABLE IF NOT EXISTS codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE,
-    best_url TEXT DEFAULT '', status TEXT DEFAULT 'ok',
+    best_url TEXT DEFAULT '', status TEXT DEFAULT 'pending',
+    source_url TEXT DEFAULT '', missav_error TEXT DEFAULT '',
+    av123_url TEXT DEFAULT '', av123_status TEXT DEFAULT 'pending', av123_error TEXT DEFAULT '',
+    raindrop_status TEXT DEFAULT 'pending', raindrop_target TEXT DEFAULT '',
+    raindrop_collection_id INTEGER DEFAULT -1, raindrop_remote_id TEXT DEFAULT '',
+    raindrop_error TEXT DEFAULT '',
     raindrop_title TEXT DEFAULT '', raindrop_excerpt TEXT DEFAULT '',
     raindrop_note TEXT DEFAULT '', raindrop_folder TEXT DEFAULT '',
     raindrop_tags TEXT DEFAULT '', raindrop_created TEXT DEFAULT '',
     raindrop_cover TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now','localtime')))`);
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime')))`);
 
   DB.run(`CREATE TABLE IF NOT EXISTS actress_code_map (
     actress_id INTEGER NOT NULL, code_id INTEGER NOT NULL,
@@ -169,6 +180,7 @@ function createTables() {
     PRIMARY KEY (code_id, genre_id))`);
 
   createProcessingTables();
+  createToolHistoryTables();
   createSiteLookupCacheTable();
   createRemoteSyncTable();
   createTelegramSourceTables();
@@ -188,6 +200,16 @@ function migrateSchema() {
   DB.run('BEGIN TRANSACTION');
   try {
     ensureColumn('codes', 'raindrop_title', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'source_url', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'missav_error', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'av123_url', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'av123_status', "TEXT DEFAULT 'pending'");
+    ensureColumn('codes', 'av123_error', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'raindrop_status', "TEXT DEFAULT 'pending'");
+    ensureColumn('codes', 'raindrop_target', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'raindrop_collection_id', 'INTEGER DEFAULT -1');
+    ensureColumn('codes', 'raindrop_remote_id', "TEXT DEFAULT ''");
+    ensureColumn('codes', 'raindrop_error', "TEXT DEFAULT ''");
     ensureColumn('codes', 'raindrop_excerpt', "TEXT DEFAULT ''");
     ensureColumn('codes', 'raindrop_note', "TEXT DEFAULT ''");
     ensureColumn('codes', 'raindrop_folder', "TEXT DEFAULT ''");
@@ -195,7 +217,9 @@ function migrateSchema() {
     ensureColumn('codes', 'raindrop_created', "TEXT DEFAULT ''");
     ensureColumn('codes', 'raindrop_cover', "TEXT DEFAULT ''");
     ensureColumn('codes', 'created_at', 'TEXT');
+    ensureColumn('codes', 'updated_at', 'TEXT');
     createProcessingTables();
+    createToolHistoryTables();
     ensureColumn('processing_runs', 'name', "TEXT DEFAULT ''");
     ensureColumn('processing_runs', 'source_type', "TEXT DEFAULT 'manual'");
     ensureColumn('processing_runs', 'source_label', "TEXT DEFAULT ''");
@@ -219,6 +243,7 @@ function migrateSchema() {
     ensureColumn('processing_runs', 'pipeline_version', 'INTEGER DEFAULT 1');
     ensureColumn('processing_runs', 'tool_kind', "TEXT DEFAULT 'dual'");
     ensureColumn('processing_runs', 'known_actresses_json', "TEXT DEFAULT '[]'");
+    ensureColumn('processing_run_items', 'source_url', "TEXT DEFAULT ''");
     createSiteLookupCacheTable();
     createRemoteSyncTable();
     createTelegramSourceTables();
@@ -227,6 +252,8 @@ function migrateSchema() {
     createBookmarkCollectionTable();
     DB.run(`CREATE INDEX IF NOT EXISTS idx_codes_status_created ON codes(status, created_at DESC, id DESC)`);
     DB.run(`CREATE INDEX IF NOT EXISTS idx_codes_created ON codes(created_at DESC, id DESC)`);
+    DB.run(`CREATE INDEX IF NOT EXISTS idx_codes_raindrop_status ON codes(raindrop_status, updated_at DESC, id DESC)`);
+    DB.run(`CREATE INDEX IF NOT EXISTS idx_codes_av123_status ON codes(av123_status, updated_at DESC, id DESC)`);
     DB.run(`CREATE INDEX IF NOT EXISTS idx_code_genres_code ON code_genres(code_id, genre_id)`);
     DB.run(`CREATE INDEX IF NOT EXISTS idx_code_genres_genre ON code_genres(genre_id, code_id)`);
     DB.run('COMMIT');
@@ -250,6 +277,7 @@ function createProcessingTables() {
     position INTEGER NOT NULL,
     code_id INTEGER,
     code TEXT NOT NULL,
+    source_url TEXT DEFAULT '',
     item_status TEXT DEFAULT 'queued',
     result_status TEXT DEFAULT '',
     url TEXT DEFAULT '',
@@ -293,6 +321,37 @@ function createProcessingTables() {
   DB.run(`CREATE TRIGGER IF NOT EXISTS trg_processing_item_delete_tasks
     BEFORE DELETE ON processing_run_items BEGIN
       DELETE FROM processing_item_tasks WHERE run_item_id = OLD.id;
+    END`);
+}
+
+function createToolHistoryTables() {
+  DB.run(`CREATE TABLE IF NOT EXISTS tool_history_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    source_label TEXT DEFAULT '',
+    time_start TEXT DEFAULT '',
+    time_end TEXT DEFAULT '',
+    input_count INTEGER DEFAULT 0,
+    result_count INTEGER DEFAULT 0,
+    metadata_json TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime')))`);
+  DB.run(`CREATE TABLE IF NOT EXISTS tool_history_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    history_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    primary_text TEXT NOT NULL,
+    secondary_text TEXT DEFAULT '',
+    metadata_json TEXT DEFAULT '{}',
+    UNIQUE(history_id, position))`);
+  DB.run(`CREATE INDEX IF NOT EXISTS idx_tool_history_runs_kind
+    ON tool_history_runs(tool_kind, created_at DESC, id DESC)`);
+  DB.run(`CREATE INDEX IF NOT EXISTS idx_tool_history_items_history
+    ON tool_history_items(history_id, position)`);
+  DB.run(`CREATE TRIGGER IF NOT EXISTS trg_tool_history_delete_items
+    BEFORE DELETE ON tool_history_runs BEGIN
+      DELETE FROM tool_history_items WHERE history_id = OLD.id;
     END`);
 }
 
@@ -747,8 +806,29 @@ function generateCodeVariants(code) {
 function findCode(code) {
   const variants = generateCodeVariants(code);
   for (const v of variants) {
-    const row = queryOne(`SELECT id, code, best_url, status FROM codes WHERE REPLACE(code, '-', '') = REPLACE(?, '-', '')`, [v]);
-    if (row) return { found: true, code_id: row.id, code: row.code, url: row.best_url, status: row.status };
+    const row = queryOne(`SELECT id, code, best_url, status, source_url, missav_error,
+      av123_url, av123_status, av123_error, raindrop_status, raindrop_target,
+      raindrop_collection_id, raindrop_remote_id, raindrop_error
+      FROM codes WHERE REPLACE(code, '-', '') = REPLACE(?, '-', '')`, [v]);
+    if (row) {
+      return {
+        found: true,
+        code_id: row.id,
+        code: row.code,
+        url: row.best_url,
+        status: row.status,
+        sourceUrl: row.source_url || '',
+        missavError: row.missav_error || '',
+        av123Url: row.av123_url || '',
+        av123Status: row.av123_status || 'pending',
+        av123Error: row.av123_error || '',
+        raindropStatus: row.raindrop_status || 'pending',
+        raindropTarget: row.raindrop_target || '',
+        raindropCollectionId: Number(row.raindrop_collection_id ?? -1),
+        raindropRemoteId: row.raindrop_remote_id || '',
+        raindropError: row.raindrop_error || '',
+      };
+    }
   }
   return { found: false };
 }
@@ -756,11 +836,11 @@ function findCode(code) {
 function upsertCode(code, url, status) {
   const existing = findCode(code);
   if (existing.found) {
-    runSQL(`UPDATE codes SET best_url = ?, status = ? WHERE id = ?`, [url || existing.url, status || existing.status, existing.code_id]);
+    runSQL(`UPDATE codes SET best_url = ?, status = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [url || existing.url, status || existing.status, existing.code_id]);
     save();
     return existing.code_id;
   }
-  runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [code, url || '', status || 'ok']);
+  runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [code, url || '', status || 'pending']);
   const id = lastInsertId();
   save();
   return id;
@@ -773,10 +853,10 @@ function upsertCode(code, url, status) {
 function upsertCodeNoSave(code, url, status) {
   const existing = findCode(code);
   if (existing.found) {
-    runSQL(`UPDATE codes SET best_url = ?, status = ? WHERE id = ?`, [url || existing.url, status || existing.status, existing.code_id]);
+    runSQL(`UPDATE codes SET best_url = ?, status = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [url || existing.url, status || existing.status, existing.code_id]);
     return existing.code_id;
   }
-  runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [code, url || '', status || 'ok']);
+  runSQL(`INSERT INTO codes (code, best_url, status) VALUES (?, ?, ?)`, [code, url || '', status || 'pending']);
   const id = lastInsertId();
   return id;
 }
@@ -793,6 +873,37 @@ function linkActressCodeNoSave(actressId, codeId) {
 function linkGenreCode(genreName, codeId) {
   linkGenreCodeNoSave(genreName, codeId);
   save();
+}
+
+function registerInputCodes(entries = []) {
+  const source = Array.isArray(entries) ? entries : [];
+  let inserted = 0;
+  let sourceUrlsAdded = 0;
+  DB.run('BEGIN TRANSACTION');
+  try {
+    for (const raw of source) {
+      const code = normalizeCode(raw?.code ?? raw);
+      if (!code) continue;
+      const sourceUrl = String(raw?.sourceUrl || raw?.source_url || '').trim();
+      const existing = findCode(code);
+      if (!existing.found) {
+        runSQL(`INSERT INTO codes (code, source_url, best_url, status, raindrop_status, updated_at)
+          VALUES (?, ?, '', 'pending', 'pending', datetime('now','localtime'))`, [code, sourceUrl]);
+        inserted++;
+        if (sourceUrl) sourceUrlsAdded++;
+      } else if (sourceUrl && !existing.sourceUrl) {
+        runSQL(`UPDATE codes SET source_url = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [sourceUrl, existing.code_id]);
+        sourceUrlsAdded++;
+      }
+    }
+    DB.run('COMMIT');
+  } catch (error) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw error;
+  }
+  save();
+  return { inserted, sourceUrlsAdded, total: source.length };
 }
 
 function linkGenreCodeNoSave(genreName, codeId) {
@@ -814,6 +925,28 @@ function persistProcessedCode(row = {}, options = {}) {
   DB.run('BEGIN TRANSACTION');
   try {
     codeId = upsertCodeNoSave(code, String(row.url || '').trim(), status || 'ok');
+    const sourceUrl = String(row.sourceUrl || row.source_url || '').trim();
+    const raindropEligible = ['ok', 'no_actress_found', 'need_manual_check', 'page_ok_play_unknown'].includes(status);
+    const raindropStatus = raindropEligible ? 'ready'
+      : status === 'network_error' ? 'blocked'
+        : status === 'not_found' ? 'not_eligible'
+          : 'pending';
+    runSQL(`UPDATE codes SET
+      source_url = CASE WHEN ? <> '' THEN ? ELSE source_url END,
+      missav_error = ?,
+      raindrop_status = CASE WHEN raindrop_status = 'succeeded' AND ? <> 'ready' THEN raindrop_status ELSE ? END,
+      raindrop_target = CASE WHEN ? <> '' THEN ? ELSE raindrop_target END,
+      raindrop_error = CASE WHEN ? = 'ready' THEN '' ELSE raindrop_error END,
+      updated_at = datetime('now','localtime')
+      WHERE id = ?`, [
+      sourceUrl, sourceUrl,
+      String(row.error || '').trim(),
+      raindropStatus, raindropStatus,
+      String(row.raindropTarget || row.raindrop_target || '').trim(),
+      String(row.raindropTarget || row.raindrop_target || '').trim(),
+      raindropStatus,
+      codeId,
+    ]);
     const actressTags = Array.isArray(row.matchedActressTags) && row.matchedActressTags.length
       ? row.matchedActressTags
       : row.matchedActressTag ? [row.matchedActressTag] : [];
@@ -919,6 +1052,8 @@ function getStats() {
     processingRunCount: queryValue(`SELECT COUNT(*) FROM processing_runs`),
     processingItemCount: queryValue(`SELECT COUNT(*) FROM processing_run_items`),
     processingTaskCount: queryValue(`SELECT COUNT(*) FROM processing_item_tasks`),
+    toolHistoryRunCount: queryValue(`SELECT COUNT(*) FROM tool_history_runs`),
+    toolHistoryItemCount: queryValue(`SELECT COUNT(*) FROM tool_history_items`),
     siteCacheCount: queryValue(`SELECT COUNT(*) FROM site_lookup_cache`),
     remoteSyncCount: queryValue(`SELECT COUNT(*) FROM remote_sync_records`),
     telegramSourceCount: queryValue(`SELECT COUNT(*) FROM telegram_sources`),
@@ -1028,12 +1163,25 @@ function mapCodeLibraryRow(row) {
       code: row.code,
       best_url: row.best_url || '',
       status: row.status || '',
+      source_url: row.source_url || '',
+      missav_error: row.missav_error || '',
+      av123_url: row.av123_url || '',
+      av123_status: row.av123_status || 'pending',
+      av123_error: row.av123_error || '',
+      raindrop_status: row.raindrop_status || 'pending',
+      raindrop_target: row.raindrop_target || '',
+      raindrop_collection_id: Number(row.raindrop_collection_id ?? -1),
+      raindrop_remote_id: row.raindrop_remote_id || '',
+      raindrop_error: row.raindrop_error || '',
       created_at: row.created_at || '',
+      updated_at: row.updated_at || '',
       raindrop_title: row.raindrop_title || '',
       raindrop_excerpt: row.raindrop_excerpt || '',
       raindrop_note: row.raindrop_note || '',
       raindrop_folder: row.raindrop_folder || '',
       raindrop_tags: row.raindrop_tags || '',
+      raindrop_tag_list: splitStoredTags(row.raindrop_tags),
+      final_tags: buildFinalTagsForDbRow(row),
       raindrop_created: row.raindrop_created || '',
       raindrop_cover: row.raindrop_cover || '',
       actress_tags: String(row.actress_tags || '').split(',').filter(Boolean),
@@ -1048,7 +1196,11 @@ function getCodeLibraryPage(options = {}) {
   const where = codeLibraryWhere(options);
   const total = Number(queryValue(`SELECT COUNT(*) FROM codes c ${where.sql}`, where.params) || 0);
   const rows = readRows(`
-    SELECT c.id, c.code, c.best_url, c.status, c.raindrop_title, c.raindrop_excerpt, c.raindrop_note, c.raindrop_folder, c.raindrop_tags, c.raindrop_created, c.raindrop_cover, c.created_at,
+    SELECT c.id, c.code, c.best_url, c.status, c.source_url, c.missav_error,
+      c.av123_url, c.av123_status, c.av123_error, c.raindrop_status, c.raindrop_target,
+      c.raindrop_collection_id, c.raindrop_remote_id, c.raindrop_error,
+      c.raindrop_title, c.raindrop_excerpt, c.raindrop_note, c.raindrop_folder,
+      c.raindrop_tags, c.raindrop_created, c.raindrop_cover, c.created_at, c.updated_at,
       GROUP_CONCAT(DISTINCT a.tag_name) AS actress_tags,
       GROUP_CONCAT(DISTINCT g.name) AS genre_tags
     FROM codes c
@@ -1089,7 +1241,11 @@ function getCodeLibraryByIds(ids = []) {
     const part = ordered.slice(offset, offset + 500);
     const placeholders = part.map(() => '?').join(',');
     rows.push(...readRows(`
-      SELECT c.id, c.code, c.best_url, c.status, c.raindrop_title, c.raindrop_excerpt, c.raindrop_note, c.raindrop_folder, c.raindrop_tags, c.raindrop_created, c.raindrop_cover, c.created_at,
+      SELECT c.id, c.code, c.best_url, c.status, c.source_url, c.missav_error,
+        c.av123_url, c.av123_status, c.av123_error, c.raindrop_status, c.raindrop_target,
+        c.raindrop_collection_id, c.raindrop_remote_id, c.raindrop_error,
+        c.raindrop_title, c.raindrop_excerpt, c.raindrop_note, c.raindrop_folder,
+        c.raindrop_tags, c.raindrop_created, c.raindrop_cover, c.created_at, c.updated_at,
         GROUP_CONCAT(DISTINCT a.tag_name) AS actress_tags,
         GROUP_CONCAT(DISTINCT g.name) AS genre_tags
       FROM codes c
@@ -1620,6 +1776,151 @@ function mergeActressTags(sourceId, targetId) {
 //  处理记录
 // ═══════════════════════════════════════════════════════
 
+const TEXT_TOOL_HISTORY_KINDS = new Set(['twitter', 'badnews', 'haijiao']);
+
+function normalizeToolHistoryKind(value) {
+  const kind = String(value || '').trim().toLowerCase();
+  if (!TEXT_TOOL_HISTORY_KINDS.has(kind)) throw new Error('该工具使用批次历史，不使用文本历史表');
+  return kind;
+}
+
+function toolHistorySummary(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    toolKind: String(row.tool_kind || ''),
+    name: String(row.name || ''),
+    sourceLabel: String(row.source_label || ''),
+    timeStart: String(row.time_start || ''),
+    timeEnd: String(row.time_end || ''),
+    inputCount: normalizeCounter(row.input_count),
+    resultCount: normalizeCounter(row.result_count),
+    metadata: parseJsonObject(row.metadata_json),
+    createdAt: String(row.created_at || ''),
+    updatedAt: String(row.updated_at || ''),
+  };
+}
+
+function createToolHistory(options = {}) {
+  const toolKind = normalizeToolHistoryKind(options.toolKind);
+  const rows = Array.isArray(options.items) ? options.items.slice(0, 100000) : [];
+  const normalizedItems = rows.map((item, position) => {
+    const value = item && typeof item === 'object' && !Array.isArray(item)
+      ? item
+      : { primaryText: item };
+    const primaryText = String(value.primaryText ?? value.primary ?? '').trim().slice(0, 8000);
+    const secondaryText = String(value.secondaryText ?? value.secondary ?? '').trim().slice(0, 12000);
+    return {
+      position,
+      primaryText,
+      secondaryText,
+      metadataJson: jsonObject(value.metadata),
+    };
+  }).filter(item => item.primaryText || item.secondaryText);
+  if (!normalizedItems.length) throw new Error('没有可保存的处理结果');
+  const name = String(options.name || `${toolKind} 历史`).trim().slice(0, 160) || `${toolKind} 历史`;
+  const sourceLabel = String(options.sourceLabel || '').trim().slice(0, 500);
+  const timeStart = String(options.timeStart || '').trim().slice(0, 40);
+  const timeEnd = String(options.timeEnd || '').trim().slice(0, 40);
+  const inputCount = Math.max(0, Math.min(10000000, Number(options.inputCount) || 0));
+  let id = 0;
+  DB.run('BEGIN TRANSACTION');
+  try {
+    runSQL(`INSERT INTO tool_history_runs
+      (tool_kind, name, source_label, time_start, time_end, input_count, result_count, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [toolKind, name, sourceLabel, timeStart, timeEnd, inputCount, normalizedItems.length, jsonObject(options.metadata)]);
+    id = Number(lastInsertId());
+    for (const item of normalizedItems) {
+      runSQL(`INSERT INTO tool_history_items
+        (history_id, position, primary_text, secondary_text, metadata_json)
+        VALUES (?, ?, ?, ?, ?)`,
+      [id, item.position, item.primaryText, item.secondaryText, item.metadataJson]);
+    }
+    DB.run('COMMIT');
+  } catch (error) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw error;
+  }
+  save();
+  return getToolHistory(id);
+}
+
+function getToolHistories(toolKind, options = {}) {
+  const kind = normalizeToolHistoryKind(toolKind);
+  const limit = normalizeLimit(options.limit, 100, 500);
+  const offset = Math.max(0, Number(options.offset) || 0);
+  const search = String(options.search || '').trim().slice(0, 200);
+  const clauses = ['tool_kind = ?'];
+  const params = [kind];
+  if (search) {
+    clauses.push(`(name LIKE ? COLLATE NOCASE OR source_label LIKE ? COLLATE NOCASE
+      OR EXISTS (SELECT 1 FROM tool_history_items i
+        WHERE i.history_id = tool_history_runs.id
+          AND (i.primary_text LIKE ? COLLATE NOCASE OR i.secondary_text LIKE ? COLLATE NOCASE)))`);
+    const pattern = `%${search}%`;
+    params.push(pattern, pattern, pattern, pattern);
+  }
+  const where = `WHERE ${clauses.join(' AND ')}`;
+  const total = Number(queryValue(`SELECT COUNT(*) FROM tool_history_runs ${where}`, params) || 0);
+  const rows = readRows(`SELECT * FROM tool_history_runs ${where}
+    ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]).map(toolHistorySummary);
+  return { rows, total, limit, offset };
+}
+
+function getToolHistory(historyId, options = {}) {
+  const id = Number(historyId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const summary = toolHistorySummary(queryOne(`SELECT * FROM tool_history_runs WHERE id = ?`, [id]));
+  if (!summary) return null;
+  const limit = normalizeLimit(options.limit, 100000, 100000);
+  const offset = Math.max(0, Number(options.offset) || 0);
+  const items = readRows(`SELECT id, history_id, position, primary_text, secondary_text, metadata_json
+    FROM tool_history_items WHERE history_id = ? ORDER BY position ASC LIMIT ? OFFSET ?`,
+  [id, limit, offset]).map(row => ({
+    id: Number(row.id),
+    historyId: Number(row.history_id),
+    position: Number(row.position),
+    primaryText: String(row.primary_text || ''),
+    secondaryText: String(row.secondary_text || ''),
+    metadata: parseJsonObject(row.metadata_json),
+  }));
+  return { ...summary, items };
+}
+
+function renameToolHistory(historyId, name) {
+  const id = Number(historyId);
+  const next = String(name || '').trim().slice(0, 160);
+  if (!id || !next) throw new Error('历史名称不能为空');
+  if (!queryOne(`SELECT id FROM tool_history_runs WHERE id = ?`, [id])) throw new Error('处理历史不存在');
+  runSQL(`UPDATE tool_history_runs SET name = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [next, id]);
+  save();
+  return true;
+}
+
+function deleteToolHistory(historyId) {
+  const id = Number(historyId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error('历史 ID 无效');
+  const row = queryOne(`SELECT id, name, result_count FROM tool_history_runs WHERE id = ?`, [id]);
+  if (!row) return { deleted: false, historyId: id };
+  DB.run('BEGIN TRANSACTION');
+  try {
+    runSQL(`DELETE FROM tool_history_items WHERE history_id = ?`, [id]);
+    runSQL(`DELETE FROM tool_history_runs WHERE id = ?`, [id]);
+    DB.run('COMMIT');
+  } catch (error) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw error;
+  }
+  save();
+  return {
+    deleted: true,
+    historyId: id,
+    name: String(row.name || ''),
+    resultCount: normalizeCounter(row.result_count),
+  };
+}
+
 // ═══════════════════════════════════════════════════════
 //  数据库工作台编辑
 // ═══════════════════════════════════════════════════════
@@ -1642,6 +1943,7 @@ const RAW_TABLES = {
   actress_tags: {
     label: '女优 Tag',
     pk: ['id'],
+    columns: ['id', 'tag_name', 'created_at', 'updated_at'],
     editable: ['tag_name'],
     insertable: ['tag_name'],
     order: 'id DESC',
@@ -1649,21 +1951,22 @@ const RAW_TABLES = {
   codes: {
     label: '番号库',
     pk: ['id'],
-    columns: ['id', 'code', 'best_url', 'status', 'created_at'],
-    editable: ['code', 'best_url', 'status'],
-    insertable: ['code', 'best_url', 'status'],
+    columns: ['id', 'code', 'source_url', 'best_url', 'status', 'missav_error', 'av123_url', 'av123_status', 'av123_error', 'raindrop_status', 'raindrop_target', 'raindrop_collection_id', 'raindrop_remote_id', 'raindrop_error', 'raindrop_title', 'raindrop_excerpt', 'raindrop_note', 'raindrop_folder', 'raindrop_tags', 'raindrop_created', 'raindrop_cover', 'created_at', 'updated_at'],
+    editable: ['code', 'source_url', 'best_url', 'status', 'missav_error', 'av123_url', 'av123_status', 'av123_error', 'raindrop_status', 'raindrop_target', 'raindrop_collection_id', 'raindrop_remote_id', 'raindrop_error', 'raindrop_title', 'raindrop_excerpt', 'raindrop_note', 'raindrop_folder', 'raindrop_tags', 'raindrop_created', 'raindrop_cover'],
+    insertable: ['code', 'source_url', 'best_url', 'status', 'missav_error', 'av123_url', 'av123_status', 'av123_error', 'raindrop_status', 'raindrop_target', 'raindrop_collection_id', 'raindrop_remote_id', 'raindrop_error', 'raindrop_title', 'raindrop_excerpt', 'raindrop_note', 'raindrop_folder', 'raindrop_tags', 'raindrop_created', 'raindrop_cover'],
     order: 'id DESC',
   },
   actress_code_map: {
     label: '女优-番号关联',
     pk: ['actress_id', 'code_id'],
-    editable: [],
+    editable: ['actress_id', 'code_id'],
     insertable: ['actress_id', 'code_id'],
     order: 'actress_id DESC, code_id DESC',
   },
   genre_tags: {
     label: '类型 Tag',
     pk: ['id'],
+    columns: ['id', 'name'],
     editable: ['name'],
     insertable: ['name'],
     order: 'id DESC',
@@ -1671,39 +1974,55 @@ const RAW_TABLES = {
   code_genres: {
     label: '番号-类型关联',
     pk: ['code_id', 'genre_id'],
-    editable: [],
+    editable: ['code_id', 'genre_id'],
     insertable: ['code_id', 'genre_id'],
     order: 'code_id DESC, genre_id DESC',
+  },
+  tool_history_runs: {
+    label: '文本工具处理历史',
+    pk: ['id'],
+    columns: ['id', 'tool_kind', 'name', 'source_label', 'time_start', 'time_end', 'input_count', 'result_count', 'metadata_json', 'created_at', 'updated_at'],
+    editable: ['tool_kind', 'name', 'source_label', 'time_start', 'time_end', 'input_count', 'result_count', 'metadata_json'],
+    insertable: ['tool_kind', 'name', 'source_label', 'time_start', 'time_end', 'input_count', 'result_count', 'metadata_json'],
+    order: 'id DESC',
+  },
+  tool_history_items: {
+    label: '文本工具历史明细',
+    pk: ['id'],
+    columns: ['id', 'history_id', 'position', 'primary_text', 'secondary_text', 'metadata_json'],
+    editable: ['history_id', 'position', 'primary_text', 'secondary_text', 'metadata_json'],
+    insertable: ['history_id', 'position', 'primary_text', 'secondary_text', 'metadata_json'],
+    order: 'history_id DESC, position ASC',
   },
   processing_runs: {
     label: '处理批次',
     pk: ['id'],
-    columns: ['id', 'name', 'tool_kind', 'known_actresses_json', 'pipeline_version', 'status', 'source_type', 'source_label', 'speed_mode', 'missav_speed_mode', 'av123_speed_mode', 'missav_speed_policy', 'missav_rate_mode', 'missav_rate_cap', 'av123_speed_policy', 'av123_rate_mode', 'av123_rate_cap', 'av123_auto_favorite', 'av123_favorite_concurrency', 'started_at', 'finished_at', 'total_codes', 'completed_codes', 'network_error_codes', 'manual_codes', 'output_dir'],
-    editable: ['name', 'source_label', 'output_dir', 'known_actresses_json'],
-    insertable: ['started_at', 'finished_at', 'total_codes', 'new_codes', 'skipped_codes', 'not_found_codes', 'duplicate_codes'],
+    columns: ['id', 'name', 'tool_kind', 'known_actresses_json', 'pipeline_version', 'status', 'source_type', 'source_label', 'speed_mode', 'missav_speed_mode', 'av123_speed_mode', 'missav_speed_policy', 'missav_rate_mode', 'missav_rate_cap', 'av123_speed_policy', 'av123_rate_mode', 'av123_rate_cap', 'av123_auto_favorite', 'av123_favorite_concurrency', 'started_at', 'finished_at', 'total_codes', 'new_codes', 'skipped_codes', 'not_found_codes', 'duplicate_codes', 'completed_codes', 'network_error_codes', 'manual_codes', 'output_dir', 'updated_at'],
+    editable: ['name', 'tool_kind', 'known_actresses_json', 'pipeline_version', 'status', 'source_type', 'source_label', 'speed_mode', 'missav_speed_mode', 'av123_speed_mode', 'missav_speed_policy', 'missav_rate_mode', 'missav_rate_cap', 'av123_speed_policy', 'av123_rate_mode', 'av123_rate_cap', 'av123_auto_favorite', 'av123_favorite_concurrency', 'started_at', 'finished_at', 'total_codes', 'new_codes', 'skipped_codes', 'not_found_codes', 'duplicate_codes', 'completed_codes', 'network_error_codes', 'manual_codes', 'output_dir'],
+    insertable: ['name', 'tool_kind', 'known_actresses_json', 'pipeline_version', 'status', 'source_type', 'source_label', 'speed_mode', 'missav_speed_mode', 'av123_speed_mode', 'missav_speed_policy', 'missav_rate_mode', 'missav_rate_cap', 'av123_speed_policy', 'av123_rate_mode', 'av123_rate_cap', 'av123_auto_favorite', 'av123_favorite_concurrency', 'started_at', 'finished_at', 'total_codes', 'new_codes', 'skipped_codes', 'not_found_codes', 'duplicate_codes', 'completed_codes', 'network_error_codes', 'manual_codes', 'output_dir'],
     order: 'id DESC',
   },
   processing_run_items: {
     label: '批次逐条结果',
     pk: ['id'],
-    columns: ['id', 'run_id', 'position', 'code_id', 'code', 'item_status', 'result_status', 'url', 'actresses_json', 'genres_json', 'final_tags_json', 'include_in_import', 'skipped_reason', 'error', 'attempt_count', 'started_at', 'finished_at', 'updated_at'],
-    editable: ['result_status', 'url', 'actresses_json', 'genres_json', 'final_tags_json', 'include_in_import', 'skipped_reason', 'error'],
-    insertable: [],
+    columns: ['id', 'run_id', 'position', 'code_id', 'code', 'source_url', 'item_status', 'result_status', 'url', 'actresses_json', 'genres_json', 'final_tags_json', 'include_in_import', 'skipped_reason', 'error', 'attempt_count', 'started_at', 'finished_at', 'updated_at'],
+    editable: ['run_id', 'position', 'code_id', 'code', 'source_url', 'item_status', 'result_status', 'url', 'actresses_json', 'genres_json', 'final_tags_json', 'include_in_import', 'skipped_reason', 'error', 'attempt_count', 'started_at', 'finished_at'],
+    insertable: ['run_id', 'position', 'code_id', 'code', 'source_url', 'item_status', 'result_status', 'url', 'actresses_json', 'genres_json', 'final_tags_json', 'include_in_import', 'skipped_reason', 'error', 'attempt_count', 'started_at', 'finished_at'],
     order: 'id DESC',
   },
   processing_item_tasks: {
     label: '四阶段任务状态',
     pk: ['id'],
     columns: ['id', 'run_id', 'run_item_id', 'service', 'action', 'status', 'url', 'error', 'metadata_json', 'attempt_count', 'started_at', 'finished_at', 'updated_at'],
-    editable: ['url', 'error', 'metadata_json'],
-    insertable: [],
+    editable: ['run_id', 'run_item_id', 'service', 'action', 'status', 'url', 'error', 'metadata_json', 'attempt_count', 'started_at', 'finished_at'],
+    insertable: ['run_id', 'run_item_id', 'service', 'action', 'status', 'url', 'error', 'metadata_json', 'attempt_count', 'started_at', 'finished_at'],
     order: 'id DESC',
   },
   site_lookup_cache: {
     label: '站点查询缓存',
     pk: ['service', 'code_key'],
     columns: ['service', 'code_key', 'code', 'status', 'url', 'metadata_json', 'checked_at'],
-    editable: ['code', 'status', 'url', 'metadata_json', 'checked_at'],
+    editable: ['service', 'code_key', 'code', 'status', 'url', 'metadata_json', 'checked_at'],
     insertable: ['service', 'code_key', 'code', 'status', 'url', 'metadata_json', 'checked_at'],
     order: 'checked_at DESC, service ASC, code_key ASC',
   },
@@ -1711,7 +2030,7 @@ const RAW_TABLES = {
     label: '远端同步映射',
     pk: ['service', 'code_key'],
     columns: ['service', 'code_key', 'code', 'remote_id', 'link', 'collection_id', 'payload_hash', 'status', 'metadata_json', 'synced_at', 'updated_at'],
-    editable: ['code', 'remote_id', 'link', 'collection_id', 'payload_hash', 'status', 'metadata_json', 'synced_at', 'updated_at'],
+    editable: ['service', 'code_key', 'code', 'remote_id', 'link', 'collection_id', 'payload_hash', 'status', 'metadata_json', 'synced_at', 'updated_at'],
     insertable: ['service', 'code_key', 'code', 'remote_id', 'link', 'collection_id', 'payload_hash', 'status', 'metadata_json', 'synced_at', 'updated_at'],
     order: 'updated_at DESC, service ASC, code_key ASC',
   },
@@ -1719,24 +2038,24 @@ const RAW_TABLES = {
     label: 'Telegram 来源',
     pk: ['id'],
     columns: ['id', 'source_key', 'source_type', 'account_key', 'account_label', 'source_label', 'chat_key', 'chat_type', 'is_selected', 'baseline_message_id', 'checkpoint_message_id', 'checkpoint_date', 'sync_cursor_message_id', 'sync_target_message_id', 'status', 'last_error', 'last_sync_at', 'created_at', 'updated_at'],
-    editable: ['account_label', 'source_label', 'is_selected', 'status', 'last_error'],
-    insertable: [],
+    editable: ['source_key', 'source_type', 'account_key', 'account_label', 'source_label', 'chat_key', 'chat_type', 'is_selected', 'baseline_message_id', 'checkpoint_message_id', 'checkpoint_date', 'sync_cursor_message_id', 'sync_target_message_id', 'status', 'last_error', 'last_sync_at'],
+    insertable: ['source_key', 'source_type', 'account_key', 'account_label', 'source_label', 'chat_key', 'chat_type', 'is_selected', 'baseline_message_id', 'checkpoint_message_id', 'checkpoint_date', 'sync_cursor_message_id', 'sync_target_message_id', 'status', 'last_error', 'last_sync_at'],
     order: 'id DESC',
   },
   telegram_message_refs: {
     label: 'Telegram 消息指纹',
     pk: ['id'],
     columns: ['id', 'source_id', 'dedupe_key', 'source_type', 'source_label', 'account_key', 'chat_key', 'message_id', 'message_date', 'edited_at', 'content_hash', 'codes_json', 'first_seen_at', 'last_seen_at'],
-    editable: ['source_label', 'message_date', 'edited_at', 'codes_json'],
-    insertable: [],
+    editable: ['source_id', 'dedupe_key', 'source_type', 'source_label', 'account_key', 'chat_key', 'message_id', 'message_date', 'edited_at', 'content_hash', 'codes_json', 'first_seen_at', 'last_seen_at'],
+    insertable: ['source_id', 'dedupe_key', 'source_type', 'source_label', 'account_key', 'chat_key', 'message_id', 'message_date', 'edited_at', 'content_hash', 'codes_json', 'first_seen_at', 'last_seen_at'],
     order: 'id DESC',
   },
   telegram_import_runs: {
     label: 'Telegram 导入历史',
     pk: ['id'],
     columns: ['id', 'source_id', 'source_type', 'source_label', 'status', 'message_count', 'new_message_count', 'duplicate_message_count', 'updated_message_count', 'code_count', 'error_count', 'errors_json', 'started_at', 'finished_at'],
-    editable: ['source_label', 'status', 'errors_json'],
-    insertable: [],
+    editable: ['source_id', 'source_type', 'source_label', 'status', 'message_count', 'new_message_count', 'duplicate_message_count', 'updated_message_count', 'code_count', 'error_count', 'errors_json', 'started_at', 'finished_at'],
+    insertable: ['source_id', 'source_type', 'source_label', 'status', 'message_count', 'new_message_count', 'duplicate_message_count', 'updated_message_count', 'code_count', 'error_count', 'errors_json', 'started_at', 'finished_at'],
     order: 'id DESC',
   },
 };
@@ -1812,6 +2131,14 @@ function ensureGenreExists(genreId) {
   return id;
 }
 
+function ensureRawParentExists(table, id, label) {
+  const value = Number(id);
+  if (!Number.isSafeInteger(value) || value <= 0 || !queryOne(`SELECT 1 AS ok FROM ${quoteIdent(table)} WHERE id = ?`, [value])) {
+    throw new Error(`${label}不存在`);
+  }
+  return value;
+}
+
 function normalizeCounter(value) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
@@ -1819,6 +2146,15 @@ function normalizeCounter(value) {
 
 function validateRawValue(table, column, value, pkObj = {}) {
   let next = value == null ? '' : String(value).trim();
+
+  if (table === 'actress_code_map') {
+    if (column === 'actress_id') return ensureActressExists(next);
+    if (column === 'code_id') return ensureCodeExists(next);
+  }
+  if (table === 'code_genres') {
+    if (column === 'code_id') return ensureCodeExists(next);
+    if (column === 'genre_id') return ensureGenreExists(next);
+  }
 
   if (table === 'codes') {
     if (column === 'code') {
@@ -1845,8 +2181,54 @@ function validateRawValue(table, column, value, pkObj = {}) {
     return next;
   }
 
-  if (table === 'processing_runs' && /_codes$/.test(column)) return normalizeCounter(next);
-  if (['actresses_json', 'genres_json', 'final_tags_json', 'metadata_json', 'codes_json', 'errors_json'].includes(column)) {
+  const requiredText = {
+    tool_history_runs: ['tool_kind', 'name'],
+    tool_history_items: ['primary_text'],
+    processing_run_items: ['code'],
+    processing_item_tasks: ['service', 'action'],
+    site_lookup_cache: ['service', 'code_key'],
+    remote_sync_records: ['service', 'code_key'],
+    telegram_sources: ['source_key', 'source_type'],
+    telegram_message_refs: ['dedupe_key', 'source_type', 'content_hash'],
+    telegram_import_runs: ['source_type'],
+  };
+  if (requiredText[table]?.includes(column) && !next) throw new Error(`${column} 不能为空`);
+
+  if (table === 'processing_run_items' && column === 'code') {
+    next = normalizeCode(next) || next.toUpperCase();
+    if (!next) throw new Error('code 不能为空');
+    return next;
+  }
+
+  const positiveForeignKeys = {
+    processing_run_items: { run_id: ['processing_runs', '处理批次'], code_id: ['codes', '番号记录'] },
+    processing_item_tasks: { run_id: ['processing_runs', '处理批次'], run_item_id: ['processing_run_items', '批次明细'] },
+    tool_history_items: { history_id: ['tool_history_runs', '文本工具历史'] },
+    telegram_message_refs: { source_id: ['telegram_sources', 'Telegram 来源'] },
+    telegram_import_runs: { source_id: ['telegram_sources', 'Telegram 来源'] },
+  };
+  const parent = positiveForeignKeys[table]?.[column];
+  if (parent) {
+    if (!next && ['code_id', 'source_id'].includes(column)) return null;
+    return ensureRawParentExists(parent[0], next, parent[1]);
+  }
+
+  const nonNegativeIntegerColumns = new Set([
+    'position', 'input_count', 'result_count', 'pipeline_version', 'total_codes',
+    'new_codes', 'skipped_codes', 'not_found_codes', 'duplicate_codes',
+    'completed_codes', 'network_error_codes', 'manual_codes', 'attempt_count',
+    'av123_favorite_concurrency', 'baseline_message_id', 'checkpoint_message_id',
+    'sync_cursor_message_id', 'sync_target_message_id', 'message_count',
+    'new_message_count', 'duplicate_message_count', 'updated_message_count',
+    'code_count', 'error_count',
+  ]);
+  if (nonNegativeIntegerColumns.has(column)) return normalizeCounter(next);
+  if (['missav_rate_cap', 'av123_rate_cap'].includes(column)) {
+    const number = Number(next);
+    if (!Number.isFinite(number) || number < 0) throw new Error(`${column} 必须是非负数字`);
+    return number;
+  }
+  if (/_json$/.test(column)) {
     const fallback = column === 'metadata_json' ? '{}' : '[]';
     next = next || fallback;
     try {
@@ -1863,6 +2245,53 @@ function validateRawValue(table, column, value, pkObj = {}) {
     return Math.trunc(number);
   }
   return next;
+}
+
+function validateRawInsertReferences(table, data) {
+  if (table === 'processing_item_tasks') {
+    const runId = ensureRawParentExists('processing_runs', data.run_id, '处理批次');
+    const itemId = ensureRawParentExists('processing_run_items', data.run_item_id, '批次明细');
+    const item = queryOne(`SELECT run_id FROM processing_run_items WHERE id = ?`, [itemId]);
+    if (Number(item?.run_id) !== runId) throw new Error('run_item_id 不属于指定的 run_id');
+  }
+  if (table === 'processing_run_items') ensureRawParentExists('processing_runs', data.run_id, '处理批次');
+  if (table === 'tool_history_items') ensureRawParentExists('tool_history_runs', data.history_id, '文本工具历史');
+  if (['telegram_message_refs', 'telegram_import_runs'].includes(table) && String(data.source_id || '').trim()) {
+    ensureRawParentExists('telegram_sources', data.source_id, 'Telegram 来源');
+  }
+}
+
+function insertConfiguredRawRow(cfg, data = {}) {
+  const tableColumns = new Set(getTableColumns(cfg.name));
+  const required = {
+    tool_history_runs: ['tool_kind', 'name'],
+    tool_history_items: ['history_id', 'position', 'primary_text'],
+    processing_run_items: ['run_id', 'position', 'code'],
+    processing_item_tasks: ['run_id', 'run_item_id', 'service', 'action'],
+    telegram_sources: ['source_key', 'source_type'],
+    telegram_message_refs: ['dedupe_key', 'source_type', 'content_hash'],
+    telegram_import_runs: ['source_type'],
+  }[cfg.name] || [];
+  for (const column of required) {
+    if (data[column] === undefined || data[column] === null || String(data[column]).trim() === '') {
+      throw new Error(`${column} 不能为空`);
+    }
+  }
+  validateRawInsertReferences(cfg.name, data);
+  const columns = [];
+  const values = [];
+  for (const column of cfg.insertable) {
+    if (!tableColumns.has(column)) continue;
+    const raw = data[column];
+    if (raw === undefined || raw === null || String(raw).trim() === '') continue;
+    columns.push(column);
+    values.push(validateRawValue(cfg.name, column, raw));
+  }
+  if (!columns.length) throw new Error('请至少填写一个字段');
+  runSQL(`INSERT INTO ${quoteIdent(cfg.name)} (${columns.map(quoteIdent).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`, values);
+  const id = lastInsertId();
+  save();
+  return id || true;
 }
 
 function getRawTableRows(table, options = {}) {
@@ -1916,9 +2345,21 @@ function updateRawCell(table, pk, column, value) {
     renameBookmarkCollection(key.obj.path, value);
     return true;
   }
+  if (cfg.name === 'codes') {
+    updateCodeRecord(key.obj.id, { [col]: value });
+    return true;
+  }
 
   const next = validateRawValue(cfg.name, col, value, key.obj);
-  const setSql = cfg.name === 'actress_tags' && col === 'tag_name'
+  if (cfg.name === 'processing_item_tasks' && ['run_id', 'run_item_id'].includes(col)) {
+    const current = queryOne(`SELECT run_id, run_item_id FROM processing_item_tasks WHERE ${key.where}`, key.values);
+    const runId = Number(col === 'run_id' ? next : current?.run_id);
+    const itemId = Number(col === 'run_item_id' ? next : current?.run_item_id);
+    const item = queryOne(`SELECT run_id FROM processing_run_items WHERE id = ?`, [itemId]);
+    if (!item || Number(item.run_id) !== runId) throw new Error('run_item_id 不属于指定的 run_id');
+  }
+  const hasUpdatedAt = getTableColumns(cfg.name).includes('updated_at');
+  const setSql = hasUpdatedAt && col !== 'updated_at'
     ? `${quoteIdent(col)} = ?, updated_at = datetime('now','localtime')`
     : `${quoteIdent(col)} = ?`;
   runSQL(`UPDATE ${quoteIdent(cfg.name)} SET ${setSql} WHERE ${key.where}`, [next, ...key.values]);
@@ -1939,10 +2380,22 @@ function bulkUpdateRawCells(table, pks, column, value) {
     for (const pk of keys) {
       const key = parsePk(pk, cfg);
       const next = validateRawValue(cfg.name, col, value, key.obj);
-      const setSql = cfg.name === 'actress_tags' && col === 'tag_name'
+      if (cfg.name === 'processing_item_tasks' && ['run_id', 'run_item_id'].includes(col)) {
+        const current = queryOne(`SELECT run_id, run_item_id FROM processing_item_tasks WHERE ${key.where}`, key.values);
+        const runId = Number(col === 'run_id' ? next : current?.run_id);
+        const itemId = Number(col === 'run_item_id' ? next : current?.run_item_id);
+        const item = queryOne(`SELECT run_id FROM processing_run_items WHERE id = ?`, [itemId]);
+        if (!item || Number(item.run_id) !== runId) throw new Error('run_item_id 不属于指定的 run_id');
+      }
+      const hasUpdatedAt = getTableColumns(cfg.name).includes('updated_at');
+      const setSql = hasUpdatedAt && col !== 'updated_at'
         ? `${quoteIdent(col)} = ?, updated_at = datetime('now','localtime')`
         : `${quoteIdent(col)} = ?`;
       runSQL(`UPDATE ${quoteIdent(cfg.name)} SET ${setSql} WHERE ${key.where}`, [next, ...key.values]);
+      if (cfg.name === 'codes' && ['best_url', 'raindrop_title', 'raindrop_excerpt', 'raindrop_note', 'raindrop_folder', 'raindrop_tags', 'raindrop_created', 'raindrop_cover'].includes(col)) {
+        runSQL(`UPDATE codes SET raindrop_status = CASE WHEN raindrop_status = 'succeeded' THEN 'ready' ELSE raindrop_status END
+          WHERE ${key.where}`, key.values);
+      }
     }
     DB.run('COMMIT');
   } catch (err) {
@@ -1959,7 +2412,16 @@ function insertRawRow(table, row = {}) {
 
   if (cfg.name === 'bookmarks') return createBookmarkRecord(data);
   if (cfg.name === 'bookmark_collections') return createBookmarkCollection(data.path);
-  if (cfg.name === 'codes') return createCodeRecord(data.code, data.best_url, data.status);
+  if (cfg.name === 'codes') {
+    const id = createCodeRecord(data.code, data.best_url, data.status);
+    for (const column of cfg.insertable) {
+      if (['code', 'best_url', 'status'].includes(column)) continue;
+      if (data[column] !== undefined && data[column] !== null && String(data[column]).trim() !== '') {
+        updateRawCell(cfg.name, { id }, column, data[column]);
+      }
+    }
+    return id;
+  }
   if (cfg.name === 'actress_tags') return createActressTag(data.tag_name);
   if (cfg.name === 'genre_tags') return createGenreTag(data.name);
 
@@ -1979,21 +2441,7 @@ function insertRawRow(table, row = {}) {
     return true;
   }
 
-  if (cfg.name === 'processing_runs') {
-    runSQL(`INSERT INTO processing_runs (started_at, finished_at, total_codes, new_codes, skipped_codes, not_found_codes, duplicate_codes)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`, [
-      String(data.started_at || '').trim() || null,
-      String(data.finished_at || '').trim() || null,
-      normalizeCounter(data.total_codes),
-      normalizeCounter(data.new_codes),
-      normalizeCounter(data.skipped_codes),
-      normalizeCounter(data.not_found_codes),
-      normalizeCounter(data.duplicate_codes),
-    ]);
-    const id = lastInsertId();
-    save();
-    return id;
-  }
+  if (cfg.name === 'processing_runs') return insertConfiguredRawRow(cfg, data);
 
   if (cfg.name === 'site_lookup_cache') {
     const service = String(data.service || '').trim();
@@ -2034,6 +2482,18 @@ function insertRawRow(table, row = {}) {
     ]);
     save();
     return true;
+  }
+
+  if ([
+    'processing_run_items',
+    'processing_item_tasks',
+    'tool_history_runs',
+    'tool_history_items',
+    'telegram_sources',
+    'telegram_message_refs',
+    'telegram_import_runs',
+  ].includes(cfg.name)) {
+    return insertConfiguredRawRow(cfg, data);
   }
 
   throw new Error('该数据表暂不支持新增');
@@ -2117,6 +2577,7 @@ function updateCodeRecord(id, patch = {}) {
   const codeId = ensureCodeExists(id);
   const updates = [];
   const params = [];
+  let raindropPayloadChanged = false;
   if (Object.prototype.hasOwnProperty.call(patch, 'code')) {
     const next = validateRawValue('codes', 'code', patch.code, { id: codeId });
     updates.push(`code = ?`);
@@ -2125,18 +2586,34 @@ function updateCodeRecord(id, patch = {}) {
   if (Object.prototype.hasOwnProperty.call(patch, 'best_url')) {
     updates.push(`best_url = ?`);
     params.push(String(patch.best_url || '').trim());
+    raindropPayloadChanged = true;
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
     updates.push(`status = ?`);
     params.push(String(patch.status || 'ok').trim() || 'ok');
   }
-  for (const field of ['raindrop_title', 'raindrop_excerpt', 'raindrop_note', 'raindrop_folder', 'raindrop_tags', 'raindrop_created', 'raindrop_cover']) {
+  for (const field of ['source_url', 'missav_error', 'av123_url', 'av123_status', 'av123_error', 'raindrop_status', 'raindrop_target', 'raindrop_remote_id', 'raindrop_error']) {
     if (Object.prototype.hasOwnProperty.call(patch, field)) {
       updates.push(`${field} = ?`);
       params.push(String(patch[field] || '').trim());
     }
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'raindrop_collection_id')) {
+    updates.push(`raindrop_collection_id = ?`);
+    params.push(Number.isSafeInteger(Number(patch.raindrop_collection_id)) ? Number(patch.raindrop_collection_id) : -1);
+  }
+  for (const field of ['raindrop_title', 'raindrop_excerpt', 'raindrop_note', 'raindrop_folder', 'raindrop_tags', 'raindrop_created', 'raindrop_cover']) {
+    if (Object.prototype.hasOwnProperty.call(patch, field)) {
+      updates.push(`${field} = ?`);
+      params.push(String(patch[field] || '').trim());
+      raindropPayloadChanged = true;
+    }
+  }
   if (updates.length) {
+    if (raindropPayloadChanged && !Object.prototype.hasOwnProperty.call(patch, 'raindrop_status')) {
+      updates.push(`raindrop_status = CASE WHEN raindrop_status = 'succeeded' THEN 'ready' ELSE raindrop_status END`);
+    }
+    updates.push(`updated_at = datetime('now','localtime')`);
     runSQL(`UPDATE codes SET ${updates.join(', ')} WHERE id = ?`, [...params, codeId]);
     save();
   }
@@ -2161,6 +2638,8 @@ function setCodeActressTags(codeId, tagNames) {
     const actressId = getOrCreateActressTagNoSave(name);
     if (actressId) linkActressCodeNoSave(actressId, id);
   }
+  runSQL(`UPDATE codes SET raindrop_status = CASE WHEN raindrop_status = 'succeeded' THEN 'ready' ELSE raindrop_status END,
+    updated_at = datetime('now','localtime') WHERE id = ?`, [id]);
   save();
   return true;
 }
@@ -2182,6 +2661,8 @@ function setCodeGenreTags(codeId, genreNames) {
     const genreId = getOrCreateGenreNoSave(name);
     if (genreId) runSQL(`INSERT OR IGNORE INTO code_genres (code_id, genre_id) VALUES (?, ?)`, [id, genreId]);
   }
+  runSQL(`UPDATE codes SET raindrop_status = CASE WHEN raindrop_status = 'succeeded' THEN 'ready' ELSE raindrop_status END,
+    updated_at = datetime('now','localtime') WHERE id = ?`, [id]);
   save();
   return true;
 }
@@ -2457,7 +2938,17 @@ function initialMissavTaskStatus(item) {
 
 function initialRaindropTaskStatus(item) {
   if (item.item_status === 'duplicate' || item.result_status === 'duplicate_in_input') return 'skipped';
-  if (item.result_status === 'already_exists') return 'skipped';
+  if (item.result_status === 'already_exists') {
+    const existing = item.code_id
+      ? queryOne(`SELECT best_url, status, raindrop_status FROM codes WHERE id = ?`, [Number(item.code_id)])
+      : null;
+    if (existing?.raindrop_status === 'succeeded') return 'succeeded';
+    if (String(existing?.best_url || '').trim()
+      && ['ok', 'no_actress_found', 'need_manual_check', 'page_ok_play_unknown', 'historical'].includes(String(existing?.status || ''))) {
+      return 'ready';
+    }
+    return 'blocked';
+  }
   if (item.result_status === 'not_found') return 'skipped';
   if (item.include_in_import && ['ok', 'no_actress_found', 'need_manual_check', 'page_ok_play_unknown'].includes(item.result_status)) return 'ready';
   return 'blocked';
@@ -2537,14 +3028,15 @@ function insertProcessingRunItem(runId, position, item = {}) {
   const resultStatus = ['queued', 'running'].includes(itemStatus) ? '' : String(item.status || item.result_status || '').trim();
   const found = findCode(code);
   runSQL(`INSERT INTO processing_run_items (
-    run_id, position, code_id, code, item_status, result_status, url,
+    run_id, position, code_id, code, source_url, item_status, result_status, url,
     actresses_json, genres_json, final_tags_json, include_in_import,
     skipped_reason, error, attempt_count, started_at, finished_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     runId,
     position,
     found.found ? found.code_id : null,
     code,
+    String(item.sourceUrl || item.source_url || found.sourceUrl || '').trim(),
     itemStatus,
     resultStatus,
     String(item.url || '').trim(),
@@ -2785,6 +3277,136 @@ function getRemoteSyncRecord(service, code) {
   };
 }
 
+function getGlobalRaindropRows(options = {}) {
+  const scope = ['pending', 'errors', 'all'].includes(String(options.scope || '')) ? String(options.scope) : 'pending';
+  const limit = Math.max(1, Math.min(100000, Number(options.limit) || 100000));
+  const where = [
+    `TRIM(c.best_url) <> ''`,
+    `c.status IN ('ok','no_actress_found','need_manual_check','page_ok_play_unknown','historical')`,
+  ];
+  if (scope === 'pending') where.push(`COALESCE(NULLIF(c.raindrop_status, ''), 'pending') <> 'succeeded'`);
+  if (scope === 'errors') where.push(`COALESCE(NULLIF(c.raindrop_status, ''), 'pending') IN ('failed','network_error','verify_required','blocked')`);
+  const rows = readRows(`
+    SELECT c.*,
+      GROUP_CONCAT(DISTINCT a.tag_name) AS actress_tags,
+      GROUP_CONCAT(DISTINCT g.name) AS genre_tags,
+      r.remote_id AS mapped_remote_id, r.link AS mapped_link,
+      r.collection_id AS mapped_collection_id, r.payload_hash AS mapped_payload_hash,
+      r.status AS mapped_status, r.synced_at AS mapped_synced_at, r.updated_at AS mapped_updated_at
+    FROM codes c
+    LEFT JOIN actress_code_map acm ON acm.code_id = c.id
+    LEFT JOIN actress_tags a ON a.id = acm.actress_id
+    LEFT JOIN code_genres cg ON cg.code_id = c.id
+    LEFT JOIN genre_tags g ON g.id = cg.genre_id
+    LEFT JOIN remote_sync_records r ON r.service = 'raindrop'
+      AND r.code_key = REPLACE(UPPER(c.code), '-', '')
+    WHERE ${where.join(' AND ')}
+    GROUP BY c.id
+    ORDER BY c.updated_at DESC, c.id DESC
+    LIMIT ?`, [limit]);
+  return rows.map(row => ({
+    id: Number(row.id),
+    code: String(row.code || ''),
+    url: String(row.best_url || ''),
+    status: String(row.status || ''),
+    sourceUrl: String(row.source_url || ''),
+    title: String(row.raindrop_title || row.code || ''),
+    excerpt: String(row.raindrop_excerpt || ''),
+    note: String(row.raindrop_note || ''),
+    cover: String(row.raindrop_cover || ''),
+    actresses: String(row.actress_tags || '').split(',').filter(Boolean),
+    genres: String(row.genre_tags || '').split(',').filter(Boolean),
+    finalTags: buildFinalTagsForDbRow(row),
+    raindropStatus: String(row.raindrop_status || 'pending'),
+    raindropTarget: ['missav1', 'missav2'].includes(String(row.raindrop_target || ''))
+      ? String(row.raindrop_target)
+      : 'missav2',
+    raindropCollectionId: Number(row.raindrop_collection_id ?? -1),
+    raindropRemoteId: String(row.raindrop_remote_id || row.mapped_remote_id || ''),
+    raindropError: String(row.raindrop_error || ''),
+    remoteRecord: row.mapped_status ? {
+      remoteId: String(row.mapped_remote_id || ''),
+      link: String(row.mapped_link || ''),
+      collectionId: Number(row.mapped_collection_id ?? -1),
+      payloadHash: String(row.mapped_payload_hash || ''),
+      status: String(row.mapped_status || ''),
+      syncedAt: String(row.mapped_synced_at || ''),
+      updatedAt: String(row.mapped_updated_at || ''),
+    } : null,
+    updatedAt: String(row.updated_at || ''),
+  }));
+}
+
+function getRaindropSyncLocalRows(options = {}) {
+  const scope = ['pending', 'errors', 'all'].includes(String(options.scope || '')) ? String(options.scope) : 'all';
+  const limit = Math.max(1, Math.min(100000, Number(options.limit) || 100000));
+  const rows = readRows(`
+    SELECT c.*,
+      GROUP_CONCAT(DISTINCT a.tag_name) AS actress_tags,
+      GROUP_CONCAT(DISTINCT g.name) AS genre_tags,
+      r.remote_id AS mapped_remote_id, r.link AS mapped_link,
+      r.collection_id AS mapped_collection_id, r.payload_hash AS mapped_payload_hash,
+      r.status AS mapped_status, r.metadata_json AS mapped_metadata_json,
+      r.synced_at AS mapped_synced_at, r.updated_at AS mapped_updated_at
+    FROM codes c
+    LEFT JOIN actress_code_map acm ON acm.code_id = c.id
+    LEFT JOIN actress_tags a ON a.id = acm.actress_id
+    LEFT JOIN code_genres cg ON cg.code_id = c.id
+    LEFT JOIN genre_tags g ON g.id = cg.genre_id
+    LEFT JOIN remote_sync_records r ON r.service = 'raindrop'
+      AND r.code_key = REPLACE(UPPER(c.code), '-', '')
+    WHERE TRIM(c.best_url) <> '' OR TRIM(c.source_url) <> ''
+      OR TRIM(c.raindrop_remote_id) <> '' OR TRIM(COALESCE(r.remote_id, '')) <> ''
+    GROUP BY c.id
+    ORDER BY c.updated_at DESC, c.id DESC
+    LIMIT ?`, [limit]);
+  const pushStatuses = new Set(['ok', 'no_actress_found', 'need_manual_check', 'page_ok_play_unknown', 'historical']);
+  const errorStatuses = new Set(['failed', 'network_error', 'verify_required', 'blocked']);
+  return rows.map(row => {
+    const raindropStatus = String(row.raindrop_status || 'pending');
+    const remoteRecord = row.mapped_status ? {
+      remoteId: String(row.mapped_remote_id || ''),
+      link: String(row.mapped_link || ''),
+      collectionId: Number(row.mapped_collection_id ?? -1),
+      payloadHash: String(row.mapped_payload_hash || ''),
+      status: String(row.mapped_status || ''),
+      metadata: parseJsonObject(row.mapped_metadata_json),
+      syncedAt: String(row.mapped_synced_at || ''),
+      updatedAt: String(row.mapped_updated_at || ''),
+    } : null;
+    const eligibleForPush = Boolean(String(row.best_url || '').trim()) && pushStatuses.has(String(row.status || ''));
+    const matchesScope = scope === 'all'
+      || (scope === 'pending' && raindropStatus !== 'succeeded')
+      || (scope === 'errors' && errorStatuses.has(raindropStatus));
+    return {
+      id: Number(row.id),
+      code: String(row.code || ''),
+      url: String(row.best_url || row.source_url || ''),
+      status: String(row.status || ''),
+      sourceUrl: String(row.source_url || ''),
+      title: String(row.raindrop_title || row.code || ''),
+      excerpt: String(row.raindrop_excerpt || ''),
+      note: String(row.raindrop_note || ''),
+      cover: String(row.raindrop_cover || ''),
+      created: String(row.raindrop_created || ''),
+      actresses: String(row.actress_tags || '').split(',').filter(Boolean),
+      genres: String(row.genre_tags || '').split(',').filter(Boolean),
+      finalTags: buildFinalTagsForDbRow(row),
+      raindropStatus,
+      raindropTarget: ['missav1', 'missav2'].includes(String(row.raindrop_target || ''))
+        ? String(row.raindrop_target)
+        : 'missav2',
+      raindropCollectionId: Number(row.raindrop_collection_id ?? remoteRecord?.collectionId ?? -1),
+      raindropRemoteId: String(row.raindrop_remote_id || remoteRecord?.remoteId || ''),
+      raindropError: String(row.raindrop_error || ''),
+      remoteRecord,
+      eligibleForPush,
+      matchesScope,
+      updatedAt: String(row.updated_at || ''),
+    };
+  });
+}
+
 function upsertRemoteSyncRecordNoSave(entry = {}) {
   const identity = siteLookupCacheIdentity(entry.service, entry.code);
   if (!identity) throw new Error('远端同步记录缺少有效的服务或番号');
@@ -2819,13 +3441,138 @@ function upsertRemoteSyncRecordNoSave(entry = {}) {
   return true;
 }
 
+function linkKnownRaindropTagsNoSave(codeId, tags) {
+  for (const tag of uniqueList(Array.isArray(tags) ? tags : splitStoredTags(tags))) {
+    const actress = queryOne(`SELECT id FROM actress_tags WHERE tag_name = ? COLLATE NOCASE`, [tag]);
+    if (actress?.id) linkActressCodeNoSave(actress.id, codeId);
+    const genre = queryOne(`SELECT id FROM genre_tags WHERE name = ? COLLATE NOCASE`, [tag]);
+    if (genre?.id) {
+      try {
+        runSQL(`INSERT OR IGNORE INTO code_genres (code_id, genre_id) VALUES (?, ?)`, [codeId, genre.id]);
+      } catch {}
+    }
+  }
+}
+
+function applyRaindropPullRecord(entry = {}) {
+  const code = normalizeCode(entry.code);
+  if (!code) throw new Error('Raindrop Pull 记录缺少有效番号');
+  const link = normalizeTrustedMissavUrl(entry.link || entry.url);
+  if (!link) throw new Error('Raindrop Pull 只接受可信 MissAV 详情链接');
+  const linkCode = parseCodeList(link)[0] || '';
+  if (!linkCode || codeComparableKey(linkCode) !== codeComparableKey(code)) {
+    throw new Error('Raindrop Pull 链接中的番号与目标本地番号不一致');
+  }
+  const remoteId = Number(entry.remoteId);
+  if (!Number.isSafeInteger(remoteId) || remoteId <= 0) throw new Error('Raindrop Pull 记录缺少远端书签 ID');
+  const collectionId = Number(entry.collectionId);
+  if (!Number.isSafeInteger(collectionId) || collectionId === 0 || collectionId < -1) {
+    throw new Error('Raindrop Pull 记录的 Collection 无效');
+  }
+  const title = String(entry.title || code).trim().slice(0, 1000) || code;
+  const excerpt = String(entry.excerpt || '').trim().slice(0, 10000);
+  const note = String(entry.note || '').trim().slice(0, 10000);
+  const cover = String(entry.cover || '').trim().slice(0, 4096);
+  const created = String(entry.created || '').trim().slice(0, 128);
+  const remoteTags = uniqueList(Array.isArray(entry.tags) ? entry.tags : splitStoredTags(entry.tags));
+  const tags = remoteTags.join(',');
+  const collectionLabel = String(entry.collectionLabel || '').trim().slice(0, 1000);
+  const targetName = collectionLabel.split(/\s+\/\s+/).pop()?.toLowerCase();
+  const raindropTarget = ['missav1', 'missav2'].includes(targetName) ? targetName : '';
+  const payloadHash = String(entry.payloadHash || '').trim();
+  const metadata = {
+    ...(entry.metadata && typeof entry.metadata === 'object' ? entry.metadata : {}),
+    action: String(entry.action || 'pulled'),
+    direction: 'pull',
+    remoteHash: String(entry.remoteHash || '').trim(),
+    remoteLastUpdate: String(entry.remoteLastUpdate || '').trim(),
+    collectionLabel,
+    lastSeenAt: new Date().toISOString(),
+  };
+  let codeId;
+  let createdLocal = false;
+  DB.run('BEGIN TRANSACTION');
+  try {
+    const existing = findCode(code);
+    if (!existing.found) {
+      runSQL(`INSERT INTO codes
+        (code, best_url, source_url, status, raindrop_status, raindrop_target,
+         raindrop_collection_id, raindrop_remote_id, raindrop_error,
+         raindrop_title, raindrop_excerpt, raindrop_note, raindrop_folder,
+         raindrop_tags, raindrop_created, raindrop_cover, updated_at)
+        VALUES (?, ?, ?, 'historical', 'succeeded', ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`, [
+        code, link, link, raindropTarget, collectionId, String(remoteId),
+        title, excerpt, note, collectionLabel, tags, created, cover,
+      ]);
+      codeId = lastInsertId();
+      createdLocal = true;
+    } else {
+      codeId = existing.code_id;
+      runSQL(`UPDATE codes SET
+        best_url = ?,
+        source_url = CASE WHEN TRIM(source_url) = '' THEN ? ELSE source_url END,
+        raindrop_status = 'succeeded',
+        raindrop_target = CASE WHEN ? <> '' THEN ? ELSE raindrop_target END,
+        raindrop_collection_id = ?, raindrop_remote_id = ?, raindrop_error = '',
+        raindrop_title = ?, raindrop_excerpt = ?, raindrop_note = ?,
+        raindrop_folder = ?, raindrop_tags = ?, raindrop_created = ?,
+        raindrop_cover = ?, updated_at = datetime('now','localtime')
+        WHERE id = ?`, [
+        link, link, raindropTarget, raindropTarget, collectionId, String(remoteId),
+        title, excerpt, note, collectionLabel, tags, created, cover, codeId,
+      ]);
+    }
+    linkKnownRaindropTagsNoSave(codeId, remoteTags);
+    upsertRemoteSyncRecordNoSave({
+      service: 'raindrop',
+      code,
+      remoteId,
+      link,
+      collectionId,
+      payloadHash,
+      status: 'succeeded',
+      metadata,
+    });
+    runSQL(`UPDATE processing_item_tasks SET status = 'succeeded', error = '', url = ?,
+      metadata_json = ?, finished_at = datetime('now','localtime'),
+      updated_at = datetime('now','localtime')
+      WHERE service = 'raindrop' AND action = 'sync'
+        AND status NOT IN ('skipped','not_configured')
+        AND run_item_id IN (SELECT id FROM processing_run_items WHERE code_id = ?)`, [
+      link,
+      jsonObject({ action: metadata.action, direction: 'pull', remoteId, collectionId, collectionLabel }),
+      codeId,
+    ]);
+    DB.run('COMMIT');
+  } catch (error) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw error;
+  }
+  if (entry.persist !== false) save();
+  return { codeId, code, created: createdLocal, remoteId, collectionId };
+}
+
 function completeRemoteSyncTask(runId, position, patch = {}, record = null) {
-  const item = queryOne(`SELECT id FROM processing_run_items WHERE run_id = ? AND position = ?`, [Number(runId), Number(position)]);
+  const item = queryOne(`SELECT id, code_id, code FROM processing_run_items WHERE run_id = ? AND position = ?`, [Number(runId), Number(position)]);
   if (!item) throw new Error('批次明细不存在');
   DB.run('BEGIN TRANSACTION');
   try {
     if (!updateProcessingTaskNoSave(item.id, 'raindrop', 'sync', patch)) throw new Error('该批次没有 Raindrop 同步任务');
     if (record) upsertRemoteSyncRecordNoSave({ ...record, service: 'raindrop' });
+    const codeId = item.code_id || upsertCodeNoSave(item.code, '', 'pending');
+    runSQL(`UPDATE processing_run_items SET code_id = ? WHERE id = ?`, [codeId, item.id]);
+    runSQL(`UPDATE codes SET raindrop_status = ?, raindrop_collection_id = ?,
+      raindrop_remote_id = CASE WHEN ? <> '' THEN ? ELSE raindrop_remote_id END,
+      raindrop_error = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [
+      String(patch.status || 'failed').trim() || 'failed',
+      Number.isSafeInteger(Number(record?.collectionId ?? patch.metadata?.collectionId))
+        ? Number(record?.collectionId ?? patch.metadata?.collectionId)
+        : -1,
+      String(record?.remoteId || patch.metadata?.remoteId || '').trim(),
+      String(record?.remoteId || patch.metadata?.remoteId || '').trim(),
+      String(patch.error || '').trim(),
+      codeId,
+    ]);
     DB.run('COMMIT');
   } catch (err) {
     try { DB.run('ROLLBACK'); } catch {}
@@ -2833,6 +3580,53 @@ function completeRemoteSyncTask(runId, position, patch = {}, record = null) {
   }
   if (patch.persist !== false) save();
   return getProcessingRunItem(runId, position);
+}
+
+function completeGlobalRaindropSync(code, patch = {}, record = null) {
+  const existing = findCode(code);
+  if (!existing.found) throw new Error('永久番号库中不存在该记录');
+  const status = String(patch.status || 'failed').trim() || 'failed';
+  const requestedCollectionId = Number(patch.collectionId);
+  const collectionId = Number.isSafeInteger(requestedCollectionId) && (requestedCollectionId === -1 || requestedCollectionId > 0)
+    ? requestedCollectionId
+    : -1;
+  const remoteId = String(patch.remoteId || record?.remoteId || '').trim();
+  const error = String(patch.error || '').trim();
+  DB.run('BEGIN TRANSACTION');
+  try {
+    runSQL(`UPDATE codes SET raindrop_status = ?, raindrop_collection_id = ?,
+      raindrop_remote_id = CASE WHEN ? <> '' THEN ? ELSE raindrop_remote_id END,
+      raindrop_error = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [
+      status,
+      collectionId,
+      remoteId,
+      remoteId,
+      error,
+      existing.code_id,
+    ]);
+    if (record) upsertRemoteSyncRecordNoSave({ ...record, service: 'raindrop', code: existing.code || code });
+    const taskStatus = PROCESSING_TASK_STATUSES.has(status) ? status : 'failed';
+    runSQL(`UPDATE processing_item_tasks SET status = ?, error = ?, url = CASE WHEN ? <> '' THEN ? ELSE url END,
+      metadata_json = ?, finished_at = CASE WHEN ? IN ('succeeded','skipped','not_found','failed','network_error','manual','not_logged_in','verify_required') THEN datetime('now','localtime') ELSE NULL END,
+      updated_at = datetime('now','localtime')
+      WHERE service = 'raindrop' AND action = 'sync'
+        AND status NOT IN ('skipped','not_configured')
+        AND run_item_id IN (SELECT id FROM processing_run_items WHERE code_id = ?)`, [
+      taskStatus,
+      error,
+      String(patch.url || '').trim(),
+      String(patch.url || '').trim(),
+      jsonObject(patch.metadata),
+      taskStatus,
+      existing.code_id,
+    ]);
+    DB.run('COMMIT');
+  } catch (errorValue) {
+    try { DB.run('ROLLBACK'); } catch {}
+    throw errorValue;
+  }
+  if (patch.persist !== false) save();
+  return findCode(existing.code || code);
 }
 
 function telegramSourceSummary(row) {
@@ -2959,6 +3753,24 @@ function getTelegramGroupSources(accountKey, selectedOnly = true, sourceType = '
   return rows.map(telegramSourceSummary);
 }
 
+function removeTelegramGroupSource(sourceKey) {
+  const key = String(sourceKey || '').trim();
+  if (!key) throw new Error('缺少 Telegram 来源标识');
+  const row = queryOne(`SELECT * FROM telegram_sources WHERE source_key = ?`, [key]);
+  if (!row) return { removed: false, sourceKey: key };
+  runSQL(`UPDATE telegram_sources
+    SET is_selected = 0,
+        status = 'removed',
+        last_error = '已移除来源绑定；消息历史仍保留',
+        updated_at = datetime('now','localtime')
+    WHERE source_key = ?`, [key]);
+  save();
+  return {
+    removed: true,
+    source: telegramSourceSummary(queryOne(`SELECT * FROM telegram_sources WHERE source_key = ?`, [key])),
+  };
+}
+
 function setTelegramGroupSources(options = {}) {
   const accountKey = String(options.accountKey || '').trim().slice(0, 128);
   const accountLabel = String(options.accountLabel || '').trim().slice(0, 260);
@@ -2977,7 +3789,7 @@ function setTelegramGroupSources(options = {}) {
     });
   }
   const groups = [...unique.values()];
-  if (groups.length > 5) throw new Error('Telegram 增量来源最多只能选择 5 个群组');
+  if (groups.length > 100) throw new Error('Telegram 增量来源最多只能选择 100 个群组或频道');
 
   DB.run('BEGIN TRANSACTION');
   try {
@@ -3201,12 +4013,23 @@ function getTelegramImportHistory(limit = 50) {
 }
 
 function persistProcessingItemTask(runId, position, service, action, patch = {}, cacheEntry = null) {
-  const item = queryOne(`SELECT id FROM processing_run_items WHERE run_id = ? AND position = ?`, [Number(runId), Number(position)]);
+  const item = queryOne(`SELECT id, code_id, code FROM processing_run_items WHERE run_id = ? AND position = ?`, [Number(runId), Number(position)]);
   if (!item) throw new Error('批次明细不存在');
   DB.run('BEGIN TRANSACTION');
   try {
     if (!updateProcessingTaskNoSave(item.id, service, action, patch)) throw new Error('该批次没有对应的处理任务');
     updateDependentTaskAfterLookupNoSave(item.id, service, action, patch.status);
+    if (String(service) === '123av' && String(action) === 'lookup') {
+      const codeId = item.code_id || upsertCodeNoSave(item.code, '', 'pending');
+      runSQL(`UPDATE processing_run_items SET code_id = ? WHERE id = ?`, [codeId, item.id]);
+      runSQL(`UPDATE codes SET av123_url = ?, av123_status = ?, av123_error = ?,
+        updated_at = datetime('now','localtime') WHERE id = ?`, [
+        String(patch.url || '').trim(),
+        String(patch.status || 'pending').trim() || 'pending',
+        String(patch.error || '').trim(),
+        codeId,
+      ]);
+    }
     if (cacheEntry) upsertSiteLookupCacheNoSave(cacheEntry);
     DB.run('COMMIT');
   } catch (err) {
@@ -3269,13 +4092,14 @@ function markProcessingRunItemRunning(runId, position, options = {}) {
 function updateProcessingRunItem(runId, position, row = {}, itemStatus = '', options = {}) {
   const id = Number(runId);
   const pos = Number(position);
-  const existing = queryOne(`SELECT id, code FROM processing_run_items WHERE run_id = ? AND position = ?`, [id, pos]);
+  const existing = queryOne(`SELECT id, code, code_id, source_url FROM processing_run_items WHERE run_id = ? AND position = ?`, [id, pos]);
   if (!existing) throw new Error('批次明细不存在');
   const nextStatus = PROCESSING_ITEM_STATUSES.has(itemStatus) ? itemStatus : inferProcessingItemStatus(row);
   const code = normalizeCode(row.code || existing.code) || existing.code;
   const found = findCode(code);
   const resultStatus = ['queued', 'running'].includes(nextStatus) ? '' : String(row.status || row.result_status || '').trim();
   const taskShape = {
+    code_id: found.found ? found.code_id : existing.code_id,
     item_status: nextStatus,
     result_status: resultStatus,
     include_in_import: row.includeInImport ? 1 : 0,
@@ -3283,7 +4107,9 @@ function updateProcessingRunItem(runId, position, row = {}, itemStatus = '', opt
   let stats;
   DB.run('BEGIN TRANSACTION');
   try {
-    runSQL(`UPDATE processing_run_items SET code_id = ?, code = ?, item_status = ?, result_status = ?,
+    runSQL(`UPDATE processing_run_items SET code_id = ?, code = ?,
+      source_url = CASE WHEN ? <> '' THEN ? ELSE source_url END,
+      item_status = ?, result_status = ?,
       url = ?, actresses_json = ?, genres_json = ?, final_tags_json = ?, include_in_import = ?,
       skipped_reason = ?, error = ?, attempt_count = ?,
       started_at = CASE WHEN ? = 'queued' THEN NULL ELSE COALESCE(started_at, datetime('now','localtime')) END,
@@ -3291,6 +4117,8 @@ function updateProcessingRunItem(runId, position, row = {}, itemStatus = '', opt
       updated_at = datetime('now','localtime') WHERE run_id = ? AND position = ?`, [
       found.found ? found.code_id : null,
       code,
+      String(row.sourceUrl || row.source_url || existing.source_url || '').trim(),
+      String(row.sourceUrl || row.source_url || existing.source_url || '').trim(),
       nextStatus,
       resultStatus,
       nextStatus === 'queued' ? '' : String(row.url || '').trim(),
@@ -3331,8 +4159,23 @@ function updateProcessingRunItem(runId, position, row = {}, itemStatus = '', opt
 function completeMissavProcessingRunItem(runId, position, row = {}, itemStatus = '') {
   // MissAV 永久番号/Tags 与批次结果放在同一事务中提交，再执行一次 WAL 检查点。
   // 若批次写回失败，行为与旧版一致：已抓到的永久番号信息仍可保留，批次项可安全重试。
-  persistProcessedCode(row, { persist: false });
-  const result = updateProcessingRunItem(runId, position, row, itemStatus, { persist: false });
+  const run = queryOne(`SELECT known_actresses_json FROM processing_runs WHERE id = ?`, [Number(runId)]);
+  const item = queryOne(`SELECT source_url FROM processing_run_items WHERE run_id = ? AND position = ?`,
+    [Number(runId), Number(position)]);
+  const known = new Set(parseJsonList(run?.known_actresses_json).map(value => String(value || '').trim().toLocaleLowerCase()).filter(Boolean));
+  const actresses = (Array.isArray(row.matchedActressTags) && row.matchedActressTags.length
+    ? row.matchedActressTags
+    : Array.isArray(row.actresses) ? row.actresses : [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
+  const raindropTarget = actresses.some(value => known.has(value.toLocaleLowerCase())) ? 'missav1' : 'missav2';
+  const enriched = {
+    ...row,
+    sourceUrl: String(row.sourceUrl || row.source_url || item?.source_url || '').trim(),
+    raindropTarget,
+  };
+  persistProcessedCode(enriched, { persist: false });
+  const result = updateProcessingRunItem(runId, position, enriched, itemStatus, { persist: false });
   save();
   return result;
 }
@@ -3375,6 +4218,7 @@ function processingRunItemToRow(row) {
     position: row.position,
     codeId: row.code_id,
     code: row.code,
+    sourceUrl: row.source_url || '',
     itemStatus,
     status: resultStatus || itemStatus,
     url: row.url || '',
@@ -3953,7 +4797,7 @@ function close() {
 module.exports = {
   init, save, close,
   getOrCreateActressTag, getAllActressTags, searchActressTag, getCodesByActress,
-  findCode, upsertCode, persistProcessedCode,
+  findCode, upsertCode, registerInputCodes, persistProcessedCode,
   linkActressCode, linkGenreCode,
   importFromCSV, exportToCSV,
   getStats, getActressLibrary, getCodeLibrary, getCodeLibraryPage, getCodeLibraryIds, getCodeLibraryByIds, analyzeCodeImport, importHistoricalCodes, importHistoricalRecords, getDuplicateCodeGroups, getRaindropImportRows, renameActressTag, mergeActressTags,
@@ -3964,11 +4808,13 @@ module.exports = {
   createCodeRecord, updateCodeRecord, deleteCodeRecord, setCodeActressTags, setCodeGenreTags,
   createActressTag, deleteActressTag,
   getEditableTables, getRawTableRows, updateRawCell, bulkUpdateRawCells, insertRawRow, deleteRawRow, bulkDeleteRawRows, exportRawTableRows,
+  createToolHistory, getToolHistories, getToolHistory, renameToolHistory, deleteToolHistory,
   createProcessingRun, markProcessingRunItemRunning, updateProcessingRunItem, completeMissavProcessingRunItem,
   updateProcessingItemTask, completeProcessingItemTaskWithCache,
   getSiteLookupCache, upsertSiteLookupCache,
-  getRemoteSyncRecord, completeRemoteSyncTask,
-  getTelegramSource, upsertTelegramSource, getTelegramGroupSources, setTelegramGroupSources,
+  getRemoteSyncRecord, getGlobalRaindropRows, getRaindropSyncLocalRows,
+  applyRaindropPullRecord, completeRemoteSyncTask, completeGlobalRaindropSync,
+  getTelegramSource, upsertTelegramSource, getTelegramGroupSources, removeTelegramGroupSource, setTelegramGroupSources,
   recordTelegramImport, getTelegramImportHistory,
   setProcessingRunStatus, finishProcessingRun, getRecentRuns, getProcessingRun,
   getProcessingRunItem, getProcessingRunItems, getResumableProcessingRun, renameProcessingRun, deleteProcessingRun, setProcessingRunSpeedSettings, setProcessingRunOutputDir,

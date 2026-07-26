@@ -201,7 +201,9 @@ function htmlAttribute(tag, name) {
 
 function parseTelegramHtml(html, options = {}) {
   const raw = String(html || '');
-  const boundary = /<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bmessage\b[^"]*"|'[^']*\bmessage\b[^']*')[^>]*\bid\s*=\s*(?:"message(\d+)"|'message(\d+)')[^>]*>/gi;
+  // Telegram Desktop 对部分群组导出使用 message-999... 形式的负数消息 ID。
+  // 服务日期块同样作为边界参与切分，但不会作为业务消息输出。
+  const boundary = /<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bmessage\b[^"]*"|'[^']*\bmessage\b[^']*')[^>]*\bid\s*=\s*(?:"message(-?\d+)"|'message(-?\d+)')[^>]*>/gi;
   const matches = [...raw.matchAll(boundary)];
   const sourceLabel = String(options.sourceLabel || 'Telegram HTML');
   const chatKey = String(options.chatKey || `export:${hashContent(sourceLabel).slice(0, 24)}`);
@@ -227,6 +229,8 @@ function parseTelegramHtml(html, options = {}) {
     const start = match.index || 0;
     const end = index + 1 < matches.length ? matches[index + 1].index : raw.length;
     const segment = raw.slice(start, end);
+    const isServiceMessage = /\bclass\s*=\s*(?:"[^"]*\bservice\b[^"]*"|'[^']*\bservice\b[^']*')/i.test(match[0]);
+    if (isServiceMessage) return;
     const links = [...segment.matchAll(/<a\b[^>]*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/gi)]
       .map(linkMatch => decodeHtml(linkMatch[1] || linkMatch[2] || ''));
     const dateTag = segment.match(/<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bdate\b[^"]*"|'[^']*\bdate\b[^']*')[^>]*>/i)?.[0] || '';

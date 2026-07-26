@@ -3,6 +3,7 @@
 const common = require('./tools/common');
 const twitter = require('./tools/twitter');
 const badnews = require('./tools/badnews');
+const haijiao = require('./tools/haijiao');
 
 module.exports = {
   TWITTER_RESERVED_PATHS: twitter.TWITTER_RESERVED_PATHS,
@@ -14,4 +15,7 @@ module.exports = {
   extractTwitterProfiles: twitter.extractTwitterProfiles,
   canonicalBadNewsUrl: badnews.canonicalBadNewsUrl,
   extractBadNewsLinks: badnews.extractBadNewsLinks,
+  HAIJIAO_POST_CATEGORIES: haijiao.HAIJIAO_POST_CATEGORIES,
+  canonicalHaijiaoUrl: haijiao.canonicalHaijiaoUrl,
+  extractHaijiaoLinks: haijiao.extractHaijiaoLinks,
 };

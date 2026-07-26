@@ -18,6 +18,38 @@ function uniqueCodes(values) {
   });
 }
 
+function normalizeTrustedMissavUrl(value) {
+  const raw = String(value || '').trim().replace(/[.,;!?，。；！？]+$/, '');
+  if (!/^https?:\/\//i.test(raw)) return '';
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const trustedHosts = ['missav.ai', 'missav.ws'];
+    if (!trustedHosts.some(domain => host === domain || host.endsWith(`.${domain}`))) return '';
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return '';
+  }
+}
+
+function entriesFromCodesAndUrls(codes, urlPairs = []) {
+  const sourceByKey = new Map();
+  for (const pair of urlPairs) {
+    const sourceUrl = normalizeTrustedMissavUrl(pair?.url);
+    if (!sourceUrl) continue;
+    const values = Array.isArray(pair?.codes) ? pair.codes : parser.extractCodesFromTrustedAvUrl(sourceUrl);
+    for (const code of values) {
+      const key = parser.codeComparableKey(code);
+      if (key && !sourceByKey.has(key)) sourceByKey.set(key, sourceUrl);
+    }
+  }
+  return uniqueCodes(codes).map(code => ({
+    code,
+    sourceUrl: sourceByKey.get(parser.codeComparableKey(code)) || '',
+  }));
+}
+
 function isRaindropCsv(parsed) {
   const headers = new Set((parsed?.headers || []).map(header => String(header || '').trim().toLowerCase()));
   return ['title', 'url', 'folder', 'tags', 'created', 'cover'].every(header => headers.has(header));
@@ -54,16 +86,45 @@ function parseRaindropCsvCodes(parsed) {
   return uniqueCodes(output);
 }
 
-function parseInputCodeList(text) {
+function parseRaindropCsvEntries(parsed) {
+  const indexByName = new Map(parsed.headers.map((header, index) => [String(header || '').trim().toLowerCase(), index]));
+  const urlIndex = indexByName.get('url');
+  const urls = [];
+  for (const row of parsed.rows || []) {
+    const url = String(row[urlIndex] || '');
+    const sourceUrl = normalizeTrustedMissavUrl(url);
+    if (sourceUrl) urls.push({ url: sourceUrl, codes: parser.extractCodesFromTrustedAvUrl(sourceUrl) });
+  }
+  return entriesFromCodesAndUrls(parseRaindropCsvCodes(parsed), urls);
+}
+
+function parseInputEntries(text) {
   const raw = String(text || '');
   const firstLine = raw.replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0].toLowerCase();
   if (firstLine.includes('title') && firstLine.includes('url') && firstLine.includes('folder') && firstLine.includes('cover')) {
     try {
       const parsed = csvTools.parseCSV(raw);
-      if (isRaindropCsv(parsed)) return parseRaindropCsvCodes(parsed);
+      if (isRaindropCsv(parsed)) return parseRaindropCsvEntries(parsed);
     } catch {}
   }
-  return parser.parseCodeList(raw);
+  const urlPairs = [];
+  for (const match of raw.matchAll(/https?:\/\/[^\s"'<>)]*/gi)) {
+    const sourceUrl = normalizeTrustedMissavUrl(match[0]);
+    if (sourceUrl) urlPairs.push({ url: sourceUrl, codes: parser.extractCodesFromTrustedAvUrl(sourceUrl) });
+  }
+  return entriesFromCodesAndUrls(parser.parseCodeList(raw), urlPairs);
 }
 
-module.exports = { JAV_FOLDER_PATTERN, isRaindropCsv, parseRaindropCsvCodes, parseInputCodeList };
+function parseInputCodeList(text) {
+  return parseInputEntries(text).map(entry => entry.code);
+}
+
+module.exports = {
+  JAV_FOLDER_PATTERN,
+  isRaindropCsv,
+  normalizeTrustedMissavUrl,
+  parseRaindropCsvCodes,
+  parseRaindropCsvEntries,
+  parseInputEntries,
+  parseInputCodeList,
+};

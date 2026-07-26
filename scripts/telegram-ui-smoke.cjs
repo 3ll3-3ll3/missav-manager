@@ -158,6 +158,14 @@ ipcMain.handle('telegram:status', async () => {
     error: '',
   };
 });
+ipcMain.handle('telegram:network-config', () => ({ mode: 'socks5', host: '127.0.0.1', port: 7890 }));
+ipcMain.handle('telegram:network-save', (_event, value) => value);
+ipcMain.handle('telegram:network-test', (_event, value) => ({
+  ok: true,
+  config: value,
+  transport: `SOCKS5 ${value.host}:${value.port}`,
+  attempted: [`SOCKS5 ${value.host}:${value.port}`],
+}));
 ipcMain.handle('telegram:connect-stored', () => {
   telegramConnected = true;
   return {
@@ -189,17 +197,30 @@ ipcMain.handle('telegram:sync-stop', () => true);
 ipcMain.handle('telegram:list-groups', () => ({
   accountKey: '42',
   accountLabel: 'UI Telegram',
-  groups: [{
-    chatKey: '-1001001',
-    title: '番号收集群',
-    chatType: 'supergroup',
-    username: 'codes_ui',
-    owned: true,
-    admin: true,
-    archived: false,
-    latestMessageId: 2,
-    latestMessageDate: '2026-07-22T00:02:00.000Z',
-  }],
+  groups: [
+    {
+      chatKey: '-1001001',
+      title: '番号收集群',
+      chatType: 'supergroup',
+      username: 'codes_ui',
+      owned: true,
+      admin: true,
+      archived: false,
+      latestMessageId: 2,
+      latestMessageDate: '2026-07-22T00:02:00.000Z',
+    },
+    {
+      chatKey: '-1002002',
+      title: '番号发布频道',
+      chatType: 'channel',
+      username: 'channel_ui',
+      owned: false,
+      admin: false,
+      archived: true,
+      latestMessageId: 20,
+      latestMessageDate: '2026-07-22T01:00:00.000Z',
+    },
+  ],
 }));
 ipcMain.handle('telegram:parse-export', () => ({
   sourceKey: 'telegram-export:ui',
@@ -253,6 +274,7 @@ async function run() {
     for (let i = 0; i < 60 && !state.dbReady; i++) await api.sleep(50);
     const autoConnected = state.telegram.auth.status === 'ready';
     switchPage('sources');
+    switchTelegramPanel('api');
     state.telegram.auth = { ...state.telegram.auth, status: 'expired', configured: true, connected: false };
     renderTelegramSource();
     await startTelegramQrAuthorization();
@@ -291,6 +313,74 @@ async function run() {
     await loadTelegramGroups();
     state.telegram.selectedGroupKeys = new Set(['-1001001']);
     await saveTelegramGroupSources();
+    const botSourceKey = state.telegram.bot.groupSources[0]?.sourceKey || '';
+    const apiSourceKey = state.telegram.groupSources[0]?.sourceKey || '';
+    const staleSource = api.dbUpsertTelegramSource({
+      sourceKey: 'telegram-api:42:group:-1009999',
+      sourceType: 'api_group',
+      accountKey: '42',
+      accountLabel: 'UI Telegram',
+      sourceLabel: '已退出的测试群',
+      chatKey: '-1009999',
+      chatType: 'supergroup',
+      isSelected: true,
+      status: 'ready',
+    });
+    state.telegram.groupSources = [...state.telegram.groupSources, { ...api.dbGetTelegramSource(staleSource.sourceKey), unavailable: true }];
+    renderTelegramGroups();
+    const staleRemoveVisible = Boolean(DOM.telegramSelectedSources?.querySelector('[data-telegram-remove-group]'));
+    const originalConfirm = window.confirm;
+    window.confirm = () => true;
+    await removeTelegramGroupBinding(staleSource.sourceKey, 'api_group');
+    window.confirm = originalConfirm;
+    const staleSourceRemoved = api.dbGetTelegramGroupSources('42').every(source => source.sourceKey !== staleSource.sourceKey);
+    const selectSourcesWithPicker = (select, kind, sourceKeys) => {
+      setToolboxBinding(kind, []);
+      const picker = select._groupPicker;
+      picker.trigger.click();
+      picker.search.value = '机器人';
+      picker.search.dispatchEvent(new Event('input', { bubbles: true }));
+      const searchVisible = picker.list.querySelectorAll('[data-group-source-key]').length;
+      picker.search.value = '';
+      picker.search.dispatchEvent(new Event('input', { bubbles: true }));
+      sourceKeys.forEach(sourceKey => {
+        const option = [...picker.list.querySelectorAll('[data-group-source-key]')]
+          .find(node => node.dataset.groupSourceKey === sourceKey);
+        option?.click();
+      });
+      picker.trigger.click();
+      return searchVisible;
+    };
+    const twitterPickerSearchVisible = selectSourcesWithPicker(
+      DOM.twitterGroupBinding,
+      'twitter',
+      [botSourceKey, apiSourceKey],
+    );
+    const haijiaoPickerSearchVisible = selectSourcesWithPicker(
+      DOM.haijiaoGroupBinding,
+      'haijiao',
+      [botSourceKey, apiSourceKey],
+    );
+    dispatchToolboxMessages({
+      sourceKey: botSourceKey,
+      sourceType: 'bot_group',
+      sourceLabel: 'UI Bot 来源',
+      messages: [{
+        text: '#multi_bot_user https://www.haijiaolove.xyz/hjsz/127766.html?from=bot https://t.me/jisou',
+        links: [],
+        contentHash: 'multi-binding-bot',
+      }],
+    });
+    dispatchToolboxMessages({
+      sourceKey: apiSourceKey,
+      sourceType: 'api_group',
+      sourceLabel: 'UI API 来源',
+      messages: [{
+        text: '#multi_api_user https://haijiaolove.xyz/hjyc/115213.html#share https://www.haijiaolove.xyz/original',
+        links: [],
+        contentHash: 'multi-binding-api',
+      }],
+    });
     await syncTelegramGroups();
     const apiCodes = [...state.telegram.preview.codes];
     const historyCount = state.telegram.history.length;
@@ -307,11 +397,33 @@ async function run() {
       inputCodes: [...state.inputCodes],
       authStatus: state.telegram.auth.status,
       accountSummary: DOM.telegramAccountSummary?.textContent || '',
+      availableChannels: state.telegram.availableGroups.filter(group => group.chatType === 'channel').length,
+      sourceLimitText: DOM.telegramGroupSelectionCount?.textContent || '',
+      proxyMode: DOM.telegramNetworkMode?.value || '',
+      proxyHost: DOM.telegramProxyHost?.value || '',
+      proxyPort: DOM.telegramProxyPort?.value || '',
       sourcePanels: document.querySelectorAll('[data-telegram-panel-content]').length,
       selectedGroups: state.telegram.groupSources.length,
       selectedBotGroups: state.telegram.bot.groupSources.length,
+      telegramRemoveButtons: document.querySelectorAll('[data-telegram-remove-group]').length,
+      staleRemoveVisible,
+      staleSourceRemoved,
       botAuthStatus: state.telegram.bot.auth.status,
       previewReadonly: DOM.telegramCodePreview?.readOnly,
+      markReadControlPresent: Boolean(DOM.telegramMarkReadAfterSync),
+      markReadDefaultOff: DOM.telegramMarkReadAfterSync?.checked === false,
+      twitterBindingCount: state.toolboxBindings.twitter.length,
+      twitterBindingMultiple: Boolean(DOM.twitterGroupBinding?.multiple),
+      twitterSelectedOptions: [...DOM.twitterGroupBinding?.selectedOptions || []].filter(option => option.value).length,
+      twitterPickerSearchVisible,
+      twitterPickerSummary: DOM.twitterGroupBinding?._groupPicker?.trigger?.textContent || '',
+      twitterBoundProfiles: state.toolbox.twitter.results.map(row => row.name),
+      haijiaoBindingCount: state.toolboxBindings.haijiao.length,
+      haijiaoBindingMultiple: Boolean(DOM.haijiaoGroupBinding?.multiple),
+      haijiaoSelectedOptions: [...DOM.haijiaoGroupBinding?.selectedOptions || []].filter(option => option.value).length,
+      haijiaoPickerSearchVisible,
+      haijiaoBoundLinks: [...state.toolbox.haijiao.results],
+      groupPickerShells: document.querySelectorAll('.group-picker-shell').length,
     };
   })()`);
   window.showInactive();
@@ -322,6 +434,15 @@ async function run() {
   window.setSize(416, 820);
   await new Promise(resolve => setTimeout(resolve, 250));
   const mobileResult = await window.webContents.executeJavaScript(`(() => {
+    switchTool('twitter');
+    refreshToolboxGroupOptions();
+    const picker = DOM.twitterGroupBinding._groupPicker;
+    picker.trigger.click();
+    const pickerRect = picker.popover.getBoundingClientRect();
+    const pickerPosition = getComputedStyle(picker.popover).position;
+    picker.trigger.click();
+    switchPage('sources');
+    switchTelegramPanel('bot');
     const layout = document.querySelector('.telegram-source-layout');
     const visiblePanel = document.querySelector('[data-telegram-panel-content="bot"]');
     return {
@@ -331,6 +452,10 @@ async function run() {
       sourceNavButtons: document.querySelectorAll('[data-telegram-panel]').length,
       panelWidth: visiblePanel?.getBoundingClientRect().width || 0,
       metricColumns: getComputedStyle(document.querySelector('.telegram-result-metrics')).gridTemplateColumns.split(' ').length,
+      pickerPosition,
+      pickerWidth: pickerRect.width,
+      pickerLeft: pickerRect.left,
+      pickerRight: pickerRect.right,
     };
   })()`);
   const mobileImage = await window.webContents.capturePage();
@@ -347,11 +472,33 @@ async function run() {
     || result.inputCodes.join(',') !== 'ABF-354'
     || result.authStatus !== 'ready'
     || !result.accountSummary.includes('UI Telegram')
+    || result.availableChannels !== 1
+    || !result.sourceLimitText.includes('/ 100')
+    || result.proxyMode !== 'socks5'
+    || result.proxyHost !== '127.0.0.1'
+    || result.proxyPort !== '7890'
     || result.sourcePanels !== 3
     || result.selectedGroups !== 1
     || result.selectedBotGroups !== 1
+    || result.telegramRemoveButtons !== 2
+    || !result.staleRemoveVisible
+    || !result.staleSourceRemoved
     || result.botAuthStatus !== 'ready'
-    || !result.previewReadonly) {
+    || !result.previewReadonly
+    || !result.markReadControlPresent
+    || !result.markReadDefaultOff
+    || result.twitterBindingCount !== 2
+    || !result.twitterBindingMultiple
+    || result.twitterSelectedOptions !== 2
+    || result.twitterPickerSearchVisible !== 1
+    || !result.twitterPickerSummary.includes('已选择 2 个来源')
+    || result.twitterBoundProfiles.join(',') !== 'multi_bot_user,multi_api_user'
+    || result.haijiaoBindingCount !== 2
+    || !result.haijiaoBindingMultiple
+    || result.haijiaoSelectedOptions !== 2
+    || result.haijiaoPickerSearchVisible !== 1
+    || result.groupPickerShells !== 4
+    || result.haijiaoBoundLinks.join(',') !== 'https://www.haijiaolove.xyz/hjsz/127766.html,https://www.haijiaolove.xyz/hjyc/115213.html') {
     throw new Error(`Telegram source UI assertion failed: ${JSON.stringify(result)}`);
   }
   if (!qrResult.autoConnected
@@ -367,7 +514,11 @@ async function run() {
     || mobileResult.layoutColumns !== 1
     || mobileResult.sourceNavButtons !== 3
     || mobileResult.panelWidth < 340
-    || mobileResult.metricColumns !== 2) {
+    || mobileResult.metricColumns !== 2
+    || mobileResult.pickerPosition !== 'fixed'
+    || mobileResult.pickerWidth > 393
+    || mobileResult.pickerLeft < 11
+    || mobileResult.pickerRight > 405) {
     throw new Error(`Telegram source mobile assertion failed: ${JSON.stringify(mobileResult)}`);
   }
   process.stdout.write(JSON.stringify({

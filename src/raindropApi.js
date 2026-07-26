@@ -2,6 +2,8 @@ const crypto = require('node:crypto');
 
 const API_BASE = 'https://api.raindrop.io/rest/v1';
 const MAX_URL_CHECK = 100;
+const MAX_COLLECTION_SELECTION = 100;
+const RAINDROPS_PER_PAGE = 50;
 const AUTO_COLLECTION_NAMES = Object.freeze(['missav1', 'missav2']);
 
 function normalizeToken(value) {
@@ -29,6 +31,18 @@ function normalizeCollectionId(value) {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id === 0 || id < -1) throw new Error('Raindrop Collection 无效');
   return id;
+}
+
+function normalizeCollectionSelection(value) {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_COLLECTION_SELECTION) {
+    throw new Error(`请选择 1-${MAX_COLLECTION_SELECTION} 个 Raindrop Collection`);
+  }
+  const output = [];
+  for (const raw of value) {
+    const id = normalizeCollectionId(raw);
+    if (!output.includes(id)) output.push(id);
+  }
+  return output;
 }
 
 function cleanText(value, maxLength) {
@@ -164,6 +178,43 @@ function parseExistsResponse(response, urls) {
   });
 }
 
+function normalizeRemoteRaindrop(row = {}, fallbackCollectionId = -1) {
+  const id = Number(row._id ?? row.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  let link;
+  try {
+    link = normalizeHttpUrl(row.link || row.url);
+  } catch {
+    return null;
+  }
+  let collectionId = Number(row.collection?.$id ?? row.collectionId ?? fallbackCollectionId);
+  if (!Number.isSafeInteger(collectionId) || collectionId === 0 || collectionId < -1) collectionId = -1;
+  return {
+    id,
+    link,
+    title: cleanText(row.title, 1000) || link,
+    tags: normalizeTags(row.tags),
+    excerpt: cleanText(row.excerpt, 10000),
+    note: cleanText(row.note, 10000),
+    cover: cleanText(row.cover, 4096),
+    created: cleanText(row.created, 128),
+    lastUpdate: cleanText(row.lastUpdate, 128),
+    collectionId,
+    important: Boolean(row.important),
+    type: cleanText(row.type, 32) || 'link',
+  };
+}
+
+function parseRaindropsResponse(response, fallbackCollectionId = -1) {
+  const source = Array.isArray(response?.items) ? response.items : [];
+  return source.map(row => normalizeRemoteRaindrop(row, fallbackCollectionId)).filter(Boolean);
+}
+
+function isSuccessfulApiResponse(httpOk, body, options = {}) {
+  if (!httpOk) return false;
+  return options.allowResultFalse === true || body?.result !== false;
+}
+
 function parseRateLimit(headers, now = Date.now()) {
   const read = name => {
     if (!headers) return '';
@@ -185,7 +236,7 @@ function parseRateLimit(headers, now = Date.now()) {
 }
 
 function safeApiError(statusCode, body) {
-  const message = cleanText(body?.errorMessage || body?.message || '', 240);
+  const message = cleanText(body?.errorMessage || body?.message || body?.error || '', 240);
   if (statusCode === 401 || statusCode === 403) return 'Raindrop 授权已失效，请重新保存访问令牌';
   if (statusCode === 429) return 'Raindrop 请求达到速率上限，已等待后重试';
   return message ? `Raindrop API ${statusCode}: ${message}` : `Raindrop API 请求失败（HTTP ${statusCode || 0}）`;
@@ -194,10 +245,13 @@ function safeApiError(statusCode, body) {
 module.exports = {
   API_BASE,
   MAX_URL_CHECK,
+  MAX_COLLECTION_SELECTION,
+  RAINDROPS_PER_PAGE,
   AUTO_COLLECTION_NAMES,
   normalizeToken,
   normalizeHttpUrl,
   normalizeCollectionId,
+  normalizeCollectionSelection,
   normalizeTags,
   sanitizeSyncPayload,
   buildSyncPayload,
@@ -208,6 +262,9 @@ module.exports = {
   selectMissavCollectionName,
   sanitizeUrls,
   parseExistsResponse,
+  normalizeRemoteRaindrop,
+  parseRaindropsResponse,
+  isSuccessfulApiResponse,
   parseRateLimit,
   safeApiError,
 };

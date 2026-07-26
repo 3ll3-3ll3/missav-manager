@@ -1,6 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { TelegramUserService, cleanTelegramError } = require('../src/telegramClient');
+const {
+  TelegramUserService,
+  cleanTelegramError,
+  normalizeTelegramNetworkConfig,
+  defaultTelegramTransportCandidates,
+} = require('../src/telegramClient');
 
 async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -43,6 +48,17 @@ class FakeTelegramClient {
         isGroup: false,
         isChannel: false,
       },
+      {
+        id: { toString: () => '-1002002' },
+        title: '番号发布频道',
+        inputEntity: { peer: 'channel-1' },
+        entity: { megagroup: false, broadcast: true, username: 'codes_channel' },
+        isUser: false,
+        isGroup: false,
+        isChannel: true,
+        archived: true,
+        message: { id: 20, date: new Date('2026-07-21T01:00:00Z') },
+      },
     ];
   }
 
@@ -58,12 +74,48 @@ class FakeTelegramClient {
   async getMe() { return { id: 42n, firstName: 'Test', lastName: 'User', username: 'tester' }; }
   async disconnect() { this.disconnected = true; }
   async logOut() { this.loggedOut = true; this.authorized = false; }
-  async getDialogs() { return this.dialogs; }
+  async getDialogs(options) { this.lastDialogOptions = options; return this.dialogs; }
+  async markAsRead(entity, message, options) {
+    this.lastMarkAsRead = { entity, message, options };
+    return true;
+  }
   async *iterMessages(entity) {
     this.lastMessageEntity = entity;
     for (const message of this.messages) yield message;
   }
 }
+
+test('marks a selected group or channel read only up to the explicitly synchronized message', async () => {
+  const fake = new FakeTelegramClient('existing-session');
+  const service = new TelegramUserService({
+    createClient: () => fake,
+    readSecret: () => ({
+      apiId: 123456,
+      apiHash: '0123456789abcdef0123456789abcdef',
+      session: 'existing-session',
+      accountKey: '42',
+      accountLabel: 'Stored Account',
+    }),
+    writeSecret: () => {},
+  });
+  await service.connectStored();
+  await service.listGroupDialogs();
+  assert.deepEqual(await service.markGroupRead({ chatKey: '-1001001', maxId: 12 }), {
+    marked: true,
+    chatKey: '-1001001',
+    maxId: 12,
+  });
+  assert.deepEqual(fake.lastMarkAsRead, {
+    entity: { peer: 'group-1' },
+    message: undefined,
+    options: { maxId: 12 },
+  });
+  assert.deepEqual(await service.markGroupRead({ chatKey: '-1001001', maxId: 0 }), {
+    marked: false,
+    chatKey: '-1001001',
+    maxId: 0,
+  });
+});
 
 test('runs interactive Telegram user authorization without exposing or logging credentials', async () => {
   let storedSecret = null;
@@ -103,9 +155,13 @@ test('runs interactive Telegram user authorization without exposing or logging c
   }
 
   const listed = await service.listGroupDialogs();
-  assert.equal(listed.groups.length, 1);
+  assert.equal(listed.groups.length, 2);
   assert.equal(listed.groups[0].chatKey, '-1001001');
   assert.equal(listed.groups[0].owned, true);
+  assert.equal(listed.groups[1].chatKey, '-1002002');
+  assert.equal(listed.groups[1].chatType, 'channel');
+  assert.equal(listed.groups[1].archived, true);
+  assert.equal(fake.lastDialogOptions.ignoreMigrated, false);
   const synced = await service.syncGroupMessages({
     chatKey: '-1001001',
     baselineMessageId: 10,
@@ -232,6 +288,72 @@ test('restores an encrypted session through the injected secret store', async ()
   const status = await service.connectStored();
   assert.equal(status.status, 'ready');
   assert.equal(status.accountKey, '42');
+});
+
+test('uses the real networkSocket option and falls back before starting Telegram authorization', async () => {
+  const createdOptions = [];
+  const logs = [];
+  class FailedTransportClient extends FakeTelegramClient {
+    constructor() {
+      super('existing-session');
+    }
+
+    async connect() {
+      throw new Error('simulated transport timeout');
+    }
+  }
+  class WorkingTransportClient extends FakeTelegramClient {
+    constructor() {
+      super('existing-session');
+    }
+  }
+  const fakeWebSocketFactory = { isWebSocket: true };
+  const fakeTcpFactory = { isWebSocket: false };
+  const service = new TelegramUserService({
+    createClient: (_session, _apiId, _apiHash, clientOptions) => {
+      createdOptions.push(clientOptions);
+      return createdOptions.length === 1 ? new FailedTransportClient() : new WorkingTransportClient();
+    },
+    getTransportCandidates: async () => ([
+      { id: 'websocket', label: 'Telegram WebSocket', clientOptions: { networkSocket: fakeWebSocketFactory } },
+      { id: 'tcp', label: 'Telegram 直连', clientOptions: { networkSocket: fakeTcpFactory } },
+    ]),
+    readSecret: () => ({
+      apiId: 123456,
+      apiHash: '0123456789abcdef0123456789abcdef',
+      session: 'existing-session',
+      accountKey: '42',
+      accountLabel: 'Stored Account',
+    }),
+    writeSecret: () => {},
+    log: (level, event, data) => logs.push({ level, event, data }),
+  });
+
+  const status = await service.connectStored();
+  assert.equal(status.status, 'ready');
+  assert.equal(status.transport, 'Telegram 直连');
+  assert.equal(createdOptions.length, 2);
+  assert.equal(createdOptions[0].networkSocket, fakeWebSocketFactory);
+  assert.equal(createdOptions[1].networkSocket, fakeTcpFactory);
+  assert.equal(Object.hasOwn(createdOptions[0], 'useWSS'), false);
+  assert.equal(createdOptions[0].connectionRetries, 1);
+  assert.deepEqual(logs.filter(entry => entry.event === 'telegram_transport_failed').map(entry => entry.data.transport), ['websocket']);
+  assert.deepEqual(logs.filter(entry => entry.event === 'telegram_transport_connected').map(entry => entry.data.transport), ['tcp']);
+});
+
+test('normalizes explicit Clash SOCKS5 settings and builds an isolated proxy transport', async () => {
+  const config = normalizeTelegramNetworkConfig({ mode: 'socks5', host: '127.0.0.1', port: '7890' });
+  assert.deepEqual(config, { mode: 'socks5', host: '127.0.0.1', port: 7890 });
+  const candidates = await defaultTelegramTransportCandidates(config);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].label, 'SOCKS5 127.0.0.1:7890');
+  assert.deepEqual(candidates[0].clientOptions.proxy, {
+    socksType: 5,
+    ip: '127.0.0.1',
+    port: 7890,
+  });
+  assert.throws(() => normalizeTelegramNetworkConfig({ mode: 'socks5', host: 'http://127.0.0.1', port: 7890 }), /代理主机/);
+  assert.throws(() => normalizeTelegramNetworkConfig({ mode: 'socks5', host: '127.0.0.1', port: 70000 }), /代理端口/);
 });
 
 test('sanitizes phone numbers, long credentials, and FLOOD_WAIT durations', () => {

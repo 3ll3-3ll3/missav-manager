@@ -17,7 +17,8 @@ const screenshotPath = path.join(projectDir, 'artifacts', 'ui-pipeline-results.p
 const av123ScreenshotPath = path.join(projectDir, 'artifacts', 'ui-pipeline-results-123av.png');
 const processScreenshotPath = path.join(projectDir, 'artifacts', 'ui-pipeline-input.png');
 const homeScreenshotPath = path.join(projectDir, 'artifacts', 'ui-toolbox-home.png');
-const toolboxScreenshotPath = path.join(projectDir, 'artifacts', 'ui-toolbox-twitter.png');
+const toolboxScreenshotPath = path.join(projectDir, 'artifacts', 'ui-toolbox-group-picker.png');
+const toolHistoryScreenshotPath = path.join(projectDir, 'artifacts', 'ui-tool-history.png');
 const siteScreenshotPath = path.join(projectDir, 'artifacts', 'ui-site-workbench.png');
 const siteMissavScreenshotPath = path.join(projectDir, 'artifacts', 'ui-site-workbench-missav.png');
 const syncScreenshotPath = path.join(projectDir, 'artifacts', 'ui-raindrop-sync.png');
@@ -28,6 +29,7 @@ const databaseEditorScreenshotPath = path.join(projectDir, 'artifacts', 'ui-data
 const mobileScreenshotPath = path.join(projectDir, 'artifacts', 'ui-pipeline-mobile.png');
 const mobileProcessScreenshotPath = path.join(projectDir, 'artifacts', 'ui-site-workbench-mobile.png');
 const mobileSyncScreenshotPath = path.join(projectDir, 'artifacts', 'ui-raindrop-sync-mobile.png');
+const mobileHistoryScreenshotPath = path.join(projectDir, 'artifacts', 'ui-tool-history-mobile.png');
 let activeFavoriteCalls = 0;
 let maxActiveFavoriteCalls = 0;
 let active123AvLookupCalls = 0;
@@ -39,10 +41,11 @@ const favoriteAttemptsByCode = new Map();
 const autoFavoriteStarts = [];
 const raindropRemoteByUrl = new Map();
 raindropRemoteByUrl.set('https://missav.ai/cn/abf-354', 4321);
+const raindropRemoteItems = new Map();
 let nextRaindropId = 5000;
 let multiImportDialogRequested = false;
 
-fs.writeFileSync(multiImportHtmlPath, '<html><body><p>ABF-354</p><a href="https://missav.ai/cn/gvh-842">GVH-842</a></body></html>', 'utf8');
+fs.writeFileSync(multiImportHtmlPath, '<html><body><p>ABF-354</p><a href="https://missav.ai/dm15/gvh-842-uncensored-leak">GVH-842</a></body></html>', 'utf8');
 fs.writeFileSync(multiImportTextPath, 'SSIS-469\nABF-354\n', 'utf8');
 
 // The Codex Windows sandbox cannot create Electron's sandboxed GPU/cache child
@@ -91,6 +94,14 @@ ipcMain.handle('telegram:status', () => ({
   accountKey: '',
   accountLabel: '',
   error: '',
+}));
+ipcMain.handle('telegram:network-config', () => ({ mode: 'auto', host: '127.0.0.1', port: 7890 }));
+ipcMain.handle('telegram:network-save', (_event, value = {}) => ({ mode: value.mode || 'auto', host: value.host || '127.0.0.1', port: Number(value.port || 7890) }));
+ipcMain.handle('telegram:network-test', (_event, value = {}) => ({
+  ok: true,
+  config: { mode: value.mode || 'auto', host: value.host || '127.0.0.1', port: Number(value.port || 7890) },
+  transport: 'UI 模拟通道',
+  attempted: ['UI 模拟通道'],
 }));
 ipcMain.handle('logs:append', () => true);
 ipcMain.handle('logs:readRecent', () => '');
@@ -268,7 +279,97 @@ ipcMain.handle('raindrop:upsert', (_event, options) => {
   const existing = Number(options?.remoteId) || 0;
   const id = existing || nextRaindropId++;
   raindropRemoteByUrl.set(options.payload.link, id);
+  raindropRemoteItems.set(id, {
+    id,
+    link: options.payload.link,
+    title: options.payload.title,
+    tags: options.payload.tags || [],
+    excerpt: options.payload.excerpt || '',
+    note: options.payload.note || '',
+    cover: options.payload.cover || '',
+    created: '2026-07-25T00:00:00.000Z',
+    lastUpdate: '2026-07-25T01:00:00.000Z',
+    collectionId: Number(options.payload.collection?.$id ?? -1),
+    type: options.payload.type || 'video',
+  });
   return { action: existing ? 'updated' : 'created', item: { id, link: options.payload.link, title: options.payload.title }, rate: { limit: 120, remaining: 100 } };
+});
+ipcMain.handle('raindrop:scan-collections', (_event, options = {}) => {
+  const selected = new Set((options.collectionIds || []).map(Number));
+  const items = [...raindropRemoteItems.values()].filter(item => selected.has(Number(item.collectionId)));
+  items.push({
+    id: 7991,
+    link: 'https://missav.ai/cn/ipx-777',
+    title: 'IPX-777',
+    tags: ['Remote Actress', '剧情'],
+    excerpt: 'Raindrop Pull smoke item',
+    note: '',
+    cover: '',
+    created: '2026-07-25T00:00:00.000Z',
+    lastUpdate: '2026-07-25T02:00:00.000Z',
+    collectionId: 21,
+    type: 'video',
+  });
+  items.push({
+    id: 7992,
+    link: 'https://example.com/not-missav',
+    title: 'Other bookmark',
+    tags: [],
+    excerpt: '',
+    note: '',
+    cover: '',
+    created: '',
+    lastUpdate: '',
+    collectionId: 22,
+    type: 'link',
+  });
+  return { items, collectionIds: [...selected], pages: selected.size, rate: { limit: 120, remaining: 100 } };
+});
+ipcMain.handle('raindrop:scan-account', () => ({
+  items: [...raindropRemoteItems.values(), {
+    id: 4321,
+    link: 'https://missav.ai/cn/abf-354',
+    title: 'ABF-354 existing outside selected scope',
+    tags: ['Existing'],
+    excerpt: '',
+    note: '',
+    cover: '',
+    created: '2026-07-24T00:00:00.000Z',
+    lastUpdate: '2026-07-24T02:00:00.000Z',
+    collectionId: 10,
+    type: 'video',
+  }, {
+    id: 7991,
+    link: 'https://missav.ai/cn/ipx-777',
+    title: 'IPX-777',
+    tags: ['Remote Actress', '剧情'],
+    excerpt: 'Raindrop Pull smoke item',
+    note: '',
+    cover: '',
+    created: '2026-07-25T00:00:00.000Z',
+    lastUpdate: '2026-07-25T02:00:00.000Z',
+    collectionId: 21,
+    type: 'video',
+  }, {
+    id: 7992,
+    link: 'https://example.com/not-missav',
+    title: 'Other bookmark',
+    tags: [],
+    excerpt: '',
+    note: '',
+    cover: '',
+    created: '',
+    lastUpdate: '',
+    collectionId: 22,
+    type: 'link',
+  }],
+  collectionId: 0,
+  pageCount: 1,
+  rate: { limit: 120, remaining: 100 },
+}));
+ipcMain.handle('raindrop:get-item', (_event, remoteId) => {
+  const item = raindropRemoteItems.get(Number(remoteId));
+  return item ? { found: true, item } : { found: false, item: null };
 });
 async function run() {
   await app.whenReady();
@@ -335,6 +436,7 @@ async function run() {
       sourceLabel: DOM.inputSourceInfo?.dataset.sourceLabel || DOM.inputSourceInfo?.textContent || '',
       rawHasBothFiles: DOM.codeInput.value.includes('GVH-842') && DOM.codeInput.value.includes('SSIS-469'),
       filteredLines: DOM.filteredCodeOutput.value.split(/\\r?\\n/).filter(Boolean),
+      sourceUrls: Object.fromEntries(state.inputEntries.map(entry => [entry.code, entry.sourceUrl])),
     };
     clearAll();
     state.outputDirPath = ${JSON.stringify(outputDir)};
@@ -386,6 +488,13 @@ async function run() {
     switchPage('results');
     renderTable();
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const defaultTableHeight = DOM.resultTableWrapper?.clientHeight || 0;
+    const tableResize = getComputedStyle(DOM.resultTableWrapper).resize;
+    setResultTableExpanded(true);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const expandedTableHeight = DOM.resultTableWrapper?.clientHeight || 0;
+    const expandedTablePosition = getComputedStyle(DOM.resultTable.closest('.results-shell')).position;
+    setResultTableExpanded(false);
     return {
       uiRunId,
       resultCount: state.results.length,
@@ -410,6 +519,15 @@ async function run() {
       av123Succeeded: state.results.filter(row => resultTask(row, 'av123Lookup').status === 'succeeded').length,
       stageFilterOptions: DOM.resultStageFilter?.options.length || 0,
       deleteBatchVisible: Boolean(DOM.btnDeleteCurrentRun && !DOM.btnDeleteCurrentRun.hidden),
+      defaultTableHeight,
+      tableResize,
+      expandedTableHeight,
+      expandedTablePosition,
+      resultTableRestored: !state.resultTableExpanded,
+      manageDataButton: Boolean(document.querySelector('[data-page-panel="results"] [data-open-data-table="processing_run_items"]')),
+      resultCodeLines: DOM.resultCodeListOutput?.value.split(/\\r?\\n/).filter(Boolean).length || 0,
+      resultLinkLines: DOM.resultLinkListOutput?.value.split(/\\r?\\n/).filter(Boolean).length || 0,
+      resultNetworkLink: DOM.resultLinkListOutput?.value.includes('https://missav.ai/cn/royd-110') || false,
       multiImport,
     };
   })()`);
@@ -497,14 +615,61 @@ async function run() {
       urls: DOM.badnewsUrlsOutput.value.split(/\\r?\\n/).filter(Boolean),
       activeTool: state.activeTool,
     };
+    switchTool('haijiao');
+    state.telegram.groupSources = [
+      { sourceKey: 'api:group-one', sourceType: 'api_group', sourceLabel: '海角频道一', chatKey: '-10011', chatType: 'channel' },
+      { sourceKey: 'api:group-two', sourceType: 'api_group', sourceLabel: '海角群组二', chatKey: '-10012', chatType: 'supergroup' },
+    ];
+    refreshToolboxGroupOptions();
+    DOM.haijiaoGroupBinding._groupPicker.trigger.click();
+    DOM.haijiaoGroupBinding._groupPicker.list.querySelector('[data-group-source-key="api:group-one"]').click();
+    DOM.haijiaoGroupBinding._groupPicker.list.querySelector('[data-group-source-key="api:group-two"]').click();
+    DOM.haijiaoRawInput.value = 'https://www.haijiaolove.xyz/jdsp https://www.haijiaolove.xyz/hjsz/127766.html?from=tg https://haijiaolove.xyz/hjjd/58198.html#share https://haijiao.com/post/details?id=9 https://t.me/jisou';
+    runSimpleToolFilter('haijiao');
+    const storedHistory = await storeSimpleToolHistory('haijiao');
+    const haijiao = {
+      page: state.activePage,
+      urls: DOM.haijiaoUrlsOutput.value.split(/\\r?\\n/).filter(Boolean),
+      activeTool: state.activeTool,
+      groupMultiple: Boolean(DOM.haijiaoGroupBinding?.multiple),
+      pickerSelected: state.toolboxBindings.haijiao.length,
+      pickerNativeHidden: DOM.haijiaoGroupBinding.hidden,
+      pickerShells: document.querySelectorAll('.group-picker-shell').length,
+      storedHistoryId: storedHistory?.id || 0,
+      storedHistoryCount: api.dbGetToolHistories('haijiao').total,
+    };
+    await saveHaijiaoToolResults();
     switchTool('missav');
-    return { twitter, badnews, returnedTool: state.activeTool };
+    return { twitter, badnews, haijiao, returnedTool: state.activeTool };
   })()`);
-  await window.webContents.executeJavaScript(`switchTool('twitter')`);
+  await window.webContents.executeJavaScript(`switchTool('haijiao'); refreshToolboxGroupOptions(); {
+    const picker = DOM.haijiaoGroupBinding._groupPicker;
+    picker.popover.hidden = true;
+    picker.shell.classList.remove('is-open');
+    picker.trigger.setAttribute('aria-expanded', 'false');
+    picker.trigger.click();
+  }`);
   window.webContents.invalidate();
   await new Promise(resolve => setTimeout(resolve, 250));
   const toolboxImage = await window.webContents.capturePage();
   fs.writeFileSync(toolboxScreenshotPath, toolboxImage.toPNG());
+  const historyResult = await window.webContents.executeJavaScript(`(() => {
+    DOM.haijiaoGroupBinding._groupPicker.trigger.click();
+    switchPage('tool-history');
+    return {
+      activePage: state.activePage,
+      activePanels: [...document.querySelectorAll('.app-page.active')].map(panel => panel.dataset.pagePanel),
+      records: document.querySelectorAll('[data-tool-history-id]').length,
+      detailRows: document.querySelectorAll('.tool-history-table tbody tr').length,
+      actions: document.querySelectorAll('[data-tool-history-action]').length,
+      title: DOM.toolHistoryTitle.textContent,
+      workspaceVisible: !DOM.toolWorkspaceBar.hidden,
+    };
+  })()`);
+  window.webContents.invalidate();
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const toolHistoryImage = await window.webContents.capturePage();
+  fs.writeFileSync(toolHistoryScreenshotPath, toolHistoryImage.toPNG());
   await window.webContents.executeJavaScript(`switchTool('missav')`);
   const sitesResult = await window.webContents.executeJavaScript(`(async () => {
     switchPage('sites');
@@ -728,43 +893,97 @@ async function run() {
     switchPage('sync');
     await refreshRaindropSyncPage();
     await testRaindropAccount({ quiet: true });
-    state.raindropSync.runId = Number(state.preparedRunId);
-    DOM.raindropBatchSelect.value = String(state.preparedRunId);
-    state.raindropSync.collectionId = 11;
-    DOM.raindropCollectionSelect.value = '11';
     await buildRaindropSyncPlan({ checkRemote: true });
     const preview = {
       create: state.raindropSync.plan.filter(row => row.action === 'create').length,
       update: state.raindropSync.plan.filter(row => row.action === 'update').length,
       skip: state.raindropSync.plan.filter(row => row.action === 'skip').length,
+      existsBoth: state.raindropSync.plan.filter(row => row.action === 'exists_both').length,
+      existsBothCollections: state.raindropSync.plan.filter(row => row.action === 'exists_both').map(row => row.collectionLabel),
       error: state.raindropSync.plan.filter(row => row.action === 'error').length,
     };
     const originalConfirm = window.confirm;
     window.confirm = () => true;
     await startRaindropSync();
     window.confirm = originalConfirm;
-    const run = api.dbGetRun(state.preparedRunId);
+    const pushResult = {
+      preview,
+      permanentStatuses: state.raindropSync.plan.map(row => api.dbFindCode(row.code).raindropStatus),
+      remoteRecords: state.raindropSync.plan.map(row => api.dbGetRemoteSyncRecord('raindrop', row.code)).filter(Boolean).length,
+      finalActions: state.raindropSync.plan.map(row => row.action),
+      routingTargets: [...new Set(state.raindropSync.plan.map(row => row.collectionLabel))],
+      progress: DOM.raindropProgressPercent?.textContent,
+      startDisabled: DOM.btnStartRaindropSync?.disabled,
+    };
+
+    DOM.raindropModeSelect.value = 'pull';
+    selectRaindropSyncMode();
+    state.raindropSync.selectedCollectionIds = new Set([21, 22]);
+    persistRaindropSyncSettings();
+    renderRaindropCollectionPicker();
+    await buildRaindropSyncPlan({ checkRemote: true });
+    const pullPreview = {
+      create: state.raindropSync.plan.filter(row => row.action === 'pull_create').length,
+      update: state.raindropSync.plan.filter(row => row.action === 'pull_update').length,
+      skip: state.raindropSync.plan.filter(row => row.action === 'skip').length,
+      ignored: state.raindropSync.plan.filter(row => row.action === 'ignore').length,
+    };
+    window.confirm = () => true;
+    await startRaindropSync();
+    window.confirm = originalConfirm;
+    const pulledCode = api.dbFindCode('IPX-777');
+
+    DOM.raindropModeSelect.value = 'bidirectional';
+    selectRaindropSyncMode();
+    await buildRaindropSyncPlan({ checkRemote: true });
+    const bidirectionalPreview = {
+      conflicts: state.raindropSync.plan.filter(row => row.action === 'conflict').length,
+      skip: state.raindropSync.plan.filter(row => row.action === 'skip').length,
+      existsBoth: state.raindropSync.plan.filter(row => row.action === 'exists_both').length,
+      ignored: state.raindropSync.plan.filter(row => row.action === 'ignore').length,
+    };
     const defaultPreviewHeight = document.querySelector('.raindrop-preview-table-wrap')?.getBoundingClientRect().height || 0;
     setRaindropPreviewExpanded(true);
     const expandedPosition = getComputedStyle(DOM.raindropPreviewPanel).position;
     const expandedPreviewHeight = document.querySelector('.raindrop-preview-table-wrap')?.getBoundingClientRect().height || 0;
     setRaindropPreviewExpanded(false);
+    const syncPage = document.querySelector('.app-page[data-page-panel="sync"]');
+    const syncScrollHeight = syncPage?.scrollHeight || 0;
+    const syncClientHeight = syncPage?.clientHeight || 0;
+    if (syncPage) syncPage.scrollTop = syncScrollHeight;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const syncMaxScrollTop = syncPage?.scrollTop || 0;
+    const syncReachedBottom = !syncPage || Math.abs(syncMaxScrollTop + syncClientHeight - syncScrollHeight) <= 2;
+    if (syncPage) syncPage.scrollTop = 0;
     return {
       activePage: state.activePage,
       activePanels: [...document.querySelectorAll('.app-page.active')].map(panel => panel.dataset.pagePanel),
       accountLabel: state.raindropSync.auth.account?.label,
       collectionId: state.raindropSync.collectionId,
       collectionCount: state.raindropSync.collections.length,
-      preview,
-      taskStatuses: state.raindropSync.plan.map(row => run.items.find(item => item.position === row.position)?.tasks.raindropSync.status),
-      remoteRecords: state.raindropSync.plan.map(row => api.dbGetRemoteSyncRecord('raindrop', row.code)).filter(Boolean).length,
-      finalActions: state.raindropSync.plan.map(row => row.action),
-      progress: DOM.raindropProgressPercent?.textContent,
-      startDisabled: DOM.btnStartRaindropSync?.disabled,
+      scope: state.raindropSync.scope,
+      globalScopeOptions: DOM.raindropBatchSelect?.options.length || 0,
+      manualTargetControl: Boolean(DOM.raindropManualTarget),
+      csvExportControl: Boolean(DOM.btnExportRaindropCsv),
+      modeOptions: [...DOM.raindropModeSelect.options].map(option => option.value),
+      selectedCollections: [...state.raindropSync.selectedCollectionIds],
+      collectionPickerRows: DOM.raindropCollectionPicker?.querySelectorAll('[data-raindrop-collection-id]').length || 0,
+      pushResult,
+      pullPreview,
+      pullCreated: pulledCode.found && pulledCode.raindropRemoteId === '7991',
+      bidirectionalPreview,
+      failedPanelHidden: DOM.raindropFailedPanel?.hidden === true,
       defaultPreviewHeight,
       expandedPosition,
       expandedPreviewHeight,
       previewRestored: !state.raindropSync.previewExpanded && !document.body.classList.contains('raindrop-preview-expanded'),
+      syncScrollHeight,
+      syncClientHeight,
+      syncMaxScrollTop,
+      syncReachedBottom,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      documentClientWidth: document.documentElement.clientWidth,
+      documentScrollLeft: document.documentElement.scrollLeft,
       tokenType: DOM.raindropTokenInput?.type,
       tokenValue: DOM.raindropTokenInput?.value,
     };
@@ -840,6 +1059,25 @@ async function run() {
   await new Promise(resolve => setTimeout(resolve, 300));
   const batch123AvImage = await window.webContents.capturePage();
   fs.writeFileSync(batch123AvScreenshotPath, batch123AvImage.toPNG());
+  const avHistoryResult = await window.webContents.executeJavaScript(`(() => {
+    switchTool('missav');
+    switchPage('tool-history');
+    const missav = {
+      title: DOM.toolHistoryTitle.textContent,
+      records: document.querySelectorAll('[data-tool-history-id]').length,
+      detailRows: document.querySelectorAll('.tool-history-table tbody tr').length,
+      primaryTitle: document.querySelector('.tool-history-table thead th:nth-child(2)')?.textContent || '',
+    };
+    switchTool('av123');
+    switchPage('tool-history');
+    const av123History = {
+      title: DOM.toolHistoryTitle.textContent,
+      records: document.querySelectorAll('[data-tool-history-id]').length,
+      detailRows: document.querySelectorAll('.tool-history-table tbody tr').length,
+      primaryTitle: document.querySelector('.tool-history-table thead th:nth-child(2)')?.textContent || '',
+    };
+    return { missav, av123: av123History };
+  })()`);
   const databaseMaintenanceResult = await window.webContents.executeJavaScript(`(async () => {
     switchPage('library');
     switchLibraryTab('backup');
@@ -861,6 +1099,7 @@ async function run() {
     switchLibraryTab('raw');
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const options = [...document.querySelectorAll('[data-raw-table-select] option')].map(option => option.value);
+    const managedTables = api.dbGetEditableTables().filter(table => !['bookmarks', 'bookmark_collections'].includes(table.name));
     return {
       activeLibraryTab: state.libraryTab,
       options,
@@ -869,6 +1108,10 @@ async function run() {
       copyButton: Boolean(document.querySelector('[data-action="raw-copy-scope"]')),
       exportButton: Boolean(document.querySelector('[data-action="raw-export-scope"]')),
       selectColumn: Boolean(document.querySelector('.raw-select-column')),
+      topLevelTab: Boolean(document.querySelector('.library-tabs [data-library-tab="raw"]')),
+      addButtonEnabled: !document.querySelector('[data-action="raw-add-row"]')?.disabled,
+      completeInsertCoverage: managedTables.every(table => table.insertable.length > 0),
+      directManagementButtons: document.querySelectorAll('[data-open-data-table]').length,
     };
   })()`);
   window.webContents.invalidate();
@@ -876,6 +1119,24 @@ async function run() {
   const databaseEditorImage = await window.webContents.capturePage();
   fs.writeFileSync(databaseEditorScreenshotPath, databaseEditorImage.toPNG());
   window.setSize(430, 900);
+  const mobileHistoryResult = await window.webContents.executeJavaScript(`(async () => {
+    switchTool('haijiao');
+    switchPage('tool-history');
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const layout = document.querySelector('.tool-history-layout');
+    const detail = document.querySelector('.tool-history-detail');
+    return {
+      pageScrollWidth: document.documentElement.scrollWidth,
+      layoutColumns: getComputedStyle(layout).gridTemplateColumns.split(' ').length,
+      detailWidth: detail?.getBoundingClientRect().width || 0,
+      actions: document.querySelectorAll('[data-tool-history-action]').length,
+      recordRows: document.querySelectorAll('[data-tool-history-id]').length,
+    };
+  })()`);
+  window.webContents.invalidate();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const mobileHistoryImage = await window.webContents.capturePage();
+  fs.writeFileSync(mobileHistoryScreenshotPath, mobileHistoryImage.toPNG());
   const mobileResult = await window.webContents.executeJavaScript(`(async () => {
     switchPage('results');
     switchResultWorkspace('av123');
@@ -938,10 +1199,10 @@ async function run() {
   const mobileSyncImage = await window.webContents.capturePage();
   fs.writeFileSync(mobileSyncScreenshotPath, mobileSyncImage.toPNG());
   const exportedFiles = fs.readdirSync(outputDir, { recursive: true }).map(String);
-  if (homeResult.activePage !== 'home' || homeResult.navButtons !== 5 || homeResult.sidebarToolButtons !== 0 || homeResult.toolCards !== 4 || homeResult.categories !== 2 || homeResult.toolCount !== '4' || homeResult.workspaceHidden !== true || homeResult.taskCards !== 5 || homeResult.taskPage !== 'tasks' || homeResult.databaseLocationButtons !== 2 || !homeResult.databaseLocationShown) {
+  if (homeResult.activePage !== 'home' || homeResult.navButtons !== 5 || homeResult.sidebarToolButtons !== 0 || homeResult.toolCards !== 5 || homeResult.categories !== 2 || homeResult.toolCount !== '5' || homeResult.workspaceHidden !== true || homeResult.taskCards !== 5 || homeResult.taskPage !== 'tasks' || homeResult.databaseLocationButtons !== 2 || !homeResult.databaseLocationShown) {
     throw new Error(`Tool home assertion failed: ${JSON.stringify(homeResult)}`);
   }
-  if (result.resultCount !== 6 || result.selectedCount !== 2 || result.retriedStatuses.some(status => status !== 'ok') || result.remainingNetwork !== 1 || result.retryButtons !== 1 || result.tagFilteredRows !== 4 || result.firstSortedCode !== 'SSIS-469' || result.versionBadge !== `v${packageInfo.version}` || result.activePage !== 'results' || !result.exportButtons || !result.deleteBatchVisible || result.taskColumns !== 2 || result.stageFilterOptions !== 2 || result.workspaceButtons !== 2 || result.activeWorkspace !== 'missav' || result.resultTitle !== 'MissAV 处理结果' || !result.tagFilterVisible || result.av123Succeeded !== 3 || !multiImportDialogRequested || !result.multiImport.rawHasBothFiles || result.multiImport.sourceLabel !== '2 个文件' || JSON.stringify(result.multiImport.codes) !== JSON.stringify(['ABF-354', 'GVH-842', 'SSIS-469']) || JSON.stringify(result.multiImport.filteredLines) !== JSON.stringify(result.multiImport.codes) || JSON.stringify(result.firstTasks) !== JSON.stringify({ missavLookup: 'succeeded', raindropSync: 'ready', av123Lookup: 'succeeded', av123Favorite: 'ready' })) {
+  if (result.resultCount !== 6 || result.selectedCount !== 2 || result.retriedStatuses.some(status => status !== 'ok') || result.remainingNetwork !== 1 || result.retryButtons !== 1 || result.tagFilteredRows !== 4 || result.firstSortedCode !== 'SSIS-469' || result.versionBadge !== `v${packageInfo.version}` || result.activePage !== 'results' || !result.exportButtons || !result.deleteBatchVisible || result.taskColumns !== 2 || result.stageFilterOptions !== 2 || result.workspaceButtons !== 2 || result.activeWorkspace !== 'missav' || result.resultTitle !== 'MissAV 处理结果' || !result.tagFilterVisible || result.av123Succeeded !== 3 || result.defaultTableHeight < 360 || result.tableResize !== 'vertical' || result.expandedTableHeight <= result.defaultTableHeight || result.expandedTablePosition !== 'fixed' || !result.resultTableRestored || !result.manageDataButton || result.resultCodeLines !== 6 || result.resultLinkLines !== 6 || !result.resultNetworkLink || !multiImportDialogRequested || !result.multiImport.rawHasBothFiles || result.multiImport.sourceLabel !== '2 个文件' || result.multiImport.sourceUrls['GVH-842'] !== 'https://missav.ai/dm15/gvh-842-uncensored-leak' || JSON.stringify(result.multiImport.codes) !== JSON.stringify(['ABF-354', 'GVH-842', 'SSIS-469']) || JSON.stringify(result.multiImport.filteredLines) !== JSON.stringify(result.multiImport.codes) || JSON.stringify(result.firstTasks) !== JSON.stringify({ missavLookup: 'succeeded', raindropSync: 'ready', av123Lookup: 'succeeded', av123Favorite: 'ready' })) {
     throw new Error(`UI smoke assertion failed: ${JSON.stringify(result)}`);
   }
   if (av123Result.activeWorkspace !== 'av123' || av123Result.resultTitle !== '123AV 处理结果' || av123Result.taskColumns !== 2 || av123Result.stageFilterOptions !== 2 || av123Result.sortValues.length !== 5 || av123Result.sortValues.some(value => value.startsWith('tag_')) || av123Result.missavStatusAfterSwitch !== 'all' || av123Result.restoredAv123Status !== 'not_found' || av123Result.actressColumns !== 0 || av123Result.tagFilterVisible || av123Result.exportVisible || av123Result.accountStatus !== 'ready' || !av123Result.accountPanelVisible || av123Result.accountButtons !== 3 || av123Result.favoriteControls !== 4 || av123Result.favoriteStatuses.some(status => status !== 'succeeded') || av123Result.favoriteConcurrency !== 1 || maxActiveFavoriteCalls !== 1 || favoriteWorkerIds.size !== 1 || !favoriteWorkerIds.has(0) || favoriteExecutors.size !== 1 || !favoriteExecutors.has('chrome')) {
@@ -950,8 +1211,11 @@ async function run() {
   if (processResult.activePage !== 'process' || processResult.activePanels.join(',') !== 'process' || processResult.siteProvidersInsideInput !== 0 || !processResult.hasOpenSitesButton || processResult.navButtons !== 5 || processResult.activeNav !== 'process' || processResult.activeTool !== 'missav' || !processResult.stageVisible) {
     throw new Error(`Input page separation assertion failed: ${JSON.stringify(processResult)}`);
   }
-  if (JSON.stringify(toolboxResult.twitter.names) !== JSON.stringify(['KeChunYaoll', 'second_user']) || toolboxResult.twitter.urls.length !== 2 || toolboxResult.twitter.page !== 'twitter' || JSON.stringify(toolboxResult.badnews.urls) !== JSON.stringify(['https://bad.news/t/123']) || toolboxResult.badnews.page !== 'badnews' || toolboxResult.returnedTool !== 'missav') {
+  if (JSON.stringify(toolboxResult.twitter.names) !== JSON.stringify(['KeChunYaoll', 'second_user']) || toolboxResult.twitter.urls.length !== 2 || toolboxResult.twitter.page !== 'twitter' || JSON.stringify(toolboxResult.badnews.urls) !== JSON.stringify(['https://bad.news/t/123']) || toolboxResult.badnews.page !== 'badnews' || JSON.stringify(toolboxResult.haijiao.urls) !== JSON.stringify(['https://www.haijiaolove.xyz/hjsz/127766.html', 'https://www.haijiaolove.xyz/hjjd/58198.html']) || toolboxResult.haijiao.page !== 'haijiao' || !toolboxResult.haijiao.groupMultiple || toolboxResult.haijiao.pickerSelected !== 2 || !toolboxResult.haijiao.pickerNativeHidden || toolboxResult.haijiao.pickerShells !== 4 || !toolboxResult.haijiao.storedHistoryId || toolboxResult.haijiao.storedHistoryCount !== 1 || toolboxResult.returnedTool !== 'missav') {
     throw new Error(`Toolbox UI assertion failed: ${JSON.stringify(toolboxResult)}`);
+  }
+  if (historyResult.activePage !== 'tool-history' || historyResult.activePanels.join(',') !== 'tool-history' || historyResult.records !== 1 || historyResult.detailRows !== 2 || historyResult.actions !== 4 || !historyResult.title.includes('海角') || !historyResult.workspaceVisible) {
+    throw new Error(`Tool history assertion failed: ${JSON.stringify(historyResult)}`);
   }
   if (sitesResult.activePage !== 'sites' || sitesResult.activePanels.join(',') !== 'sites' || sitesResult.providerCards !== 2 || sitesResult.catalogButtons !== 3 || sitesResult.visibleWorkspacePanels !== 1 || sitesResult.activeSiteWorkspace !== 'av123' || sitesResult.visibleProviders.join(',') !== 'av123' || sitesResult.missavVisibleProviders.join(',') !== 'missav' || sitesResult.branchCards !== 2 || sitesResult.startButtons !== 2 || sitesResult.visibleStopButtons !== 0 || !sitesResult.resumableDeleteVisible || sitesResult.speedPanels !== 2 || sitesResult.missavSpeed !== 'fast' || sitesResult.av123Speed !== 'extreme' || sitesResult.missavSpeedPolicy !== 'balanced' || sitesResult.av123SpeedPolicy !== 'staged' || sitesResult.missavRateMode !== 'adaptive' || sitesResult.missavRateCap !== 24 || sitesResult.activeMissavRateCap !== 24 || sitesResult.missavRateSliderMax !== 32 || sitesResult.av123RateMode !== 'adaptive' || sitesResult.av123RateCap !== 24 || sitesResult.activeRateCap !== 24 || sitesResult.rateSliderMax !== 32 || sitesResult.rateControlCount !== 2 || sitesResult.siteTabButtons !== 2 || sitesResult.visibleSiteTabPanels !== 1 || sitesResult.activeSiteTab !== 'favorite' || !sitesResult.autoFavoriteToggle || !sitesResult.favoriteRuntimePanel || !sitesResult.independentFavoriteStop || sitesResult.favoriteMethodButtons !== 3 || sitesResult.favoriteMethod !== 'chrome' || sitesResult.favoriteSpeedButtons !== 1 || sitesResult.favoriteConcurrency !== 1 || sitesResult.activeFavoriteConcurrency !== 1 || !sitesResult.chromeBridgeConnected || !sitesResult.chromeBridgePanel || sitesResult.chromePrepareButtons !== 2 || sitesResult.activeMissavSpeed !== 'fast' || sitesResult.activeAv123Speed !== 'extreme' || !sitesResult.missavSpeedDescription.includes('最高 24.0') || !sitesResult.missavSpeedDescription.includes('连接重置') || !sitesResult.missavSpeedDescription.includes('最低保留一半') || !sitesResult.av123SpeedDescription.includes('最高 24.0') || !sitesResult.av123SpeedDescription.includes('HTTP 429') || !sitesResult.missavSummary.includes('完成') || !sitesResult.av123Summary.includes('完成') || !sitesResult.favoriteSpeedDescription.includes('同一网站') || sitesResult.appearanceTheme !== 'mint' || sitesResult.appearancePack !== 'none') {
     throw new Error(`Site workbench assertion failed: ${JSON.stringify(sitesResult)}`);
@@ -960,10 +1224,10 @@ async function run() {
   if (autoFavoriteResult.lookupStatuses.some(status => status !== 'succeeded') || autoFavoriteResult.favoriteStatuses.some(status => status !== 'succeeded') || !autoFavoriteResult.autoFavorite || autoFavoriteResult.favoriteConcurrency !== 1 || !autoFavoriteResult.runtimeAutomatic || autoFavoriteResult.runtimeRunning || autoFavoriteResult.runtimeCompleted !== 4 || autoFavoriteResult.runtimeTotal !== 4 || autoFavoriteResult.runtimeSucceeded !== 4 || autoFavoriteResult.runtimeAttempts !== 5 || autoFavoriteResult.runtimeRetryScheduled !== 1 || autoFavoriteResult.runtimeRoundsStarted !== 2 || !autoFavoriteResult.queryStillIdleAfterFinish || autoFavoriteIntervals.length !== 4 || Math.min(...autoFavoriteIntervals) >= 1000 || !autoFavoriteResult.crossSite.favoriteRunningBeforeMissav || !missavFavoriteOverlap || lookupFavoriteOverlap || autoFavoriteResult.crossSite.missavStatuses.some(status => status !== 'succeeded') || autoFavoriteResult.rateLimitRecovery.completed !== 1 || autoFavoriteResult.rateLimitRecovery.succeeded !== 1 || autoFavoriteResult.rateLimitRecovery.attempts !== 2 || autoFavoriteResult.rateLimitRecovery.rateLimitEvents !== 1 || autoFavoriteResult.rateLimitRecovery.finalGapMs !== 0 || autoFavoriteResult.rateLimitRecovery.elapsedMs < 900 || autoFavoriteResult.rateLimitRecovery.finalStatus !== 'succeeded' || autoFavoriteResult.independentStop.lookupRunningBeforeFavoriteStop || autoFavoriteResult.independentStop.lookupContinuedAfterFavoriteStop || autoFavoriteResult.independentStop.lookupStatuses.some(status => status !== 'succeeded') || autoFavoriteResult.independentStop.favoriteStatuses.some(status => !['succeeded', 'ready'].includes(status)) || !autoFavoriteResult.independentStop.favoriteStatuses.includes('ready') || !autoFavoriteResult.independentStop.favoriteStopRequested || autoFavoriteResult.independentStop.favoriteCompleted < 1 || !autoFavoriteResult.independentStop.lookupFinishedNormally) {
     throw new Error(`123AV automatic favorite assertion failed: ${JSON.stringify({ autoFavoriteResult, lookupFavoriteOverlap })}`);
   }
-  if (syncResult.activePage !== 'sync' || syncResult.activePanels.join(',') !== 'sync' || syncResult.accountLabel !== 'ui-raindrop-account' || syncResult.collectionId !== 11 || syncResult.collectionCount !== 2 || syncResult.preview.create < 1 || syncResult.preview.update !== 1 || syncResult.preview.error !== 0 || syncResult.taskStatuses.some(status => status !== 'succeeded') || syncResult.remoteRecords !== syncResult.taskStatuses.length || syncResult.finalActions.some(action => !['skip', 'error'].includes(action)) || syncResult.progress !== '100%' || !syncResult.startDisabled || syncResult.defaultPreviewHeight < 400 || syncResult.expandedPosition !== 'fixed' || syncResult.expandedPreviewHeight <= syncResult.defaultPreviewHeight || !syncResult.previewRestored || syncResult.tokenType !== 'password' || syncResult.tokenValue !== '') {
+  if (syncResult.activePage !== 'sync' || syncResult.activePanels.join(',') !== 'sync' || syncResult.accountLabel !== 'ui-raindrop-account' || syncResult.collectionCount !== 4 || syncResult.scope !== 'pending' || syncResult.globalScopeOptions !== 3 || !syncResult.manualTargetControl || !syncResult.csvExportControl || JSON.stringify(syncResult.modeOptions) !== JSON.stringify(['pull', 'push', 'bidirectional']) || syncResult.selectedCollections.join(',') !== '21,22' || syncResult.collectionPickerRows < 4 || syncResult.pushResult.preview.create < 1 || syncResult.pushResult.preview.update !== 0 || syncResult.pushResult.preview.existsBoth !== 1 || !syncResult.pushResult.preview.existsBothCollections.includes('JAV') || syncResult.pushResult.preview.error !== 0 || syncResult.pushResult.permanentStatuses.filter(status => status === 'ready').length !== syncResult.pushResult.preview.existsBoth || syncResult.pushResult.permanentStatuses.some(status => !['succeeded', 'ready'].includes(status)) || syncResult.pushResult.remoteRecords !== syncResult.pushResult.permanentStatuses.length - syncResult.pushResult.preview.existsBoth || syncResult.pushResult.finalActions.some(action => !['skip', 'exists_both', 'error'].includes(action)) || syncResult.pushResult.routingTargets.some(target => !['missav1', 'missav2', 'JAV'].includes(target)) || syncResult.pushResult.progress !== '100%' || !syncResult.pushResult.startDisabled || syncResult.pullPreview.create !== 1 || syncResult.pullPreview.update !== 0 || syncResult.pullPreview.ignored !== 1 || !syncResult.pullCreated || syncResult.bidirectionalPreview.conflicts !== 0 || syncResult.bidirectionalPreview.existsBoth < 1 || syncResult.bidirectionalPreview.ignored !== 1 || !syncResult.failedPanelHidden || syncResult.defaultPreviewHeight < 400 || syncResult.expandedPosition !== 'fixed' || syncResult.expandedPreviewHeight <= syncResult.defaultPreviewHeight || !syncResult.previewRestored || syncResult.syncScrollHeight <= syncResult.syncClientHeight || syncResult.syncMaxScrollTop <= 0 || !syncResult.syncReachedBottom || syncResult.documentScrollWidth > syncResult.documentClientWidth || syncResult.documentScrollLeft !== 0 || syncResult.tokenType !== 'password' || syncResult.tokenValue !== '') {
     throw new Error(`Raindrop sync UI assertion failed: ${JSON.stringify(syncResult)}`);
   }
-  if (!exportedFiles.some(file => file.endsWith('标签导出索引.csv')) || !exportedFiles.some(file => file.endsWith('剧情.html'))) {
+  if (!exportedFiles.some(file => file.endsWith('标签导出索引.csv')) || !exportedFiles.some(file => file.endsWith('剧情.html')) || !exportedFiles.some(file => file.endsWith('_海角帖子链接.txt'))) {
     throw new Error(`Tag export assertion failed: ${JSON.stringify(exportedFiles)}`);
   }
   if (batchResult.activePage !== 'library' || batchResult.activeLibraryTab !== 'runs' || batchResult.activePanels.join(',') !== 'library' || batchResult.runStatus !== 'paused' || batchResult.pending !== 1 || batchResult.completed !== 1 || batchResult.listRows < 2 || batchResult.itemRows !== 2 || !batchResult.hasResume || !batchResult.hasSource || !batchResult.hasBatchTab || batchResult.pipelineVersion !== 2 || batchResult.pipelineState !== 'pending' || batchResult.pipelineTaskCount !== 8 || batchResult.pipelineCompleted !== 1 || batchResult.stageCards !== 4 || batchResult.branchPanels !== 2 || batchResult.branchButtons !== 2 || batchResult.deleteButtons !== 1 || batchResult.activeWorkspace !== 'missav' || batchResult.taskColumns !== 2 || JSON.stringify(batchResult.firstTasks) !== JSON.stringify({ missavLookup: 'succeeded', raindropSync: 'ready', av123Lookup: 'queued', av123Favorite: 'blocked' })) {
@@ -972,14 +1236,20 @@ async function run() {
   if (batch123AvResult.activeWorkspace !== 'av123' || batch123AvResult.taskColumns !== 2 || batch123AvResult.tagColumns !== 0 || batch123AvResult.activeButton !== '123AV 明细') {
     throw new Error(`Batch 123AV workspace assertion failed: ${JSON.stringify(batch123AvResult)}`);
   }
-  if (databaseMaintenanceResult.activePage !== 'library' || databaseMaintenanceResult.activeLibraryTab !== 'backup' || !databaseMaintenanceResult.resetButton || !databaseMaintenanceResult.resetText.includes('Windows 安全存储') || databaseMaintenanceResult.backupButtons < 4 || databaseMaintenanceResult.inventoryRows <= 0) {
+  if (!avHistoryResult.missav.title.includes('MissAV') || avHistoryResult.missav.records < 1 || avHistoryResult.missav.detailRows < 1 || avHistoryResult.missav.primaryTitle !== '番号' || !avHistoryResult.av123.title.includes('123AV') || avHistoryResult.av123.records < 1 || avHistoryResult.av123.detailRows < 1 || avHistoryResult.av123.primaryTitle !== '番号') {
+    throw new Error(`AV common history assertion failed: ${JSON.stringify(avHistoryResult)}`);
+  }
+  if (databaseMaintenanceResult.activePage !== 'library' || databaseMaintenanceResult.activeLibraryTab !== 'backup' || !databaseMaintenanceResult.resetButton || !databaseMaintenanceResult.resetText.includes('五个工具的处理历史') || !databaseMaintenanceResult.resetText.includes('Windows 安全存储') || databaseMaintenanceResult.backupButtons < 4 || databaseMaintenanceResult.inventoryRows <= 0) {
     throw new Error(`Database maintenance UI assertion failed: ${JSON.stringify(databaseMaintenanceResult)}`);
   }
-  if (databaseEditorResult.activeLibraryTab !== 'raw' || !databaseEditorResult.options.includes('site_lookup_cache') || !databaseEditorResult.options.includes('remote_sync_records') || databaseEditorResult.grouped < 5 || !databaseEditorResult.bulkToolbar || !databaseEditorResult.copyButton || !databaseEditorResult.exportButton || !databaseEditorResult.selectColumn) {
+  if (databaseEditorResult.activeLibraryTab !== 'raw' || !databaseEditorResult.options.includes('site_lookup_cache') || !databaseEditorResult.options.includes('remote_sync_records') || !databaseEditorResult.options.includes('tool_history_runs') || !databaseEditorResult.options.includes('tool_history_items') || databaseEditorResult.grouped < 5 || !databaseEditorResult.bulkToolbar || !databaseEditorResult.copyButton || !databaseEditorResult.exportButton || !databaseEditorResult.selectColumn || !databaseEditorResult.topLevelTab || !databaseEditorResult.addButtonEnabled || !databaseEditorResult.completeInsertCoverage || databaseEditorResult.directManagementButtons < 5) {
     throw new Error(`Database editor UI assertion failed: ${JSON.stringify(databaseEditorResult)}`);
   }
   if (mobileResult.width > 440 || mobileResult.pageScrollWidth > mobileResult.width + 1 || mobileResult.wrapperScrollWidth <= mobileResult.wrapperClientWidth || mobileResult.wrapperHeight < 300 || mobileResult.taskColumns !== 2 || mobileResult.stageFilterWidth < 250 || mobileResult.searchWidth < 250) {
     throw new Error(`Mobile UI smoke assertion failed: ${JSON.stringify(mobileResult)}`);
+  }
+  if (mobileHistoryResult.pageScrollWidth > 431 || mobileHistoryResult.layoutColumns !== 1 || mobileHistoryResult.detailWidth < 340 || mobileHistoryResult.actions !== 4 || mobileHistoryResult.recordRows !== 1) {
+    throw new Error(`Mobile tool history assertion failed: ${JSON.stringify(mobileHistoryResult)}`);
   }
   if (mobileProcessResult.pageScrollWidth > 417 || mobileProcessResult.catalogButtons !== 3 || mobileProcessResult.visiblePanelCount !== 1 || mobileProcessResult.activeSiteWorkspace !== 'av123' || mobileProcessResult.visibleProviderWidth < 300 || mobileProcessResult.visibleStartButtonWidth < 250) {
     throw new Error(`Mobile process UI assertion failed: ${JSON.stringify(mobileProcessResult)}`);
@@ -987,7 +1257,7 @@ async function run() {
   if (mobileSyncResult.pageScrollWidth > 417 || mobileSyncResult.activePage !== 'sync' || mobileSyncResult.cardWidth < 340 || mobileSyncResult.metricColumns !== 2 || mobileSyncResult.previewScrollWidth <= mobileSyncResult.previewClientWidth) {
     throw new Error(`Mobile Raindrop sync UI assertion failed: ${JSON.stringify(mobileSyncResult)}`);
   }
-  process.stdout.write(JSON.stringify({ homeResult, result, av123Result, processResult, toolboxResult, sitesResult, autoFavoriteResult, lookupFavoriteOverlap, syncResult, batchResult, batch123AvResult, mobileResult, mobileProcessResult, mobileSyncResult, homeScreenshotPath, screenshotPath, av123ScreenshotPath, processScreenshotPath, toolboxScreenshotPath, siteScreenshotPath, siteMissavScreenshotPath, syncScreenshotPath, batchScreenshotPath, batch123AvScreenshotPath, mobileScreenshotPath, mobileProcessScreenshotPath, mobileSyncScreenshotPath, exportedFiles, scratchDir }, null, 2));
+  process.stdout.write(JSON.stringify({ homeResult, result, av123Result, processResult, toolboxResult, historyResult, sitesResult, autoFavoriteResult, lookupFavoriteOverlap, syncResult, batchResult, batch123AvResult, avHistoryResult, mobileHistoryResult, mobileResult, mobileProcessResult, mobileSyncResult, homeScreenshotPath, screenshotPath, av123ScreenshotPath, processScreenshotPath, toolboxScreenshotPath, toolHistoryScreenshotPath, siteScreenshotPath, siteMissavScreenshotPath, syncScreenshotPath, batchScreenshotPath, batch123AvScreenshotPath, mobileHistoryScreenshotPath, mobileScreenshotPath, mobileProcessScreenshotPath, mobileSyncScreenshotPath, exportedFiles, scratchDir }, null, 2));
   await window.close();
   coreService.close();
   app.quit();

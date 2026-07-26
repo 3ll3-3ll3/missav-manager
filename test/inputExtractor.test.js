@@ -1,7 +1,34 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseInputCodeList } = require('../src/inputExtractor');
+const { parseInputCodeList, parseInputEntries } = require('../src/inputExtractor');
+
+test('keeps an exact MissAV detail URL from imported HTML as the first source for its code', () => {
+  const html = `<a href="https://missav.ai/dm15/meyd-916-uncensored-leak">MEYD-916 完整影片</a>
+  <a href="https://example.com/advertisement/meyd-999">广告</a>`;
+  assert.deepEqual(parseInputEntries(html), [{
+    code: 'MEYD-916',
+    sourceUrl: 'https://missav.ai/dm15/meyd-916-uncensored-leak',
+  }]);
+});
+
+test('keeps codes and exact source URLs from the MissAV ws Telegram mirror', () => {
+  const html = `<a href="https://missav.ws/mihd-006?utm_source=telegram&utm_medium=message">MIHD-006</a>
+  <div class="status details">800×540, 161.2 KB</div>`;
+  assert.deepEqual(parseInputEntries(html), [{
+    code: 'MIHD-006',
+    sourceUrl: 'https://missav.ws/mihd-006?utm_source=telegram&utm_medium=message',
+  }]);
+});
+
+test('keeps a trusted MissAV URL when importing official Raindrop CSV', () => {
+  const csv = `id,title,note,excerpt,url,folder,tags,created,cover,highlights,favorite
+1,MEYD-916,,,https://missav.ai/dm15/meyd-916-uncensored-leak,missav2,,2026-07-25,,,false`;
+  assert.deepEqual(parseInputEntries(csv), [{
+    code: 'MEYD-916',
+    sourceUrl: 'https://missav.ai/dm15/meyd-916-uncensored-leak',
+  }]);
+});
 
 test('extracts Raindrop CSV codes from meaningful columns and trusted context only', () => {
   const csv = `id,title,note,excerpt,url,folder,tags,created,cover,highlights,favorite

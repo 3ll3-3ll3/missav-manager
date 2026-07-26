@@ -1,9 +1,11 @@
 const twitter = require('./twitter');
 const badnews = require('./badnews');
+const haijiao = require('./haijiao');
 
 const manifests = Object.freeze([
   twitter.manifest,
   badnews.manifest,
+  haijiao.manifest,
   Object.freeze({
     id: 'missav',
     label: 'MissAV',

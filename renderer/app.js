@@ -8,7 +8,8 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 const DOM = {};
 const api = window.electronAPI;
-const APP_VERSION = api.appVersion || '0.3.0';
+const APP_VERSION = api.appVersion || '0.4.0';
+const TELEGRAM_SOURCE_LIMIT = 100;
 const TOOL_MANIFESTS = Object.freeze(api.listTools?.() || []);
 const TOOL_BY_ID = new Map(TOOL_MANIFESTS.map(tool => [tool.id, tool]));
 const processingSpeed = window.ProcessingSpeed;
@@ -36,7 +37,11 @@ const AV123_APP_RECOVERY_DELAY_MS = 10000;
 const AV123_SITE_TAB_KEY = 'missav_manager_av123_site_tab';
 const SITE_WORKSPACE_KEY = 'missav_manager_site_workspace';
 const RAINDROP_COLLECTION_KEY = 'missav_manager_raindrop_collection';
+const RAINDROP_SYNC_MODE_KEY = 'missav_manager_raindrop_sync_mode';
+const RAINDROP_COLLECTION_SCOPE_KEY = 'missav_manager_raindrop_collection_scope';
+const RAINDROP_INCLUDE_NESTED_KEY = 'missav_manager_raindrop_include_nested';
 const TOOLBOX_BINDINGS_KEY = 'tg_content_toolbox_group_bindings';
+const TELEGRAM_MARK_READ_KEY = 'tg_content_toolbox_mark_read_after_sync';
 const APPEARANCE_KEY = 'missav_manager_appearance';
 const APPEARANCE_VERSION = 3;
 const CSV_RECENT_KEY = 'missav_manager_csv_recent';
@@ -65,6 +70,7 @@ window.addEventListener('unhandledrejection', event => {
 const state = {
   outputDirPath: '',
   inputCodes: [],
+  inputEntries: [],
   results: [],
   isProcessing: false,
   stopRequested: false,
@@ -123,11 +129,13 @@ const state = {
   activePage: 'home',
   activeTool: '',
   activeAvTool: 'missav',
-  toolboxBindings: { twitter: '', badnews: '', missav: '', av123: '' },
+  toolboxBindings: { twitter: [], badnews: [], haijiao: [], missav: [], av123: [] },
   toolbox: {
     twitter: { raw: '', messages: [], sourceLabel: '', results: [] },
     badnews: { raw: '', messages: [], sourceLabel: '', results: [] },
+    haijiao: { raw: '', messages: [], sourceLabel: '', results: [] },
   },
+  toolHistory: { rows: [], selectedId: null, selectedType: '', search: '', detail: null },
   avToolSessions: {
     missav: { raw: '', sourceLabel: '手动输入', preparedRunId: null, preparedInputSignature: '', timeStart: '', timeEnd: '' },
     av123: { raw: '', sourceLabel: '手动输入', preparedRunId: null, preparedInputSignature: '', timeStart: '', timeEnd: '' },
@@ -155,6 +163,7 @@ const state = {
   rawDbData: null,
   rawDbSelected: new Set(),
   rawDbSelectionAnchor: null,
+  resultTableExpanded: false,
   healthReport: null,
   backupRows: [],
   appearance: { theme: 'mint', visualPack: 'none', density: 'comfortable', bgImagePath: '', bgDim: 35, version: APPEARANCE_VERSION },
@@ -163,21 +172,29 @@ const state = {
     auth: { configured: false, encryptionAvailable: false, account: null },
     collections: [],
     collectionId: -1,
+    selectedCollectionIds: new Set(),
+    collectionSearch: '',
+    includeNested: false,
+    mode: 'push',
     routingCollections: { missav1: null, missav2: null },
-    runId: null,
+    scope: 'pending',
+    manualOverride: false,
     plan: [],
     running: false,
     stopRequested: false,
     previewExpanded: false,
     progress: { completed: 0, total: 0, errors: 0 },
+    failedRows: [],
   },
   telegram: {
     panel: 'bot',
+    network: { loaded: false, testing: false, mode: 'auto', host: '127.0.0.1', port: 7890, status: '尚未测试', transport: '' },
     bot: {
       auth: { status: 'disconnected', configured: false, connected: false, encryptionAvailable: false, accountKey: '', accountLabel: '', error: '' },
       running: false,
       stopRequested: false,
       groupsLoading: false,
+      groupsLoaded: false,
       availableGroups: [],
       selectedGroupKeys: new Set(),
       groupSources: [],
@@ -187,8 +204,10 @@ const state = {
     authEpoch: 0,
     authKind: '',
     running: false,
+    markReadAfterSync: false,
     stopRequested: false,
     groupsLoading: false,
+    groupsLoaded: false,
     availableGroups: [],
     selectedGroupKeys: new Set(),
     groupSources: [],
@@ -228,6 +247,7 @@ function init() {
   DOM.toolWorkspaceBar = $('#toolWorkspaceBar');
   DOM.toolWorkspaceTitle = $('#toolWorkspaceTitle');
   DOM.btnBackToolHome = $('#btnBackToolHome');
+  DOM.btnToolHistoryPage = $('#btnToolHistoryPage');
   DOM.avToolStages = $('#avToolStages');
   DOM.toolHomeCategories = $('#toolHomeCategories');
   DOM.homeToolCount = $('#homeToolCount');
@@ -261,6 +281,7 @@ function init() {
   DOM.btnCopyTwitterNames = $('#btnCopyTwitterNames');
   DOM.btnCopyTwitterUrls = $('#btnCopyTwitterUrls');
   DOM.btnSaveTwitterResults = $('#btnSaveTwitterResults');
+  DOM.btnStoreTwitterHistory = $('#btnStoreTwitterHistory');
   DOM.badnewsGroupBinding = $('#badnewsGroupBinding');
   DOM.badnewsTimeStart = $('#badnewsTimeStart');
   DOM.badnewsTimeEnd = $('#badnewsTimeEnd');
@@ -274,6 +295,28 @@ function init() {
   DOM.btnBadnewsClear = $('#btnBadnewsClear');
   DOM.btnCopyBadnewsUrls = $('#btnCopyBadnewsUrls');
   DOM.btnSaveBadnewsResults = $('#btnSaveBadnewsResults');
+  DOM.btnStoreBadnewsHistory = $('#btnStoreBadnewsHistory');
+  DOM.haijiaoGroupBinding = $('#haijiaoGroupBinding');
+  DOM.haijiaoTimeStart = $('#haijiaoTimeStart');
+  DOM.haijiaoTimeEnd = $('#haijiaoTimeEnd');
+  DOM.haijiaoRawInput = $('#haijiaoRawInput');
+  DOM.haijiaoUrlsOutput = $('#haijiaoUrlsOutput');
+  DOM.haijiaoResultCount = $('#haijiaoResultCount');
+  DOM.haijiaoSourceStatus = $('#haijiaoSourceStatus');
+  DOM.btnHaijiaoSyncGroup = $('#btnHaijiaoSyncGroup');
+  DOM.btnHaijiaoImportFiles = $('#btnHaijiaoImportFiles');
+  DOM.btnHaijiaoFilter = $('#btnHaijiaoFilter');
+  DOM.btnHaijiaoClear = $('#btnHaijiaoClear');
+  DOM.btnCopyHaijiaoUrls = $('#btnCopyHaijiaoUrls');
+  DOM.btnSaveHaijiaoResults = $('#btnSaveHaijiaoResults');
+  DOM.btnStoreHaijiaoHistory = $('#btnStoreHaijiaoHistory');
+  DOM.toolHistoryTitle = $('#toolHistoryTitle');
+  DOM.toolHistorySubtitle = $('#toolHistorySubtitle');
+  DOM.toolHistoryCount = $('#toolHistoryCount');
+  DOM.toolHistorySearch = $('#toolHistorySearch');
+  DOM.btnRefreshToolHistory = $('#btnRefreshToolHistory');
+  DOM.toolHistoryList = $('#toolHistoryList');
+  DOM.toolHistoryDetail = $('#toolHistoryDetail');
   DOM.dbSummaryMini = $('#dbSummaryMini');
   DOM.btnOpenLibraryFromPanel = $('#btnOpenLibraryFromPanel');
   DOM.themeSelect = $('#themeSelect');
@@ -361,6 +404,7 @@ function init() {
   DOM.progressPercent = $('#progressPercent');
   DOM.resultBody = $('#resultBody');
   DOM.resultTable = $('#resultTable');
+  DOM.resultTableWrapper = $('#resultTableWrapper');
   DOM.resultTableHead = $('#resultTableHead');
   DOM.resultWorkspaceTitle = $('#resultWorkspaceTitle');
   DOM.resultTabs = $('#resultTabs');
@@ -380,10 +424,17 @@ function init() {
   DOM.resultTagFilter = $('#resultTagFilter');
   DOM.resultSort = $('#resultSort');
   DOM.resultRangeSummary = $('#resultRangeSummary');
+  DOM.resultCodeListTitle = $('#resultCodeListTitle');
+  DOM.resultLinkListTitle = $('#resultLinkListTitle');
+  DOM.resultCodeListOutput = $('#resultCodeListOutput');
+  DOM.resultLinkListOutput = $('#resultLinkListOutput');
+  DOM.btnCopyResultCodes = $('#btnCopyResultCodes');
+  DOM.btnCopyResultLinks = $('#btnCopyResultLinks');
   DOM.resultSelectVisible = $('#resultSelectVisible');
   DOM.btnSelectVisibleResults = $('#btnSelectVisibleResults');
   DOM.btnClearResultSelection = $('#btnClearResultSelection');
   DOM.btnCopyResultTSV = $('#btnCopyResultTSV');
+  DOM.btnToggleResultTableSize = $('#btnToggleResultTableSize');
   DOM.btnRetrySelectedResults = $('#btnRetrySelectedResults');
   DOM.btnRetryAllNetworkResults = $('#btnRetryAllNetworkResults');
   DOM.btnStopResults = $('#btnStopResults');
@@ -431,6 +482,12 @@ function init() {
   DOM.btnTelegramBotStopSync = $('#btnTelegramBotStopSync');
   DOM.telegramBotSyncProgress = $('#telegramBotSyncProgress');
   DOM.telegramAccountSummary = $('#telegramAccountSummary');
+  DOM.telegramNetworkMode = $('#telegramNetworkMode');
+  DOM.telegramProxyHost = $('#telegramProxyHost');
+  DOM.telegramProxyPort = $('#telegramProxyPort');
+  DOM.telegramNetworkStatus = $('#telegramNetworkStatus');
+  DOM.btnTelegramNetworkSave = $('#btnTelegramNetworkSave');
+  DOM.btnTelegramNetworkTest = $('#btnTelegramNetworkTest');
   DOM.telegramApiId = $('#telegramApiId');
   DOM.telegramApiHash = $('#telegramApiHash');
   DOM.telegramPhone = $('#telegramPhone');
@@ -458,6 +515,7 @@ function init() {
   DOM.telegramSyncLimit = $('#telegramSyncLimit');
   DOM.telegramSyncSince = $('#telegramSyncSince');
   DOM.telegramSyncLookback = $('#telegramSyncLookback');
+  DOM.telegramMarkReadAfterSync = $('#telegramMarkReadAfterSync');
   DOM.btnTelegramSync = $('#btnTelegramSync');
   DOM.btnTelegramStopSync = $('#btnTelegramStopSync');
   DOM.telegramSyncProgress = $('#telegramSyncProgress');
@@ -481,25 +539,39 @@ function init() {
   DOM.btnClearRaindropToken = $('#btnClearRaindropToken');
   DOM.btnOpenRaindropTokenDocs = $('#btnOpenRaindropTokenDocs');
   DOM.raindropBatchStatus = $('#raindropBatchStatus');
+  DOM.raindropModeSelect = $('#raindropModeSelect');
   DOM.raindropBatchSelect = $('#raindropBatchSelect');
   DOM.raindropCollectionSelect = $('#raindropCollectionSelect');
   DOM.raindropCollectionLabel = $('#raindropCollectionLabel');
+  DOM.raindropManualTarget = $('#raindropManualTarget');
   DOM.raindropRoutingNote = $('#raindropRoutingNote');
+  DOM.raindropCollectionSearch = $('#raindropCollectionSearch');
+  DOM.raindropCollectionPicker = $('#raindropCollectionPicker');
+  DOM.raindropSelectedCollectionSummary = $('#raindropSelectedCollectionSummary');
+  DOM.raindropIncludeNested = $('#raindropIncludeNested');
+  DOM.btnSelectAllRaindropCollections = $('#btnSelectAllRaindropCollections');
+  DOM.btnClearRaindropCollections = $('#btnClearRaindropCollections');
   DOM.btnRefreshRaindropCollections = $('#btnRefreshRaindropCollections');
   DOM.raindropMetricEligible = $('#raindropMetricEligible');
-  DOM.raindropMetricCreate = $('#raindropMetricCreate');
-  DOM.raindropMetricUpdate = $('#raindropMetricUpdate');
+  DOM.raindropMetricPull = $('#raindropMetricPull');
+  DOM.raindropMetricPush = $('#raindropMetricPush');
   DOM.raindropMetricSkip = $('#raindropMetricSkip');
+  DOM.raindropMetricConflict = $('#raindropMetricConflict');
   DOM.raindropMetricError = $('#raindropMetricError');
   DOM.raindropPlanTitle = $('#raindropPlanTitle');
   DOM.raindropPlanDetail = $('#raindropPlanDetail');
   DOM.btnPreviewRaindropSync = $('#btnPreviewRaindropSync');
+  DOM.btnExportRaindropCsv = $('#btnExportRaindropCsv');
   DOM.btnStartRaindropSync = $('#btnStartRaindropSync');
   DOM.btnStopRaindropSync = $('#btnStopRaindropSync');
   DOM.raindropSyncProgress = $('#raindropSyncProgress');
   DOM.raindropProgressText = $('#raindropProgressText');
   DOM.raindropProgressPercent = $('#raindropProgressPercent');
   DOM.raindropProgressFill = $('#raindropProgressFill');
+  DOM.raindropFailedPanel = $('#raindropFailedPanel');
+  DOM.raindropFailedCodesOutput = $('#raindropFailedCodesOutput');
+  DOM.btnCopyRaindropFailedCodes = $('#btnCopyRaindropFailedCodes');
+  DOM.btnExportRaindropFailedCodes = $('#btnExportRaindropFailedCodes');
   DOM.raindropPreviewBody = $('#raindropPreviewBody');
   DOM.raindropPreviewPanel = $('#raindropPreviewPanel');
   DOM.btnToggleRaindropPreviewSize = $('#btnToggleRaindropPreviewSize');
@@ -543,11 +615,16 @@ function init() {
   loadSiteWorkspace();
   loadRaindropSyncSettings();
   loadToolboxSettings();
+  try {
+    state.telegram.markReadAfterSync = localStorage.getItem(TELEGRAM_MARK_READ_KEY) === '1';
+  } catch {}
+  if (DOM.telegramMarkReadAfterSync) DOM.telegramMarkReadAfterSync.checked = state.telegram.markReadAfterSync;
   bindEvents();
   setupTelegramEvents();
   initializeToolboxUI();
   updateUI();
   window.setInterval(updateTelegramQrCountdown, 1000);
+  void initializeTelegramNetworkConfig();
   void initializeTelegramConnection();
   void initializeTelegramBotConnection();
   if (state.av123FavoriteMethod === 'chrome') void refreshChromeFavoriteBridgeStatus();
@@ -575,13 +652,158 @@ function loadToolboxSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(TOOLBOX_BINDINGS_KEY) || '{}');
     for (const kind of TOOL_MANIFESTS.map(tool => tool.id)) {
-      state.toolboxBindings[kind] = String(saved?.[kind] || '');
+      state.toolboxBindings[kind] = normalizeToolboxBindingKeys(saved?.[kind]);
     }
   } catch {}
 }
 
 function saveToolboxBindings() {
   try { localStorage.setItem(TOOLBOX_BINDINGS_KEY, JSON.stringify(state.toolboxBindings)); } catch {}
+}
+
+function normalizeToolboxBindingKeys(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(values.map(item => String(item || '').trim()).filter(Boolean))];
+}
+
+function selectedToolboxBindingKeys(select) {
+  return normalizeToolboxBindingKeys([...select?.selectedOptions || []].map(option => option.value));
+}
+
+function toolboxBindingIncludes(kind, sourceKey) {
+  return normalizeToolboxBindingKeys(state.toolboxBindings[kind]).includes(String(sourceKey || ''));
+}
+
+function ensureGroupPicker(select) {
+  if (!select || select._groupPicker) return select?._groupPicker || null;
+  select.hidden = true;
+  select.setAttribute('aria-hidden', 'true');
+  const shell = document.createElement('div');
+  shell.className = 'group-picker-shell';
+  shell.innerHTML = `
+    <button class="group-picker-trigger" type="button" aria-expanded="false">
+      <i data-lucide="messages-square"></i>
+      <span class="group-picker-trigger-copy"><strong>选择群组/频道</strong><small>当前仅使用手动输入</small></span>
+      <i class="group-picker-chevron" data-lucide="chevron-down"></i>
+    </button>
+    <div class="group-picker-popover" hidden>
+      <input class="group-picker-search" type="search" placeholder="搜索群组、频道或来源类型">
+      <div class="group-picker-toolbar">
+        <span data-group-picker-count>0 个可选来源</span>
+        <button class="btn btn-outline btn-sm" type="button" data-group-picker-all>全选可见</button>
+        <button class="btn btn-outline btn-sm" type="button" data-group-picker-clear>清空</button>
+      </div>
+      <div class="group-picker-list"></div>
+    </div>`;
+  select.insertAdjacentElement('afterend', shell);
+  const picker = {
+    shell,
+    trigger: shell.querySelector('.group-picker-trigger'),
+    popover: shell.querySelector('.group-picker-popover'),
+    search: shell.querySelector('.group-picker-search'),
+    list: shell.querySelector('.group-picker-list'),
+    count: shell.querySelector('[data-group-picker-count]'),
+  };
+  const close = () => {
+    shell.classList.remove('is-open');
+    picker.popover.hidden = true;
+    picker.trigger.setAttribute('aria-expanded', 'false');
+  };
+  picker.trigger.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const opening = picker.popover.hidden;
+    document.querySelectorAll('.group-picker-shell.is-open').forEach(node => {
+      if (node !== shell) {
+        node.classList.remove('is-open');
+        const popover = node.querySelector('.group-picker-popover');
+        const trigger = node.querySelector('.group-picker-trigger');
+        if (popover) popover.hidden = true;
+        if (trigger) trigger.setAttribute('aria-expanded', 'false');
+      }
+    });
+    shell.classList.toggle('is-open', opening);
+    picker.popover.hidden = !opening;
+    picker.trigger.setAttribute('aria-expanded', opening ? 'true' : 'false');
+    if (opening) {
+      picker.search.focus();
+      renderGroupPicker(select, shell.dataset.kind || '');
+    }
+  });
+  picker.popover.addEventListener('click', event => event.stopPropagation());
+  picker.search.addEventListener('input', () => renderGroupPicker(select, shell.dataset.kind || ''));
+  picker.list.addEventListener('click', event => {
+    const option = event.target.closest('[data-group-source-key]');
+    if (!option) return;
+    const kind = shell.dataset.kind || '';
+    const sourceKey = option.dataset.groupSourceKey || '';
+    const selected = new Set(normalizeToolboxBindingKeys(state.toolboxBindings[kind]));
+    if (selected.has(sourceKey)) selected.delete(sourceKey);
+    else selected.add(sourceKey);
+    state.toolboxBindings[kind] = [...selected];
+    saveToolboxBindings();
+    refreshToolboxGroupOptions();
+  });
+  shell.querySelector('[data-group-picker-clear]').addEventListener('click', () => {
+    const kind = shell.dataset.kind || '';
+    state.toolboxBindings[kind] = [];
+    saveToolboxBindings();
+    refreshToolboxGroupOptions();
+  });
+  shell.querySelector('[data-group-picker-all]').addEventListener('click', () => {
+    const kind = shell.dataset.kind || '';
+    const visibleKeys = [...picker.list.querySelectorAll('[data-group-source-key]')]
+      .filter(node => !node.hidden)
+      .map(node => node.dataset.groupSourceKey)
+      .filter(Boolean);
+    state.toolboxBindings[kind] = normalizeToolboxBindingKeys([
+      ...normalizeToolboxBindingKeys(state.toolboxBindings[kind]),
+      ...visibleKeys,
+    ]);
+    saveToolboxBindings();
+    refreshToolboxGroupOptions();
+  });
+  document.addEventListener('click', event => {
+    if (!shell.contains(event.target)) close();
+  });
+  select._groupPicker = picker;
+  renderIcons();
+  return picker;
+}
+
+function renderGroupPicker(select, kind) {
+  if (!select) return;
+  const picker = ensureGroupPicker(select);
+  if (!picker) return;
+  picker.shell.dataset.kind = kind;
+  const selected = normalizeToolboxBindingKeys(state.toolboxBindings[kind]);
+  const options = [...select.options].filter(option => option.value);
+  const query = String(picker.search.value || '').trim().toLowerCase();
+  const visible = options.filter(option => !query || `${option.textContent} ${option.dataset.provider || ''}`.toLowerCase().includes(query));
+  picker.list.innerHTML = visible.length
+    ? visible.map(option => {
+      const active = selected.includes(option.value);
+      const sourceLabel = option.dataset.sourceLabel || option.textContent || option.value;
+      const detail = option.dataset.sourceDetail || option.value;
+      return `<button class="group-picker-option ${active ? 'is-selected' : ''}" type="button" data-group-source-key="${esc(option.value)}">
+        <span class="group-picker-check"><i data-lucide="check"></i></span>
+        <span class="group-picker-option-copy"><strong>${esc(sourceLabel)}</strong><small>${esc(detail)}</small></span>
+        <i class="group-picker-provider">${esc(option.dataset.provider || '来源')}</i>
+      </button>`;
+    }).join('')
+    : `<div class="group-picker-empty">${options.length ? '没有匹配的来源' : '暂无可选来源，请先连接 Telegram 群组或频道'}</div>`;
+  picker.count.textContent = `${visible.length} 个可选来源`;
+  const selectedLabels = options
+    .filter(option => selected.includes(option.value))
+    .map(option => option.dataset.sourceLabel || option.textContent || option.value);
+  const title = picker.trigger.querySelector('strong');
+  const detail = picker.trigger.querySelector('small');
+  title.textContent = selected.length ? `已选择 ${selected.length} 个来源` : '选择群组/频道';
+  detail.textContent = selected.length
+    ? `${selectedLabels.slice(0, 2).join('、')}${selected.length > 2 ? ` 等 ${selected.length} 个` : ''}`
+    : options.length ? `共有 ${options.length} 个来源可选` : '当前仅使用手动输入';
+  picker.trigger.title = selectedLabels.join('\n');
+  renderIcons();
 }
 
 function toolboxGroupRows() {
@@ -601,29 +823,38 @@ function refreshToolboxGroupOptions() {
   const rows = toolboxGroupRows();
   const render = (select, kind) => {
     if (!select) return;
-    const selected = state.toolboxBindings[kind] || '';
-    const known = rows.some(row => row.sourceKey === selected);
-    const missing = selected && !known
-      ? `<option value="${esc(selected)}">原绑定群组当前未连接</option>`
-      : '';
+    const selected = normalizeToolboxBindingKeys(state.toolboxBindings[kind]);
+    const knownKeys = new Set(rows.map(row => String(row.sourceKey || '')));
+    const missing = selected
+      .filter(sourceKey => !knownKeys.has(sourceKey))
+      .map(sourceKey => `<option value="${esc(sourceKey)}" data-provider="不可用" data-source-label="原绑定来源当前未连接" data-source-detail="${esc(sourceKey)}" selected>原绑定来源当前未连接 · ${esc(sourceKey)}</option>`)
+      .join('');
     select.innerHTML = `<option value="">不绑定，只用手动输入</option>${missing}${rows.map(row => {
       const provider = row.sourceType === 'bot_group' ? 'Bot' : '用户 API';
-      return `<option value="${esc(row.sourceKey)}">${esc(row.sourceLabel || row.chatKey)} · ${provider}</option>`;
+      const sourceKey = String(row.sourceKey || '');
+      const sourceLabel = String(row.sourceLabel || row.chatKey || sourceKey);
+      const detail = `${provider} · ${row.chatType === 'channel' ? '频道' : '群组'} · ${sourceKey}`;
+      return `<option value="${esc(sourceKey)}" data-provider="${esc(provider)}" data-source-label="${esc(sourceLabel)}" data-source-detail="${esc(detail)}" ${selected.includes(sourceKey) ? 'selected' : ''}>${esc(sourceLabel)} · ${provider}</option>`;
     }).join('')}`;
-    select.value = selected;
+    if (!selected.length) select.options[0].selected = true;
+    select.title = selected.length ? `已绑定 ${selected.length} 个群组/频道` : '当前未绑定 Telegram 来源';
+    renderGroupPicker(select, kind);
   };
   render(DOM.twitterGroupBinding, 'twitter');
   render(DOM.badnewsGroupBinding, 'badnews');
+  render(DOM.haijiaoGroupBinding, 'haijiao');
   render(DOM.avGroupBinding, state.activeAvTool);
 }
 
-function setToolboxBinding(kind, sourceKey) {
+function setToolboxBinding(kind, sourceKeys) {
   if (!TOOL_BY_ID.has(kind)) return;
-  state.toolboxBindings[kind] = String(sourceKey || '');
+  const selected = normalizeToolboxBindingKeys(sourceKeys);
+  state.toolboxBindings[kind] = selected;
   saveToolboxBindings();
   refreshToolboxGroupOptions();
-  const row = toolboxGroupRows().find(item => item.sourceKey === state.toolboxBindings[kind]);
-  toast(row ? `${toolLabel(kind)} 已绑定：${row.sourceLabel}` : `${toolLabel(kind)} 已改为仅手动输入`, 'success');
+  toast(selected.length
+    ? `${toolLabel(kind)} 已绑定 ${selected.length} 个群组/频道`
+    : `${toolLabel(kind)} 已改为仅手动输入`, 'success');
 }
 
 function toolLabel(kind) {
@@ -667,14 +898,14 @@ function loadAvToolSession(kind) {
 function updateToolboxNavigation() {
   const isAv = ['missav', 'av123'].includes(state.activeTool);
   const manifest = TOOL_BY_ID.get(state.activeTool);
-  const inToolWorkspace = Boolean(manifest && manifest.pages.includes(state.activePage));
+  const inToolWorkspace = Boolean(manifest && (manifest.pages.includes(state.activePage) || state.activePage === 'tool-history'));
   if (DOM.toolWorkspaceBar) DOM.toolWorkspaceBar.hidden = !inToolWorkspace;
   if (DOM.toolWorkspaceTitle) DOM.toolWorkspaceTitle.textContent = manifest?.label || '—';
   if (DOM.avToolStages) DOM.avToolStages.hidden = !isAv;
   document.querySelectorAll('[data-missav-stage]').forEach(node => { node.hidden = state.activeAvTool !== 'missav'; });
   if (DOM.avInputTitle) DOM.avInputTitle.textContent = `${toolLabel(state.activeAvTool)} 番号输入`;
-  if (DOM.avGroupBindingLabel) DOM.avGroupBindingLabel.textContent = `${toolLabel(state.activeAvTool)} 绑定 Telegram 群组`;
-  if (DOM.avGroupBindingStatus) DOM.avGroupBindingStatus.textContent = `当前只把绑定群组的消息送入 ${toolLabel(state.activeAvTool)}；同一群可以同时绑定另一个工具。`;
+  if (DOM.avGroupBindingLabel) DOM.avGroupBindingLabel.textContent = `${toolLabel(state.activeAvTool)} 绑定 Telegram 群组/频道`;
+  if (DOM.avGroupBindingStatus) DOM.avGroupBindingStatus.textContent = `可同时绑定多个来源；消息只送入 ${toolLabel(state.activeAvTool)}，同一来源也能绑定其他工具。`;
   refreshToolboxGroupOptions();
   DOM.pageButtons?.forEach(button => {
     button.classList.toggle('active', button.dataset.page === state.activePage);
@@ -703,6 +934,7 @@ function initializeToolboxUI() {
   renderToolHome();
   runSimpleToolFilter('twitter');
   runSimpleToolFilter('badnews');
+  runSimpleToolFilter('haijiao');
   refreshToolboxGroupOptions();
   updateToolboxNavigation();
   updateTaskCenter();
@@ -756,7 +988,7 @@ function updateTaskCenter() {
   if (DOM.taskFavoriteStatus) DOM.taskFavoriteStatus.textContent = favorite;
   if (DOM.taskRaindropStatus) DOM.taskRaindropStatus.textContent = raindrop;
   if (DOM.taskTelegramStatus) DOM.taskTelegramStatus.textContent = telegram;
-  const statuses = { twitter: '空闲', badnews: '空闲', missav, av123 };
+  const statuses = { twitter: '空闲', badnews: '空闲', haijiao: '空闲', missav, av123 };
   if (state.favoriteRuntime?.running) statuses.av123 = '收藏运行中';
   document.querySelectorAll('[data-tool-status]').forEach(node => {
     node.textContent = statuses[node.dataset.toolStatus] || '空闲';
@@ -770,6 +1002,7 @@ function updateTaskCenter() {
 
 function switchPage(page) {
   if (page !== 'sync' && state.raindropSync.previewExpanded) setRaindropPreviewExpanded(false);
+  if (page !== 'results' && state.resultTableExpanded) setResultTableExpanded(false);
   state.activePage = page;
   DOM.pageButtons.forEach(btn => {
     const active = btn.dataset.tool
@@ -782,6 +1015,7 @@ function switchPage(page) {
   if (page === 'results') renderTable();
   if (page === 'sync') void refreshRaindropSyncPage();
   if (page === 'sources') void refreshTelegramSourcePage();
+  if (page === 'tool-history') renderToolHistoryPage();
   updateToolboxNavigation();
 }
 
@@ -907,10 +1141,9 @@ function toAssetUrl(assetPath) {
 }
 
 function simpleToolRange(kind) {
-  const prefix = kind === 'twitter' ? 'twitter' : 'badnews';
   return {
-    start: DOM[`${prefix}TimeStart`]?.value || '',
-    end: DOM[`${prefix}TimeEnd`]?.value || '',
+    start: DOM[`${kind}TimeStart`]?.value || '',
+    end: DOM[`${kind}TimeEnd`]?.value || '',
   };
 }
 
@@ -928,8 +1161,7 @@ function appendUniqueToolMessages(target, messages) {
 function runSimpleToolFilter(kind) {
   const tool = state.toolbox[kind];
   if (!tool) return [];
-  const prefix = kind === 'twitter' ? 'twitter' : 'badnews';
-  const input = DOM[`${prefix}RawInput`];
+  const input = DOM[`${kind}RawInput`];
   if (input) tool.raw = input.value;
   const range = simpleToolRange(kind);
   const combined = [
@@ -941,18 +1173,22 @@ function runSimpleToolFilter(kind) {
     if (DOM.twitterNamesOutput) DOM.twitterNamesOutput.value = tool.results.map(row => row.name).join('\n');
     if (DOM.twitterUrlsOutput) DOM.twitterUrlsOutput.value = tool.results.map(row => row.url).join('\n');
     if (DOM.twitterResultCount) DOM.twitterResultCount.textContent = `${tool.results.length} 位博主`;
-  } else {
+  } else if (kind === 'badnews') {
     tool.results = api.extractBadNewsLinks(combined, range);
     if (DOM.badnewsUrlsOutput) DOM.badnewsUrlsOutput.value = tool.results.join('\n');
     if (DOM.badnewsResultCount) DOM.badnewsResultCount.textContent = `${tool.results.length} 条链接`;
+  } else if (kind === 'haijiao') {
+    tool.results = api.extractHaijiaoLinks(combined, range);
+    if (DOM.haijiaoUrlsOutput) DOM.haijiaoUrlsOutput.value = tool.results.join('\n');
+    if (DOM.haijiaoResultCount) DOM.haijiaoResultCount.textContent = `${tool.results.length} 条链接`;
   }
   const extent = api.telegramMessageTimeExtent(tool.messages || []);
-  const status = DOM[`${prefix}SourceStatus`];
+  const status = DOM[`${kind}SourceStatus`];
   if (status) {
     const time = range.start || range.end ? ' · 已按所选分钟范围过滤' : '';
     status.textContent = tool.messages.length
-      ? `${tool.sourceLabel || 'Telegram / 文件'} · ${tool.messages.length} 条消息，其中 ${extent.dated} 条有时间${time} · 结果仅保留在当前会话`
-      : `${tool.raw ? '手动内容' : '当前会话尚无输入'}${time} · 结果不会写入永久数据库`;
+      ? `${tool.sourceLabel || 'Telegram / 文件'} · ${tool.messages.length} 条消息，其中 ${extent.dated} 条有时间${time} · 可点击“保存本次历史”永久回看`
+      : `${tool.raw ? '手动内容' : '当前会话尚无输入'}${time} · 可点击“保存本次历史”永久回看`;
   }
   return tool.results;
 }
@@ -961,8 +1197,7 @@ function clearSimpleTool(kind) {
   const label = toolLabel(kind);
   if (!confirm(`清空 ${label} 当前会话的输入和结果？这不会影响 Telegram 来源或其他工具。`)) return;
   state.toolbox[kind] = { raw: '', messages: [], sourceLabel: '', results: [] };
-  const prefix = kind === 'twitter' ? 'twitter' : 'badnews';
-  if (DOM[`${prefix}RawInput`]) DOM[`${prefix}RawInput`].value = '';
+  if (DOM[`${kind}RawInput`]) DOM[`${kind}RawInput`].value = '';
   runSimpleToolFilter(kind);
 }
 
@@ -1010,6 +1245,292 @@ async function saveBadnewsToolResults() {
   toast(`已导出 ${rows.length} 条 Bad.news 帖子链接`, 'success');
 }
 
+async function saveHaijiaoToolResults() {
+  const rows = runSimpleToolFilter('haijiao');
+  if (!rows.length) { toast('没有可导出的海角帖子链接', 'error'); return; }
+  const directory = await ensureToolboxOutputDirectory();
+  if (!directory) return;
+  const filePath = `${directory}\\${api.timePrefixToMinute()}_海角帖子链接.txt`;
+  await api.writeFile(filePath, rows.join('\n'));
+  toast(`已导出 ${rows.length} 条海角帖子链接`, 'success');
+}
+
+function simpleToolHistoryItems(kind, rows) {
+  if (kind === 'twitter') {
+    return (rows || []).map(row => ({
+      primaryText: String(row?.name || ''),
+      secondaryText: String(row?.url || ''),
+    }));
+  }
+  return (rows || []).map(value => ({ primaryText: String(value || '') }));
+}
+
+async function storeSimpleToolHistory(kind) {
+  if (!state.dbReady || !api.dbCreateToolHistory) {
+    toast('数据库尚未就绪，暂时不能保存历史', 'error');
+    return null;
+  }
+  const rows = runSimpleToolFilter(kind);
+  if (!rows.length) {
+    toast(`没有可保存的${toolLabel(kind)}结果`, 'error');
+    return null;
+  }
+  const tool = state.toolbox[kind];
+  const range = simpleToolRange(kind);
+  const stamp = api.timePrefixToMinute();
+  const record = api.dbCreateToolHistory({
+    toolKind: kind,
+    name: `${toolLabel(kind)} ${stamp}`,
+    sourceLabel: tool.sourceLabel || (tool.messages.length ? 'Telegram 来源' : '手动输入 / 文件'),
+    timeStart: range.start,
+    timeEnd: range.end,
+    inputCount: tool.messages.length + (tool.raw ? 1 : 0),
+    items: simpleToolHistoryItems(kind, rows),
+    metadata: {
+      boundSourceCount: normalizeToolboxBindingKeys(state.toolboxBindings[kind]).length,
+      resultFormat: kind === 'twitter' ? 'name_and_url' : 'url',
+    },
+  });
+  state.toolHistory.selectedId = record.id;
+  state.toolHistory.selectedType = 'text';
+  state.toolHistory.detail = record;
+  refreshDbSummary();
+  toast(`已保存 ${record.resultCount} 条结果到${toolLabel(kind)}历史`, 'success');
+  if (state.activePage === 'tool-history') renderToolHistoryPage();
+  return record;
+}
+
+function toolHistoryRows(kind) {
+  const search = String(state.toolHistory.search || '').trim().toLowerCase();
+  if (['twitter', 'badnews', 'haijiao'].includes(kind)) {
+    const page = api.dbGetToolHistories?.(kind, { limit: 500, search }) || { rows: [], total: 0 };
+    return {
+      total: Number(page.total || 0),
+      rows: (page.rows || []).map(row => ({ ...row, historyType: 'text' })),
+    };
+  }
+  const rows = (api.dbGetRecentRuns?.(500) || [])
+    .filter(row => row.toolKind === kind || row.toolKind === 'dual')
+    .filter(row => !search || `${row.name || ''} ${row.sourceLabel || ''} ${row.status || ''}`.toLowerCase().includes(search))
+    .map(row => ({
+      ...row,
+      historyType: 'run',
+      createdAt: row.started_at || row.updatedAt || '',
+      resultCount: Number(row.itemCount || row.total || 0),
+    }));
+  return { total: rows.length, rows };
+}
+
+function toolHistoryRecordDate(row) {
+  const value = String(row.createdAt || row.started_at || '');
+  if (!value) return '时间未知';
+  return value.replace('T', ' ').replace(/\.\d{3}Z$/, '').slice(0, 19);
+}
+
+function renderToolHistoryPage() {
+  if (!DOM.toolHistoryList || !state.activeTool) return;
+  const kind = state.activeTool;
+  const label = toolLabel(kind);
+  if (DOM.toolHistoryTitle) DOM.toolHistoryTitle.textContent = `${label} · 处理历史`;
+  if (DOM.toolHistorySubtitle) {
+    DOM.toolHistorySubtitle.textContent = ['missav', 'av123'].includes(kind)
+      ? '复用本工具已有处理批次，可查看逐条结果、重新载入或删除批次'
+      : '保存规范化结果快照，可回看、恢复、重命名、导出或删除';
+  }
+  const page = toolHistoryRows(kind);
+  state.toolHistory.rows = page.rows;
+  if (DOM.toolHistoryCount) DOM.toolHistoryCount.textContent = `${page.total} 次`;
+  if (DOM.toolHistorySearch && DOM.toolHistorySearch.value !== state.toolHistory.search) {
+    DOM.toolHistorySearch.value = state.toolHistory.search || '';
+  }
+  const selectedExists = page.rows.some(row =>
+    Number(row.id) === Number(state.toolHistory.selectedId)
+      && row.historyType === state.toolHistory.selectedType);
+  if (!selectedExists) {
+    state.toolHistory.selectedId = page.rows[0]?.id || null;
+    state.toolHistory.selectedType = page.rows[0]?.historyType || '';
+    state.toolHistory.detail = null;
+  }
+  DOM.toolHistoryList.innerHTML = page.rows.length
+    ? page.rows.map(row => {
+      const active = Number(row.id) === Number(state.toolHistory.selectedId)
+        && row.historyType === state.toolHistory.selectedType;
+      const status = row.historyType === 'run' ? runStatusLabel(row.status) : `${row.resultCount} 条结果`;
+      return `<button class="tool-history-record ${active ? 'active' : ''}" type="button"
+        data-tool-history-id="${Number(row.id)}" data-tool-history-type="${esc(row.historyType)}">
+        <span class="tool-history-record-head"><strong>${esc(row.name || `${label} #${row.id}`)}</strong><time>${esc(toolHistoryRecordDate(row))}</time></span>
+        <span class="tool-history-record-meta"><span>${esc(row.sourceLabel || '手动输入')}</span><b>${esc(status)}</b></span>
+      </button>`;
+    }).join('')
+    : '<div class="library-empty">暂无本工具处理历史</div>';
+  renderToolHistoryDetail(state.toolHistory.selectedType, state.toolHistory.selectedId);
+  renderIcons();
+}
+
+function historyTaskForRunItem(kind, item) {
+  const key = kind === 'av123' ? 'av123Lookup' : 'missavLookup';
+  const task = item?.tasks?.[key] || {};
+  return {
+    status: task.status || item.resultStatus || item.itemStatus || '',
+    url: task.url || item.url || '',
+    error: task.error || item.error || '',
+  };
+}
+
+function renderToolHistoryDetail(type, id) {
+  if (!DOM.toolHistoryDetail) return;
+  if (!type || !id) {
+    state.toolHistory.detail = null;
+    DOM.toolHistoryDetail.innerHTML = `<div class="tool-history-empty"><i data-lucide="history"></i><strong>暂无可查看的记录</strong><span>文本工具先处理并点击“保存本次历史”；影片工具创建批次后会自动出现。</span></div>`;
+    renderIcons();
+    return;
+  }
+  const kind = state.activeTool;
+  const detail = type === 'text' ? api.dbGetToolHistory?.(Number(id)) : api.dbGetRun?.(Number(id));
+  if (!detail) {
+    state.toolHistory.detail = null;
+    DOM.toolHistoryDetail.innerHTML = '<div class="tool-history-empty"><strong>记录已不存在</strong><span>请刷新历史列表。</span></div>';
+    return;
+  }
+  state.toolHistory.detail = detail;
+  const isText = type === 'text';
+  const items = isText ? (detail.items || []) : (detail.items || []).map(item => {
+    const task = historyTaskForRunItem(kind, item);
+    return {
+      position: Number(item.position),
+      primaryText: item.code || '',
+      secondaryText: task.url,
+      status: task.status,
+      error: task.error,
+    };
+  });
+  const visibleItems = items.slice(0, 2000);
+  const primaryTitle = kind === 'twitter' ? '博主名' : kind === 'missav' || kind === 'av123' ? '番号' : '链接';
+  const secondaryTitle = kind === 'twitter' ? '主页链接' : kind === 'missav' || kind === 'av123' ? '页面链接' : '补充';
+  DOM.toolHistoryDetail.innerHTML = `
+    <div class="tool-history-detail-head">
+      <div class="tool-history-detail-copy">
+        <h3>${esc(detail.name || `${toolLabel(kind)} #${detail.id}`)}</h3>
+        <span>${esc(toolHistoryRecordDate(detail))} · ${esc(detail.sourceLabel || '手动输入')} · ${items.length} 条</span>
+      </div>
+      <div class="tool-history-detail-actions">
+        <button class="btn btn-primary btn-sm" type="button" data-tool-history-action="restore"><i data-lucide="${isText ? 'rotate-ccw' : 'folder-open'}"></i><span>${isText ? '恢复到工具' : '载入结果'}</span></button>
+        <button class="btn btn-success btn-sm" type="button" data-tool-history-action="export"><i data-lucide="download"></i><span>导出</span></button>
+        <button class="btn btn-outline btn-sm" type="button" data-tool-history-action="rename"><i data-lucide="pencil"></i><span>重命名</span></button>
+        <button class="btn btn-outline btn-sm tool-button-danger" type="button" data-tool-history-action="delete"><i data-lucide="trash-2"></i><span>删除</span></button>
+      </div>
+    </div>
+    <div class="tool-history-table-wrap">
+      <table class="tool-history-table">
+        <thead><tr><th class="history-index">序号</th><th>${esc(primaryTitle)}</th><th class="history-secondary">${esc(secondaryTitle)}</th>${isText ? '' : '<th>状态 / 备注</th>'}</tr></thead>
+        <tbody>${visibleItems.map((item, index) => `<tr>
+          <td class="history-index">${Number(item.position ?? index) + 1}</td>
+          <td title="${esc(item.primaryText)}">${esc(item.primaryText)}</td>
+          <td title="${esc(item.secondaryText)}">${esc(item.secondaryText || '—')}</td>
+          ${isText ? '' : `<td title="${esc(item.error)}">${esc(statusDisplayLabel(item.status))}${item.error ? ` · ${esc(item.error)}` : ''}</td>`}
+        </tr>`).join('')}</tbody>
+      </table>
+      ${items.length > visibleItems.length ? `<div class="tool-history-truncated">界面先显示前 ${visibleItems.length} 条；导出仍包含全部 ${items.length} 条。</div>` : ''}
+    </div>`;
+  renderIcons();
+}
+
+function restoreTextToolHistory(detail) {
+  const kind = String(detail?.toolKind || '');
+  if (!['twitter', 'badnews', 'haijiao'].includes(kind)) return;
+  const tool = state.toolbox[kind];
+  tool.raw = '';
+  tool.messages = [];
+  tool.sourceLabel = `历史：${detail.name || `#${detail.id}`}`;
+  tool.results = kind === 'twitter'
+    ? (detail.items || []).map(item => ({ name: item.primaryText, url: item.secondaryText }))
+    : (detail.items || []).map(item => item.primaryText);
+  switchTool(kind);
+  if (DOM[`${kind}RawInput`]) DOM[`${kind}RawInput`].value = '';
+  if (kind === 'twitter') {
+    DOM.twitterNamesOutput.value = tool.results.map(row => row.name).join('\n');
+    DOM.twitterUrlsOutput.value = tool.results.map(row => row.url).join('\n');
+    DOM.twitterResultCount.textContent = `${tool.results.length} 位博主`;
+  } else {
+    DOM[`${kind}UrlsOutput`].value = tool.results.join('\n');
+    DOM[`${kind}ResultCount`].textContent = `${tool.results.length} 条链接`;
+  }
+  const status = DOM[`${kind}SourceStatus`];
+  if (status) status.textContent = `已恢复历史“${detail.name}” · ${tool.results.length} 条结果；修改输入后会重新过滤`;
+  toast(`已把 ${tool.results.length} 条历史结果恢复到${toolLabel(kind)}`, 'success');
+}
+
+function historySafeFileName(value) {
+  return String(value || '处理历史').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim().slice(0, 120) || '处理历史';
+}
+
+async function exportActiveToolHistory() {
+  const detail = state.toolHistory.detail;
+  if (!detail) return;
+  const directory = await ensureToolboxOutputDirectory();
+  if (!directory) return;
+  const kind = state.activeTool;
+  const prefix = api.timePrefixToMinute();
+  const base = historySafeFileName(detail.name || `${toolLabel(kind)}_${detail.id}`);
+  if (state.toolHistory.selectedType === 'text') {
+    if (kind === 'twitter') {
+      await Promise.all([
+        api.writeFile(`${directory}\\${prefix}_${base}_博主名.txt`, detail.items.map(item => item.primaryText).join('\n')),
+        api.writeFile(`${directory}\\${prefix}_${base}_主页链接.txt`, detail.items.map(item => item.secondaryText).join('\n')),
+      ]);
+    } else {
+      await api.writeFile(`${directory}\\${prefix}_${base}.txt`, detail.items.map(item => item.primaryText).join('\n'));
+    }
+  } else {
+    const rows = (detail.items || []).map(item => {
+      const task = historyTaskForRunItem(kind, item);
+      return [Number(item.position) + 1, item.code || '', task.status, task.url, task.error];
+    });
+    const text = window.SheetTable.rowsToTSV(['序号', '番号', '状态', '链接', '备注'], rows);
+    await api.writeFile(`${directory}\\${prefix}_${base}.tsv`, text);
+  }
+  toast(`已导出“${detail.name}”`, 'success');
+}
+
+function handleToolHistoryAction(action) {
+  const detail = state.toolHistory.detail;
+  if (!detail) return;
+  const type = state.toolHistory.selectedType;
+  if (action === 'restore') {
+    if (type === 'text') restoreTextToolHistory(detail);
+    else loadProcessingRunResults(Number(detail.id));
+    return;
+  }
+  if (action === 'export') {
+    void exportActiveToolHistory();
+    return;
+  }
+  if (action === 'rename') {
+    const next = prompt('新的历史名称', detail.name || '');
+    if (!next?.trim()) return;
+    if (type === 'text') api.dbRenameToolHistory(detail.id, next);
+    else api.dbRenameRun(detail.id, next);
+    state.toolHistory.detail = null;
+    renderToolHistoryPage();
+    toast('历史名称已更新', 'success');
+    return;
+  }
+  if (action === 'delete') {
+    if (type === 'run') {
+      requestDeleteProcessingRun(Number(detail.id));
+      return;
+    }
+    if (!confirm(`确认永久删除历史“${detail.name}”及其 ${detail.resultCount} 条结果？`)) return;
+    api.dbDeleteToolHistory(detail.id);
+    state.toolHistory.selectedId = null;
+    state.toolHistory.selectedType = '';
+    state.toolHistory.detail = null;
+    refreshDbSummary();
+    renderToolHistoryPage();
+    toast('文本工具历史已删除', 'success');
+  }
+}
+
 async function importSimpleToolFiles(kind) {
   const paths = await api.openFile({
     title: `为${toolLabel(kind)}选择一个或多个文件`,
@@ -1041,7 +1562,7 @@ async function importSimpleToolFiles(kind) {
     tool.raw = [current, rawParts.join('\n\n')].filter(Boolean).join('\n\n');
   }
   tool.sourceLabel = `${files.length} 个文件`;
-  const input = kind === 'twitter' ? DOM.twitterRawInput : DOM.badnewsRawInput;
+  const input = DOM[`${kind}RawInput`];
   if (input) input.value = tool.raw;
   const results = runSimpleToolFilter(kind);
   toast(`${toolLabel(kind)}已导入 ${files.length} 个文件，过滤出 ${results.length} 条结果`, 'success');
@@ -1088,27 +1609,40 @@ function dispatchToolboxMessages(result = {}) {
     sourceType: message.sourceType || result.sourceType || 'telegram',
   }));
   if (!sourceKey || !messages.length) return;
-  for (const kind of ['twitter', 'badnews']) {
-    if (state.toolboxBindings[kind] !== sourceKey) continue;
+  for (const kind of ['twitter', 'badnews', 'haijiao']) {
+    if (!toolboxBindingIncludes(kind, sourceKey)) continue;
     const tool = state.toolbox[kind];
     appendUniqueToolMessages(tool, messages);
-    tool.sourceLabel = result.sourceLabel || 'Telegram 群组';
+    const sourceCount = normalizeToolboxBindingKeys(state.toolboxBindings[kind]).length;
+    tool.sourceLabel = sourceCount > 1 ? `${sourceCount} 个绑定来源` : result.sourceLabel || 'Telegram 群组/频道';
     runSimpleToolFilter(kind);
   }
   for (const kind of ['missav', 'av123']) {
-    if (state.toolboxBindings[kind] === sourceKey) {
-      appendMessagesToAvTool(kind, messages, result.sourceLabel || 'Telegram 群组');
+    if (toolboxBindingIncludes(kind, sourceKey)) {
+      const sourceCount = normalizeToolboxBindingKeys(state.toolboxBindings[kind]).length;
+      appendMessagesToAvTool(kind, messages, sourceCount > 1 ? `${sourceCount} 个绑定来源` : result.sourceLabel || 'Telegram 群组/频道');
     }
   }
 }
 
 async function syncToolboxBinding(kind) {
-  const sourceKey = state.toolboxBindings[kind];
-  if (!sourceKey) { toast(`请先为 ${toolLabel(kind)} 绑定 Telegram 群组`, 'error'); return; }
-  const source = toolboxGroupRows().find(row => row.sourceKey === sourceKey) || api.dbGetTelegramSource?.(sourceKey);
-  if (!source) { toast('原绑定群组当前不可用，请到 Telegram 来源重新连接', 'error'); return; }
-  if (source.sourceType === 'bot_group') await syncTelegramBotGroups();
-  else await syncTelegramGroups([source.chatKey]);
+  const sourceKeys = normalizeToolboxBindingKeys(state.toolboxBindings[kind]);
+  if (!sourceKeys.length) { toast(`请先为 ${toolLabel(kind)} 绑定 Telegram 群组或频道`, 'error'); return; }
+  const currentRows = new Map(toolboxGroupRows().map(row => [String(row.sourceKey || ''), row]));
+  const sources = sourceKeys
+    .map(sourceKey => currentRows.get(sourceKey) || api.dbGetTelegramSource?.(sourceKey))
+    .filter(Boolean);
+  if (!sources.length) { toast('绑定的群组/频道当前不可用，请到 Telegram 来源重新连接', 'error'); return; }
+  const missingCount = sourceKeys.length - sources.length;
+  if (missingCount) toast(`${missingCount} 个绑定来源当前不可用，本次同步其余 ${sources.length} 个来源`, 'info');
+  const hasBotSources = sources.some(source => source.sourceType === 'bot_group');
+  if (hasBotSources) await syncTelegramBotGroups();
+  const stoppedAfterBot = hasBotSources && state.telegram.bot.stopRequested;
+  const apiChatKeys = sources
+    .filter(source => source.sourceType !== 'bot_group')
+    .map(source => String(source.chatKey || ''))
+    .filter(Boolean);
+  if (apiChatKeys.length && !stoppedAfterBot) await syncTelegramGroups(apiChatKeys);
 }
 
 async function selectBackgroundImage() {
@@ -1703,30 +2237,68 @@ function bindEvents() {
     }
     const pageTarget = event.target.closest('[data-page-target]');
     if (pageTarget) switchPage(pageTarget.dataset.pageTarget);
+    const dataTableTarget = event.target.closest('[data-open-data-table]');
+    if (dataTableTarget) {
+      const search = dataTableTarget.dataset.openDataSearch === 'current-run'
+        ? String(state.currentRunId || state.preparedRunId || state.selectedRunId || '')
+        : '';
+      openDataTable(dataTableTarget.dataset.openDataTable, search);
+    }
   });
-  if (DOM.twitterGroupBinding) DOM.twitterGroupBinding.addEventListener('change', () => setToolboxBinding('twitter', DOM.twitterGroupBinding.value));
-  if (DOM.badnewsGroupBinding) DOM.badnewsGroupBinding.addEventListener('change', () => setToolboxBinding('badnews', DOM.badnewsGroupBinding.value));
-  if (DOM.avGroupBinding) DOM.avGroupBinding.addEventListener('change', () => setToolboxBinding(state.activeAvTool, DOM.avGroupBinding.value));
+  if (DOM.twitterGroupBinding) DOM.twitterGroupBinding.addEventListener('change', () => setToolboxBinding('twitter', selectedToolboxBindingKeys(DOM.twitterGroupBinding)));
+  if (DOM.badnewsGroupBinding) DOM.badnewsGroupBinding.addEventListener('change', () => setToolboxBinding('badnews', selectedToolboxBindingKeys(DOM.badnewsGroupBinding)));
+  if (DOM.haijiaoGroupBinding) DOM.haijiaoGroupBinding.addEventListener('change', () => setToolboxBinding('haijiao', selectedToolboxBindingKeys(DOM.haijiaoGroupBinding)));
+  if (DOM.avGroupBinding) DOM.avGroupBinding.addEventListener('change', () => setToolboxBinding(state.activeAvTool, selectedToolboxBindingKeys(DOM.avGroupBinding)));
   if (DOM.twitterRawInput) DOM.twitterRawInput.addEventListener('input', () => runSimpleToolFilter('twitter'));
   if (DOM.badnewsRawInput) DOM.badnewsRawInput.addEventListener('input', () => runSimpleToolFilter('badnews'));
+  if (DOM.haijiaoRawInput) DOM.haijiaoRawInput.addEventListener('input', () => runSimpleToolFilter('haijiao'));
   [DOM.twitterTimeStart, DOM.twitterTimeEnd].forEach(input => input?.addEventListener('change', () => runSimpleToolFilter('twitter')));
   [DOM.badnewsTimeStart, DOM.badnewsTimeEnd].forEach(input => input?.addEventListener('change', () => runSimpleToolFilter('badnews')));
+  [DOM.haijiaoTimeStart, DOM.haijiaoTimeEnd].forEach(input => input?.addEventListener('change', () => runSimpleToolFilter('haijiao')));
   if (DOM.avTimeStart) DOM.avTimeStart.addEventListener('change', saveActiveAvToolSession);
   if (DOM.avTimeEnd) DOM.avTimeEnd.addEventListener('change', saveActiveAvToolSession);
   if (DOM.btnTwitterSyncGroup) DOM.btnTwitterSyncGroup.addEventListener('click', () => syncToolboxBinding('twitter'));
   if (DOM.btnBadnewsSyncGroup) DOM.btnBadnewsSyncGroup.addEventListener('click', () => syncToolboxBinding('badnews'));
+  if (DOM.btnHaijiaoSyncGroup) DOM.btnHaijiaoSyncGroup.addEventListener('click', () => syncToolboxBinding('haijiao'));
   if (DOM.btnAvSyncGroup) DOM.btnAvSyncGroup.addEventListener('click', () => syncToolboxBinding(state.activeAvTool));
   if (DOM.btnTwitterImportFiles) DOM.btnTwitterImportFiles.addEventListener('click', () => importSimpleToolFiles('twitter'));
   if (DOM.btnBadnewsImportFiles) DOM.btnBadnewsImportFiles.addEventListener('click', () => importSimpleToolFiles('badnews'));
+  if (DOM.btnHaijiaoImportFiles) DOM.btnHaijiaoImportFiles.addEventListener('click', () => importSimpleToolFiles('haijiao'));
   if (DOM.btnTwitterFilter) DOM.btnTwitterFilter.addEventListener('click', () => runSimpleToolFilter('twitter'));
   if (DOM.btnBadnewsFilter) DOM.btnBadnewsFilter.addEventListener('click', () => runSimpleToolFilter('badnews'));
+  if (DOM.btnHaijiaoFilter) DOM.btnHaijiaoFilter.addEventListener('click', () => runSimpleToolFilter('haijiao'));
   if (DOM.btnTwitterClear) DOM.btnTwitterClear.addEventListener('click', () => clearSimpleTool('twitter'));
   if (DOM.btnBadnewsClear) DOM.btnBadnewsClear.addEventListener('click', () => clearSimpleTool('badnews'));
+  if (DOM.btnHaijiaoClear) DOM.btnHaijiaoClear.addEventListener('click', () => clearSimpleTool('haijiao'));
   if (DOM.btnCopyTwitterNames) DOM.btnCopyTwitterNames.addEventListener('click', () => copyToolboxText(DOM.twitterNamesOutput?.value, '博主名'));
   if (DOM.btnCopyTwitterUrls) DOM.btnCopyTwitterUrls.addEventListener('click', () => copyToolboxText(DOM.twitterUrlsOutput?.value, '主页链接'));
   if (DOM.btnCopyBadnewsUrls) DOM.btnCopyBadnewsUrls.addEventListener('click', () => copyToolboxText(DOM.badnewsUrlsOutput?.value, 'Bad.news 链接'));
+  if (DOM.btnCopyHaijiaoUrls) DOM.btnCopyHaijiaoUrls.addEventListener('click', () => copyToolboxText(DOM.haijiaoUrlsOutput?.value, '海角链接'));
   if (DOM.btnSaveTwitterResults) DOM.btnSaveTwitterResults.addEventListener('click', saveTwitterToolResults);
   if (DOM.btnSaveBadnewsResults) DOM.btnSaveBadnewsResults.addEventListener('click', saveBadnewsToolResults);
+  if (DOM.btnSaveHaijiaoResults) DOM.btnSaveHaijiaoResults.addEventListener('click', saveHaijiaoToolResults);
+  if (DOM.btnStoreTwitterHistory) DOM.btnStoreTwitterHistory.addEventListener('click', () => storeSimpleToolHistory('twitter'));
+  if (DOM.btnStoreBadnewsHistory) DOM.btnStoreBadnewsHistory.addEventListener('click', () => storeSimpleToolHistory('badnews'));
+  if (DOM.btnStoreHaijiaoHistory) DOM.btnStoreHaijiaoHistory.addEventListener('click', () => storeSimpleToolHistory('haijiao'));
+  if (DOM.toolHistorySearch) DOM.toolHistorySearch.addEventListener('input', debounce(() => {
+    state.toolHistory.search = DOM.toolHistorySearch.value;
+    state.toolHistory.selectedId = null;
+    state.toolHistory.selectedType = '';
+    renderToolHistoryPage();
+  }, 180));
+  if (DOM.btnRefreshToolHistory) DOM.btnRefreshToolHistory.addEventListener('click', renderToolHistoryPage);
+  if (DOM.toolHistoryList) DOM.toolHistoryList.addEventListener('click', event => {
+    const record = event.target.closest('[data-tool-history-id]');
+    if (!record) return;
+    state.toolHistory.selectedId = Number(record.dataset.toolHistoryId || 0);
+    state.toolHistory.selectedType = record.dataset.toolHistoryType || '';
+    state.toolHistory.detail = null;
+    renderToolHistoryPage();
+  });
+  if (DOM.toolHistoryDetail) DOM.toolHistoryDetail.addEventListener('click', event => {
+    const action = event.target.closest('[data-tool-history-action]')?.dataset.toolHistoryAction;
+    if (action) handleToolHistoryAction(action);
+  });
   DOM.telegramPanelButtons?.forEach(button => button.addEventListener('click', () => switchTelegramPanel(button.dataset.telegramPanel)));
   if (DOM.btnTelegramBotConnect) DOM.btnTelegramBotConnect.addEventListener('click', connectTelegramBot);
   if (DOM.btnTelegramBotConnectStored) DOM.btnTelegramBotConnectStored.addEventListener('click', () => connectStoredTelegramBot());
@@ -1738,6 +2310,9 @@ function bindEvents() {
   if (DOM.telegramBotGroupPicker) DOM.telegramBotGroupPicker.addEventListener('change', handleTelegramBotGroupSelection);
   if (DOM.btnTelegramBotSync) DOM.btnTelegramBotSync.addEventListener('click', syncTelegramBotGroups);
   if (DOM.btnTelegramBotStopSync) DOM.btnTelegramBotStopSync.addEventListener('click', stopTelegramBotGroups);
+  if (DOM.telegramNetworkMode) DOM.telegramNetworkMode.addEventListener('change', renderTelegramNetworkSettings);
+  if (DOM.btnTelegramNetworkSave) DOM.btnTelegramNetworkSave.addEventListener('click', saveTelegramNetworkConfig);
+  if (DOM.btnTelegramNetworkTest) DOM.btnTelegramNetworkTest.addEventListener('click', testTelegramNetworkConfig);
   if (DOM.btnTelegramStartQrAuth) DOM.btnTelegramStartQrAuth.addEventListener('click', startTelegramQrAuthorization);
   if (DOM.btnTelegramStartAuth) DOM.btnTelegramStartAuth.addEventListener('click', startTelegramAuthorization);
   if (DOM.btnTelegramApiDocs) DOM.btnTelegramApiDocs.addEventListener('click', () => api.openExternal('https://my.telegram.org/apps'));
@@ -1751,11 +2326,23 @@ function bindEvents() {
   if (DOM.telegramGroupSearch) DOM.telegramGroupSearch.addEventListener('input', renderTelegramGroups);
   if (DOM.telegramGroupPicker) DOM.telegramGroupPicker.addEventListener('change', handleTelegramGroupSelection);
   if (DOM.telegramSelectedSources) DOM.telegramSelectedSources.addEventListener('click', event => {
+    const removeButton = event.target.closest('[data-telegram-remove-group]');
+    if (removeButton) {
+      void removeTelegramGroupBinding(
+        removeButton.dataset.telegramRemoveGroup || '',
+        removeButton.dataset.telegramSourceType || 'api_group',
+      );
+      return;
+    }
     const button = event.target.closest('[data-telegram-sync-group]');
     if (button) void syncTelegramGroups([decodeURIComponent(button.dataset.telegramSyncGroup || '')]);
   });
   if (DOM.telegramAuthValue) DOM.telegramAuthValue.addEventListener('keydown', event => {
     if (event.key === 'Enter') void submitTelegramAuthorization();
+  });
+  if (DOM.telegramMarkReadAfterSync) DOM.telegramMarkReadAfterSync.addEventListener('change', () => {
+    state.telegram.markReadAfterSync = DOM.telegramMarkReadAfterSync.checked;
+    try { localStorage.setItem(TELEGRAM_MARK_READ_KEY, state.telegram.markReadAfterSync ? '1' : '0'); } catch {}
   });
   if (DOM.btnTelegramSync) DOM.btnTelegramSync.addEventListener('click', () => syncTelegramGroups());
   if (DOM.btnTelegramStopSync) DOM.btnTelegramStopSync.addEventListener('click', stopTelegramGroups);
@@ -1767,11 +2354,40 @@ function bindEvents() {
   if (DOM.btnClearRaindropToken) DOM.btnClearRaindropToken.addEventListener('click', clearRaindropToken);
   if (DOM.btnOpenRaindropTokenDocs) DOM.btnOpenRaindropTokenDocs.addEventListener('click', () => api.openExternal('https://developer.raindrop.io/v1/authentication/token'));
   if (DOM.btnRefreshRaindropCollections) DOM.btnRefreshRaindropCollections.addEventListener('click', () => loadRaindropCollections({ force: true }));
+  if (DOM.raindropModeSelect) DOM.raindropModeSelect.addEventListener('change', selectRaindropSyncMode);
   if (DOM.raindropBatchSelect) DOM.raindropBatchSelect.addEventListener('change', () => selectRaindropRun(DOM.raindropBatchSelect.value));
+  if (DOM.raindropManualTarget) DOM.raindropManualTarget.addEventListener('change', () => {
+    state.raindropSync.manualOverride = DOM.raindropManualTarget.checked;
+    state.raindropSync.plan = [];
+    if (state.raindropSync.manualOverride) {
+      state.raindropSync.selectedCollectionIds.add(Number(state.raindropSync.collectionId));
+      persistRaindropSyncSettings();
+    }
+    selectRaindropRun(state.raindropSync.scope, { render: false });
+    renderRaindropCollections();
+    renderRaindropPlan();
+  });
   if (DOM.raindropCollectionSelect) DOM.raindropCollectionSelect.addEventListener('change', selectRaindropCollection);
+  if (DOM.raindropCollectionSearch) DOM.raindropCollectionSearch.addEventListener('input', () => {
+    state.raindropSync.collectionSearch = DOM.raindropCollectionSearch.value || '';
+    renderRaindropCollectionPicker();
+  });
+  if (DOM.raindropCollectionPicker) DOM.raindropCollectionPicker.addEventListener('click', handleRaindropCollectionPicker);
+  if (DOM.btnSelectAllRaindropCollections) DOM.btnSelectAllRaindropCollections.addEventListener('click', selectAllVisibleRaindropCollections);
+  if (DOM.btnClearRaindropCollections) DOM.btnClearRaindropCollections.addEventListener('click', clearRaindropCollectionSelection);
+  if (DOM.raindropIncludeNested) DOM.raindropIncludeNested.addEventListener('change', () => {
+    state.raindropSync.includeNested = DOM.raindropIncludeNested.checked;
+    persistRaindropSyncSettings();
+    state.raindropSync.plan = [];
+    renderRaindropPlan();
+  });
+  if (DOM.raindropPreviewBody) DOM.raindropPreviewBody.addEventListener('change', handleRaindropConflictResolution);
   if (DOM.btnPreviewRaindropSync) DOM.btnPreviewRaindropSync.addEventListener('click', () => buildRaindropSyncPlan({ checkRemote: true }));
+  if (DOM.btnExportRaindropCsv) DOM.btnExportRaindropCsv.addEventListener('click', exportRaindropCsv);
   if (DOM.btnStartRaindropSync) DOM.btnStartRaindropSync.addEventListener('click', startRaindropSync);
   if (DOM.btnStopRaindropSync) DOM.btnStopRaindropSync.addEventListener('click', stopRaindropSync);
+  if (DOM.btnCopyRaindropFailedCodes) DOM.btnCopyRaindropFailedCodes.addEventListener('click', () => copyText(DOM.raindropFailedCodesOutput?.value || ''));
+  if (DOM.btnExportRaindropFailedCodes) DOM.btnExportRaindropFailedCodes.addEventListener('click', exportRaindropFailedCodes);
   if (DOM.btnToggleRaindropPreviewSize) DOM.btnToggleRaindropPreviewSize.addEventListener('click', () => setRaindropPreviewExpanded(!state.raindropSync.previewExpanded));
   if (DOM.dataModeButtons) DOM.dataModeButtons.forEach(btn => btn.addEventListener('click', () => switchDataMode(btn.dataset.dataMode)));
   if (DOM.btnCsvOpen) DOM.btnCsvOpen.addEventListener('click', () => openCsvFile());
@@ -1833,6 +2449,11 @@ function bindEvents() {
   DOM.btnSelectVisibleResults.addEventListener('click', selectVisibleResults);
   DOM.btnClearResultSelection.addEventListener('click', clearResultSelection);
   DOM.btnCopyResultTSV.addEventListener('click', copyResultTSV);
+  DOM.btnCopyResultCodes?.addEventListener('click', () => copyText(DOM.resultCodeListOutput?.value || ''));
+  DOM.btnCopyResultLinks?.addEventListener('click', () => copyText(DOM.resultLinkListOutput?.value || ''));
+  if (DOM.btnToggleResultTableSize) {
+    DOM.btnToggleResultTableSize.addEventListener('click', () => setResultTableExpanded(!state.resultTableExpanded));
+  }
   DOM.btnRetrySelectedResults.addEventListener('click', () => retryNetworkErrorsForStage([...state.resultSelected]));
   DOM.btnRetryAllNetworkResults.addEventListener('click', () => retryNetworkErrorsForStage(networkErrorIndexesForStage()));
   DOM.btnStopResults.addEventListener('click', stopProcessing);
@@ -1861,7 +2482,10 @@ function bindEvents() {
     updateUI();
   });
 
-  $('#btnHistory').addEventListener('click', () => { switchPage('library'); switchLibraryTab('runs'); });
+  $('#btnHistory').addEventListener('click', () => {
+    if (TOOL_BY_ID.has(state.activeTool)) switchPage('tool-history');
+    else { switchPage('library'); switchLibraryTab('runs'); }
+  });
   $('#btnCloseHistory').addEventListener('click', () => { DOM.modalHistory.style.display = 'none'; });
   $('#btnHelp').addEventListener('click', () => { DOM.modalHelp.style.display = 'flex'; });
   $('#btnCloseHelp').addEventListener('click', () => { DOM.modalHelp.style.display = 'none'; });
@@ -1884,6 +2508,7 @@ function bindEvents() {
     if (event.key !== 'Escape') return;
     closeCollectionContextMenu();
     if (state.raindropSync.previewExpanded) setRaindropPreviewExpanded(false);
+    if (state.resultTableExpanded) setResultTableExpanded(false);
   });
   DOM.modalHistory.addEventListener('click', e => { if (e.target === DOM.modalHistory) DOM.modalHistory.style.display = 'none'; });
   DOM.modalHelp.addEventListener('click', e => { if (e.target === DOM.modalHelp) DOM.modalHelp.style.display = 'none'; });
@@ -1954,6 +2579,98 @@ function telegramStatusText(auth) {
   return labels[auth.status] || String(auth.status || '未连接');
 }
 
+function telegramNetworkFormConfig() {
+  return {
+    mode: String(DOM.telegramNetworkMode?.value || 'auto'),
+    host: String(DOM.telegramProxyHost?.value || '127.0.0.1').trim(),
+    port: Number(DOM.telegramProxyPort?.value || 7890),
+  };
+}
+
+function applyTelegramNetworkForm(config = {}) {
+  if (DOM.telegramNetworkMode) DOM.telegramNetworkMode.value = config.mode || 'auto';
+  if (DOM.telegramProxyHost) DOM.telegramProxyHost.value = config.host || '127.0.0.1';
+  if (DOM.telegramProxyPort) DOM.telegramProxyPort.value = String(config.port || 7890);
+}
+
+function renderTelegramNetworkSettings() {
+  const network = state.telegram.network;
+  const mode = String(DOM.telegramNetworkMode?.value || network.mode || 'auto');
+  const usesProxyFields = mode === 'auto' || mode === 'socks5';
+  if (DOM.telegramProxyHost) DOM.telegramProxyHost.disabled = network.testing || !usesProxyFields;
+  if (DOM.telegramProxyPort) DOM.telegramProxyPort.disabled = network.testing || !usesProxyFields;
+  if (DOM.telegramNetworkMode) DOM.telegramNetworkMode.disabled = network.testing;
+  if (DOM.btnTelegramNetworkSave) DOM.btnTelegramNetworkSave.disabled = network.testing;
+  if (DOM.btnTelegramNetworkTest) DOM.btnTelegramNetworkTest.disabled = network.testing;
+  if (DOM.telegramNetworkStatus) {
+    DOM.telegramNetworkStatus.textContent = network.testing
+      ? '正在测试…'
+      : network.transport
+        ? `${network.status}：${network.transport}`
+        : network.status || '尚未测试';
+  }
+}
+
+async function initializeTelegramNetworkConfig() {
+  try {
+    const config = await api.getTelegramNetworkConfig();
+    state.telegram.network = {
+      ...state.telegram.network,
+      ...config,
+      loaded: true,
+      status: '已加载',
+      transport: '',
+    };
+    applyTelegramNetworkForm(config);
+  } catch (error) {
+    state.telegram.network = { ...state.telegram.network, loaded: true, status: `读取失败：${error.message || error}` };
+  }
+  renderTelegramNetworkSettings();
+}
+
+async function saveTelegramNetworkConfig() {
+  if (state.telegram.network.testing) return;
+  try {
+    const config = await api.saveTelegramNetworkConfig(telegramNetworkFormConfig());
+    state.telegram.network = {
+      ...state.telegram.network,
+      ...config,
+      loaded: true,
+      status: '已保存，下次连接生效',
+      transport: '',
+    };
+    applyTelegramNetworkForm(config);
+    renderTelegramNetworkSettings();
+    toast('Telegram 网络配置已保存', 'success');
+  } catch (error) {
+    state.telegram.network = { ...state.telegram.network, status: `保存失败：${error.message || error}`, transport: '' };
+    renderTelegramNetworkSettings();
+    toast(`代理配置无效：${error.message}`, 'error');
+  }
+}
+
+async function testTelegramNetworkConfig() {
+  if (state.telegram.network.testing) return;
+  state.telegram.network = { ...state.telegram.network, testing: true, status: '正在测试', transport: '' };
+  renderTelegramNetworkSettings();
+  try {
+    const result = await api.testTelegramNetworkConfig(telegramNetworkFormConfig());
+    state.telegram.network = {
+      ...state.telegram.network,
+      ...result.config,
+      testing: false,
+      status: '测试成功',
+      transport: result.transport || '',
+    };
+    renderTelegramNetworkSettings();
+    toast(`Telegram 连接成功：${result.transport || '当前通道'}`, 'success');
+  } catch (error) {
+    state.telegram.network = { ...state.telegram.network, testing: false, status: `测试失败：${error.message || error}`, transport: '' };
+    renderTelegramNetworkSettings();
+    toast(`Telegram 代理测试失败：${error.message}`, 'error');
+  }
+}
+
 function telegramBotStatusText(auth) {
   const labels = {
     disconnected: auth.configured ? '机器人已保存，尚未连接' : '未配置机器人',
@@ -2008,6 +2725,7 @@ function renderTelegramBotSource() {
 }
 
 function renderTelegramSource() {
+  renderTelegramNetworkSettings();
   const auth = state.telegram.auth;
   const kind = telegramAuthKind(auth.status);
   state.telegram.authKind = kind;
@@ -2024,6 +2742,7 @@ function renderTelegramSource() {
   }
   if (DOM.telegramAccountSummary) {
     const details = [statusText];
+    if (auth.transport) details.push(`通道：${auth.transport}`);
     if (auth.error) details.push(auth.error);
     if (auth.waitSeconds) details.push(`需等待 ${auth.waitSeconds} 秒`);
     if (auth.encryptionAvailable === false) details.push('Windows 安全存储不可用');
@@ -2042,6 +2761,7 @@ function renderTelegramSource() {
     DOM.telegramApiHash.placeholder = auth.configured ? '已安全保存，可留空' : '32 位字符串';
   }
   if (DOM.telegramPhone) DOM.telegramPhone.disabled = busyAuth || ready || telegramAnyRunning();
+  if (DOM.telegramMarkReadAfterSync) DOM.telegramMarkReadAfterSync.disabled = telegramAnyRunning();
   if (DOM.telegramQrLogin) DOM.telegramQrLogin.hidden = !waitingQr;
   if (DOM.telegramQrImage) {
     if (waitingQr && auth.qrDataUrl) DOM.telegramQrImage.src = auth.qrDataUrl;
@@ -2080,7 +2800,7 @@ function renderTelegramSource() {
       : ready
         ? state.telegram.groupSources.length
           ? `已绑定 ${state.telegram.groupSources.length} 个来源；默认只读取绑定后的新增消息`
-          : '请先加载群组并保存最多 5 个增量来源'
+          : `请先加载群组/频道并保存最多 ${TELEGRAM_SOURCE_LIMIT} 个增量来源`
         : statusText;
   }
   const preview = state.telegram.preview;
@@ -2117,6 +2837,14 @@ function telegramGroupTypeLabel(type) {
   }[String(type || '')] || '群组';
 }
 
+function annotateTelegramGroupSources(sources, availableGroups, loaded = false) {
+  const availableKeys = new Set((availableGroups || []).map(group => String(group?.chatKey || '')));
+  return (sources || []).map(source => ({
+    ...source,
+    unavailable: Boolean(loaded && !availableKeys.has(String(source.chatKey || ''))),
+  }));
+}
+
 function telegramBotCursorSourceKey(accountKey) {
   return `telegram-bot:${String(accountKey || '').trim()}:updates`;
 }
@@ -2143,7 +2871,7 @@ function mergeTelegramBotGroups(groups) {
 function renderTelegramBotGroups() {
   const bot = state.telegram.bot;
   const selected = bot.selectedGroupKeys || new Set();
-  if (DOM.telegramBotGroupSelectionCount) DOM.telegramBotGroupSelectionCount.textContent = `${selected.size} / 5`;
+  if (DOM.telegramBotGroupSelectionCount) DOM.telegramBotGroupSelectionCount.textContent = `${selected.size} / ${TELEGRAM_SOURCE_LIMIT}`;
   if (DOM.telegramBotGroupPicker) {
     const query = String(DOM.telegramBotGroupSearch?.value || '').trim().toLowerCase();
     const rows = (bot.availableGroups || []).filter(group =>
@@ -2159,7 +2887,7 @@ function renderTelegramBotGroups() {
     } else {
       DOM.telegramBotGroupPicker.innerHTML = rows.map(group => {
         const checked = selected.has(String(group.chatKey || ''));
-        const disabled = telegramAnyRunning() || (!checked && selected.size >= 5);
+        const disabled = telegramAnyRunning() || (!checked && selected.size >= TELEGRAM_SOURCE_LIMIT);
         return `<label class="telegram-group-option${checked ? ' selected' : ''}">
           <input type="checkbox" data-telegram-bot-group-key="${encodeURIComponent(String(group.chatKey || ''))}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
           <span class="telegram-group-option-main">
@@ -2184,9 +2912,12 @@ function renderTelegramBotGroups() {
           source.lastSyncAt ? `上次 ${source.lastSyncAt}` : '尚未同步',
           source.lastError ? `异常：${source.lastError}` : '',
         ].filter(Boolean).join(' · ');
-        return `<div class="telegram-selected-source">
-          <span><strong>${esc(source.sourceLabel || source.chatKey || 'Telegram 群组')}</strong><small>${esc(meta)}</small></span>
-          <span class="badge">随全部来源同步</span>
+        return `<div class="telegram-selected-source${source.unavailable ? ' is-unavailable' : ''}">
+          <span><strong>${esc(source.sourceLabel || source.chatKey || 'Telegram 群组')}</strong><small>${esc(source.unavailable ? '当前账号已退出或暂时不可访问 · ' : '')}${esc(meta)}</small></span>
+          <span class="telegram-selected-source-actions">
+            <span class="badge">${source.unavailable ? '待移除' : '随全部来源同步'}</span>
+            <button class="btn btn-outline btn-sm" type="button" data-telegram-remove-group="${encodeURIComponent(String(source.sourceKey || ''))}" data-telegram-source-type="bot_group" ${telegramAnyRunning() ? 'disabled' : ''}>移除绑定</button>
+          </span>
         </div>`;
       }).join('');
     }
@@ -2199,9 +2930,9 @@ function handleTelegramBotGroupSelection(event) {
   const chatKey = decodeURIComponent(input.dataset.telegramBotGroupKey || '');
   const selected = new Set(state.telegram.bot.selectedGroupKeys || []);
   if (input.checked) {
-    if (selected.size >= 5) {
+    if (selected.size >= TELEGRAM_SOURCE_LIMIT) {
       input.checked = false;
-      toast('最多只能选择 5 个 Telegram 群组', 'error');
+      toast(`最多只能选择 ${TELEGRAM_SOURCE_LIMIT} 个 Telegram 群组或频道`, 'error');
       return;
     }
     selected.add(chatKey);
@@ -2261,6 +2992,7 @@ async function clearTelegramBot() {
   try {
     state.telegram.bot.auth = { ...state.telegram.bot.auth, ...(await api.clearTelegramBot()) };
     state.telegram.bot.availableGroups = [];
+    state.telegram.bot.groupsLoaded = false;
     state.telegram.bot.groupSources = [];
     state.telegram.bot.selectedGroupKeys = new Set();
     renderTelegramSource();
@@ -2464,7 +3196,7 @@ function stopTelegramBotGroups() {
 
 function renderTelegramGroups() {
   const selected = state.telegram.selectedGroupKeys || new Set();
-  if (DOM.telegramGroupSelectionCount) DOM.telegramGroupSelectionCount.textContent = `${selected.size} / 5`;
+  if (DOM.telegramGroupSelectionCount) DOM.telegramGroupSelectionCount.textContent = `${selected.size} / ${TELEGRAM_SOURCE_LIMIT}`;
   if (DOM.telegramGroupPicker) {
     const query = String(DOM.telegramGroupSearch?.value || '').trim().toLowerCase();
     const rows = (state.telegram.availableGroups || []).filter(group =>
@@ -2476,11 +3208,11 @@ function renderTelegramGroups() {
     } else if (!state.telegram.availableGroups.length) {
       DOM.telegramGroupPicker.innerHTML = '<div class="telegram-history-empty">连接账号后点击“加载/刷新群组”</div>';
     } else if (!rows.length) {
-      DOM.telegramGroupPicker.innerHTML = '<div class="telegram-history-empty">没有匹配的群组</div>';
+      DOM.telegramGroupPicker.innerHTML = '<div class="telegram-history-empty">没有匹配的群组或频道</div>';
     } else {
       DOM.telegramGroupPicker.innerHTML = rows.map(group => {
         const checked = selected.has(String(group.chatKey));
-        const disabled = state.telegram.running || (!checked && selected.size >= 5);
+        const disabled = state.telegram.running || (!checked && selected.size >= TELEGRAM_SOURCE_LIMIT);
         const badges = [
           telegramGroupTypeLabel(group.chatType),
           group.owned ? '你创建的' : group.admin ? '管理员' : '',
@@ -2512,12 +3244,42 @@ function renderTelegramGroups() {
           source.lastSyncAt ? `上次 ${source.lastSyncAt}` : '尚未同步',
           source.lastError ? `异常：${source.lastError}` : '',
         ].filter(Boolean).join(' · ');
-        return `<div class="telegram-selected-source">
-          <span><strong>${esc(source.sourceLabel || source.chatKey || 'Telegram 群组')}</strong><small>${esc(meta)}</small></span>
-          <button class="btn btn-outline btn-sm" type="button" data-telegram-sync-group="${encodeURIComponent(String(source.chatKey || ''))}" ${state.telegram.running ? 'disabled' : ''}>同步此群</button>
+        return `<div class="telegram-selected-source${source.unavailable ? ' is-unavailable' : ''}">
+          <span><strong>${esc(source.sourceLabel || source.chatKey || 'Telegram 群组')}</strong><small>${esc(source.unavailable ? '当前账号已退出或暂时不可访问 · ' : '')}${esc(meta)}</small></span>
+          <span class="telegram-selected-source-actions">
+            ${source.unavailable ? '<span class="badge">待移除</span>' : ''}
+            <button class="btn btn-outline btn-sm" type="button" data-telegram-sync-group="${encodeURIComponent(String(source.chatKey || ''))}" ${state.telegram.running || source.unavailable ? 'disabled' : ''}>同步此来源</button>
+            <button class="btn btn-outline btn-sm" type="button" data-telegram-remove-group="${encodeURIComponent(String(source.sourceKey || ''))}" data-telegram-source-type="api_group" ${state.telegram.running ? 'disabled' : ''}>移除绑定</button>
+          </span>
         </div>`;
       }).join('');
     }
+  }
+}
+
+async function removeTelegramGroupBinding(sourceKey, sourceType = 'api_group') {
+  if (telegramAnyRunning()) return;
+  const key = decodeURIComponent(String(sourceKey || ''));
+  if (!key) return;
+  const isBot = sourceType === 'bot_group';
+  const collection = isBot ? state.telegram.bot.groupSources : state.telegram.groupSources;
+  const source = (collection || []).find(row => String(row.sourceKey || '') === key);
+  if (!source) return;
+  if (!confirm(`移除来源“${source.sourceLabel || source.chatKey || key}”的增量绑定？\n\n消息历史、番号和导入记录会保留。之后重新加入群组时可再次绑定。`)) return;
+  try {
+    api.dbRemoveTelegramGroupSource(key);
+    if (isBot) {
+      state.telegram.bot.groupSources = (state.telegram.bot.groupSources || []).filter(row => String(row.sourceKey || '') !== key);
+      state.telegram.bot.selectedGroupKeys.delete(String(source.chatKey || ''));
+    } else {
+      state.telegram.groupSources = (state.telegram.groupSources || []).filter(row => String(row.sourceKey || '') !== key);
+      state.telegram.selectedGroupKeys.delete(String(source.chatKey || ''));
+    }
+    refreshToolboxGroupOptions();
+    renderTelegramSource();
+    toast(`已移除“${source.sourceLabel || source.chatKey || key}”绑定；历史数据仍保留`, 'success');
+  } catch (error) {
+    toast(`移除 Telegram 来源失败：${error.message}`, 'error');
   }
 }
 
@@ -2527,9 +3289,9 @@ function handleTelegramGroupSelection(event) {
   const chatKey = decodeURIComponent(input.dataset.telegramGroupKey || '');
   const selected = new Set(state.telegram.selectedGroupKeys || []);
   if (input.checked) {
-    if (selected.size >= 5) {
+    if (selected.size >= TELEGRAM_SOURCE_LIMIT) {
       input.checked = false;
-      toast('最多只能选择 5 个 Telegram 群组', 'error');
+      toast(`最多只能选择 ${TELEGRAM_SOURCE_LIMIT} 个 Telegram 群组或频道`, 'error');
       return;
     }
     selected.add(chatKey);
@@ -2551,8 +3313,12 @@ async function loadTelegramGroups(options = {}) {
   try {
     const result = await api.listTelegramGroups();
     state.telegram.availableGroups = result.groups || [];
-    state.telegram.groupSources = api.dbGetTelegramGroupSources(result.accountKey || state.telegram.auth.accountKey);
-    state.telegram.selectedGroupKeys = new Set(state.telegram.groupSources.map(source => String(source.chatKey || '')));
+    state.telegram.groupsLoaded = true;
+    const sources = api.dbGetTelegramGroupSources(result.accountKey || state.telegram.auth.accountKey);
+    state.telegram.groupSources = annotateTelegramGroupSources(sources, state.telegram.availableGroups, true);
+    state.telegram.selectedGroupKeys = new Set(state.telegram.groupSources
+      .filter(source => !source.unavailable)
+      .map(source => String(source.chatKey || '')));
     state.telegram.auth = {
       ...state.telegram.auth,
       status: 'ready',
@@ -2563,7 +3329,7 @@ async function loadTelegramGroups(options = {}) {
     if (!options.silent) toast(`已加载 ${state.telegram.availableGroups.length} 个群组/频道`, 'success');
   } catch (error) {
     state.telegram.auth = { ...state.telegram.auth, status: 'error', error: error.message || String(error) };
-    if (!options.silent) toast(`加载 Telegram 群组失败：${error.message}`, 'error');
+    if (!options.silent) toast(`加载 Telegram 群组/频道失败：${error.message}`, 'error');
   } finally {
     state.telegram.groupsLoading = false;
     renderTelegramSource();
@@ -2580,7 +3346,7 @@ async function saveTelegramGroupSources() {
   const available = new Map((state.telegram.availableGroups || []).map(group => [String(group.chatKey || ''), group]));
   const groups = [...state.telegram.selectedGroupKeys].map(chatKey => available.get(chatKey)).filter(Boolean);
   if (groups.length !== state.telegram.selectedGroupKeys.size) {
-    toast('部分已选群组不在当前列表中，请刷新后重新选择', 'error');
+    toast('部分已选群组/频道不在当前列表中，请刷新后重新选择', 'error');
     return;
   }
   try {
@@ -2593,7 +3359,7 @@ async function saveTelegramGroupSources() {
     renderTelegramSource();
     toast(groups.length ? `已保存 ${groups.length} 个增量来源；首次同步不会扫描旧历史` : '已停用全部 Telegram 增量来源', 'success');
   } catch (error) {
-    toast(`保存 Telegram 群组失败：${error.message}`, 'error');
+    toast(`保存 Telegram 群组/频道失败：${error.message}`, 'error');
   }
 }
 
@@ -2638,8 +3404,15 @@ async function refreshTelegramSourcePage() {
   }
   if (state.telegram.auth.accountKey) {
     try {
-      state.telegram.groupSources = api.dbGetTelegramGroupSources(state.telegram.auth.accountKey);
-      state.telegram.selectedGroupKeys = new Set(state.telegram.groupSources.map(source => String(source.chatKey || '')));
+      const sources = api.dbGetTelegramGroupSources(state.telegram.auth.accountKey);
+      state.telegram.groupSources = annotateTelegramGroupSources(
+        sources,
+        state.telegram.availableGroups,
+        state.telegram.groupsLoaded,
+      );
+      state.telegram.selectedGroupKeys = new Set(state.telegram.groupSources
+        .filter(source => !source.unavailable)
+        .map(source => String(source.chatKey || '')));
     } catch {
       state.telegram.groupSources = [];
     }
@@ -2761,6 +3534,7 @@ async function logoutTelegram() {
   try {
     state.telegram.auth = { ...state.telegram.auth, ...(await api.logoutTelegram()) };
     state.telegram.availableGroups = [];
+    state.telegram.groupsLoaded = false;
     state.telegram.groupSources = [];
     state.telegram.selectedGroupKeys = new Set();
     renderTelegramSource();
@@ -2865,6 +3639,22 @@ async function syncTelegramGroups(targetChatKeys = []) {
         syncTargetMessageId: Number(source.syncTargetMessageId || 0),
       });
       await persistTelegramImport(result, { append: true });
+      if (state.telegram.markReadAfterSync && result.checkpointComplete && !result.stopped && Number(result.maxFetchedMessageId || 0) > 0) {
+        try {
+          await api.markTelegramGroupRead({
+            chatKey: source.chatKey,
+            maxId: Number(result.maxFetchedMessageId),
+          });
+        } catch (markError) {
+          failedGroups++;
+          logEvent('warn', 'telegram_mark_read_failed', {
+            chatKey: source.chatKey,
+            maxId: Number(result.maxFetchedMessageId),
+            error: markError.message || String(markError),
+          });
+          toast(`${source.sourceLabel || 'Telegram 来源'}已写入本地，但标记已读失败：${markError.message}`, 'info');
+        }
+      }
       completedGroups++;
       if (result.stopped) {
         state.telegram.stopRequested = true;
@@ -3013,7 +3803,10 @@ function parseInputCodes(label = '') {
   const rawInput = DOM.codeInput.value;
   const isRaindropCsv = /^\uFEFF?id\s*,\s*title\s*,\s*note\s*,\s*excerpt\s*,\s*url\s*,\s*folder\s*,/i.test(rawInput);
   const sourceLabel = label || DOM.inputSourceInfo?.dataset.sourceLabel || '已识别';
-  state.inputCodes = api.parseCodeList(rawInput);
+  state.inputEntries = api.parseInputEntries
+    ? api.parseInputEntries(rawInput)
+    : api.parseCodeList(rawInput).map(code => ({ code, sourceUrl: '' }));
+  state.inputCodes = state.inputEntries.map(entry => entry.code);
   const parsedSignature = state.inputCodes.map(code => api.codeComparableKey(code)).join('|');
   if (!state.isProcessing && state.preparedInputSignature && parsedSignature !== state.preparedInputSignature) {
     state.preparedRunId = null;
@@ -3954,10 +4747,36 @@ function workflowTaskErrors(row, stageKeys = RESULT_STAGE_KEYS, includeRowError 
   return [...new Set([...rowErrors, ...errors].map(value => String(value || '').trim()).filter(Boolean))].join(' | ');
 }
 
+function updateResultTextOutputs() {
+  const workspace = activeResultWorkspace();
+  const codes = [];
+  const links = [];
+  for (const row of state.results || []) {
+    const code = String(row?.code || '').trim();
+    if (!code) continue;
+    codes.push(code);
+    if (workspace.key === 'av123') {
+      const taskUrl = String(resultTask(row, 'av123Lookup')?.url || '').trim();
+      links.push(taskUrl || api.build123AvDetailUrl(code));
+    } else {
+      const taskUrl = String(resultTask(row, 'missavLookup')?.url || '').trim();
+      links.push(taskUrl || String(row?.url || row?.sourceUrl || '').trim() || api.candidateUrls(code)?.[0] || '');
+    }
+  }
+  const siteLabel = workspace.key === 'av123' ? '123AV' : 'MissAV';
+  if (DOM.resultCodeListTitle) DOM.resultCodeListTitle.textContent = `${siteLabel} 番号清单 · ${codes.length} 条`;
+  if (DOM.resultLinkListTitle) DOM.resultLinkListTitle.textContent = `${siteLabel} 链接清单 · ${links.length} 条`;
+  if (DOM.resultCodeListOutput) DOM.resultCodeListOutput.value = codes.join('\n');
+  if (DOM.resultLinkListOutput) DOM.resultLinkListOutput.value = links.join('\n');
+  if (DOM.btnCopyResultCodes) DOM.btnCopyResultCodes.disabled = !codes.length;
+  if (DOM.btnCopyResultLinks) DOM.btnCopyResultLinks.disabled = !links.length;
+}
+
 function renderTable() {
   configureResultWorkspaceControls();
   renderResultTableHead();
   updateOperationSummaries();
+  updateResultTextOutputs();
   state.resultSelected = new Set([...state.resultSelected].filter(index => state.results[index]));
   refreshResultTagOptions();
   const entries = getFilteredResultEntries();
@@ -5079,6 +5898,7 @@ function batchItemToResult(item) {
   row.batchPosition = Number(item.position);
   row.runId = Number(item.runId || 0);
   row.itemStatus = item.itemStatus || '';
+  row.sourceUrl = item.sourceUrl || '';
   row.tasks = item.tasks && typeof item.tasks === 'object' ? item.tasks : {};
   return row;
 }
@@ -5118,9 +5938,18 @@ function prepareNewProcessingRun() {
 
   // 输入内部去重
   const uniqueCodes = []; const seen = new Set();
+  const sourceUrlByKey = new Map((state.inputEntries || []).map(entry => [
+    api.codeComparableKey(entry.code),
+    String(entry.sourceUrl || ''),
+  ]));
   for (const c of state.inputCodes) {
     const key = api.codeComparableKey(c);
-    if (seen.has(key)) { state.results.push(api.buildOutputRow(c, '', 'duplicate_in_input', [], [], '', '本次输入重复', false)); state.stats.duplicate++; }
+    if (seen.has(key)) {
+      const duplicateRow = api.buildOutputRow(c, sourceUrlByKey.get(key) || '', 'duplicate_in_input', [], [], '', '本次输入重复', false);
+      duplicateRow.sourceUrl = sourceUrlByKey.get(key) || '';
+      state.results.push(duplicateRow);
+      state.stats.duplicate++;
+    }
     else { seen.add(key); uniqueCodes.push(c); }
   }
   state.stats.total = state.inputCodes.length;
@@ -5129,17 +5958,29 @@ function prepareNewProcessingRun() {
   const toProcess = [];
   for (const c of uniqueCodes) {
     const found = api.dbFindCode(c);
-    if (found.found && !['not_found', 'need_manual_check', 'page_ok_play_unknown', 'network_error'].includes(found.status)) {
-      state.results.push(api.buildOutputRow(found.code || c, found.url || '', 'already_exists', [], [], '', `已存在于数据库`, false));
+    if (found.found && !['pending', 'not_found', 'need_manual_check', 'page_ok_play_unknown', 'network_error'].includes(found.status)) {
+      const existingRow = api.buildOutputRow(found.code || c, found.url || sourceUrlByKey.get(api.codeComparableKey(c)) || '', 'already_exists', [], [], '', `已存在于数据库`, false);
+      existingRow.sourceUrl = sourceUrlByKey.get(api.codeComparableKey(c)) || found.sourceUrl || '';
+      state.results.push(existingRow);
       state.stats.exists++;
     } else { toProcess.push(c); }
   }
+  api.dbRegisterInputCodes?.(uniqueCodes.map(code => ({
+    code,
+    sourceUrl: sourceUrlByKey.get(api.codeComparableKey(code)) || '',
+  })));
   state.stats.new = toProcess.length;
   logEvent('info', 'processing_deduplicated', { total: state.stats.total, toProcess: toProcess.length, existing: state.stats.exists, duplicate: state.stats.duplicate });
   updateStats(); renderTable();
   const batchItems = [
-    ...state.results.map(row => ({ ...row, itemStatus: processingItemStatusForRow(row) })),
-    ...toProcess.map(code => ({ code, status: 'queued', itemStatus: 'queued', includeInImport: false })),
+    ...state.results.map(row => ({ ...row, sourceUrl: row.sourceUrl || sourceUrlByKey.get(api.codeComparableKey(row.code)) || '', itemStatus: processingItemStatusForRow(row) })),
+    ...toProcess.map(code => ({
+      code,
+      sourceUrl: sourceUrlByKey.get(api.codeComparableKey(code)) || '',
+      status: 'queued',
+      itemStatus: 'queued',
+      includeInImport: false,
+    })),
   ];
   const source = currentInputSource();
   const batchName = DOM.batchName?.value.trim() || automaticBatchName();
@@ -5276,6 +6117,7 @@ async function runSiteProcessing(batch, site = 'missav') {
       await processCodeQueue(queue.map(item => item.code), speedProfile, {
         runId: batch.id,
         batchPositions: queue.map(item => item.position),
+        sourceUrls: queue.map(item => item.sourceUrl || ''),
         inPlaceResults: true,
       });
     } else {
@@ -5362,6 +6204,7 @@ async function processCodeQueue(codes, profile, options = {}) {
   const inPlaceResults = options.inPlaceResults === true && !replaceIndexes;
   const runId = Number(options.runId || 0);
   const batchPositions = Array.isArray(options.batchPositions) ? options.batchPositions.map(Number) : [];
+  const sourceUrls = Array.isArray(options.sourceUrls) ? options.sourceUrls.map(value => String(value || '')) : [];
   const progressOffset = Math.max(0, Number(options.progressOffset || 0));
   const progressTotal = Math.max(progressOffset + codes.length, Number(options.progressTotal || codes.length));
   const timingOffset = Math.max(0, Number(options.timingOffset ?? progressOffset));
@@ -5415,12 +6258,13 @@ async function processCodeQueue(codes, profile, options = {}) {
       try {
         let row;
         try {
-          row = await processOneCode(code, profile);
+          row = await processOneCode(code, profile, sourceUrls[index] || '');
         } catch (err) {
-          row = api.buildOutputRow(api.normalizeCode(code), '', 'network_error', [], [], [], `处理异常：${err.message || '未知错误'}`, false);
+          row = api.buildOutputRow(api.normalizeCode(code), sourceUrls[index] || api.candidateUrls(code)?.[0] || '', 'network_error', [], [], [], `处理异常：${err.message || '未知错误'}`, false);
           row.error = err.message || '未知错误';
           logEvent('error', 'code_processing_exception', { code, speedMode: profile.key, error: row.error });
         }
+        row.sourceUrl = sourceUrls[index] || '';
 
         processedRows[index] = row;
         if (row.status === 'not_found') state.stats.notFound++;
@@ -5763,9 +6607,10 @@ async function process123AvQueueWithPolicy(items, profile, options = {}) {
   return { completed: totalCompleted, total: queue.length, roundsRun, remainingNetworkErrors: roundItems.length };
 }
 
-async function processOneCode(code, profile = processingSpeed.getSiteProfile('missav', speedModeForSite('missav'))) {
+async function processOneCode(code, profile = processingSpeed.getSiteProfile('missav', speedModeForSite('missav')), preferredSourceUrl = '') {
   const normalized = api.normalizeCode(code);
-  const allUrls = api.candidateUrls(normalized);
+  const generatedUrls = api.candidateUrls(normalized);
+  const allUrls = [...new Set([String(preferredSourceUrl || '').trim(), ...generatedUrls].filter(Boolean))];
   const urls = processingSpeed.selectCandidateUrls(allUrls, profile.key);
   const attempts = [];
   let confirmed = false;
@@ -5838,6 +6683,7 @@ async function processOneCode(code, profile = processingSpeed.getSiteProfile('mi
       : '';
   const includeInImport = bestStatus !== 'network_error';
   const row = api.buildOutputRow(normalized, bestUrl, bestStatus, actresses, genres, matchedTags, reason, includeInImport);
+  row.sourceUrl = String(preferredSourceUrl || '').trim();
   row.error = resolved.error || '';
   row.attemptCount = attempts.length;
   logEvent(bestStatus === 'network_error' ? 'warn' : 'info', 'code_resolved', {
@@ -5940,6 +6786,12 @@ function deleteProcessingRunNow(runId) {
     updateUI();
     setStatus(null, null, '批次已删除 ✓', null);
     if (state.activePage === 'library') void refreshLibrary();
+    if (state.activePage === 'tool-history') {
+      state.toolHistory.selectedId = null;
+      state.toolHistory.selectedType = '';
+      state.toolHistory.detail = null;
+      renderToolHistoryPage();
+    }
     logEvent('warn', 'processing_run_deleted', {
       runId: id,
       itemCount: Number(result.itemCount || 0),
@@ -6113,6 +6965,7 @@ async function retryResultIndexes(indexes) {
   await processCodeQueue(retryItems.map(item => item.code), speedProfile, {
     runId,
     batchPositions: retryItems.map(item => item.position),
+    sourceUrls: retryItems.map(item => item.sourceUrl || ''),
     inPlaceResults: true,
   });
   const beforeFinish = api.dbGetRun(runId);
@@ -6255,6 +7108,26 @@ async function openLibraryModal() {
   switchPage('library');
   switchDataMode('library');
   await refreshLibrary();
+}
+
+function openDataTable(requestedTable, search = '') {
+  const table = requestedTable === 'active-tool-history'
+    ? ['missav', 'av123'].includes(state.activeTool) ? 'processing_runs' : 'tool_history_runs'
+    : String(requestedTable || 'codes');
+  const available = api.dbGetEditableTables().filter(item => !['bookmarks', 'bookmark_collections'].includes(item.name));
+  if (!available.some(item => item.name === table)) {
+    toast(`数据表 ${table} 不可管理`, 'error');
+    return;
+  }
+  state.rawDbTable = table;
+  state.rawDbPage = 1;
+  state.rawDbSelected.clear();
+  state.rawDbSelectionAnchor = null;
+  state.libraryTab = 'raw';
+  if (DOM.librarySearch) DOM.librarySearch.value = String(search || '');
+  switchDataMode('library');
+  switchPage('library');
+  refreshLibrary();
 }
 
 function switchLibraryTab(tab) {
@@ -6401,10 +7274,12 @@ function applyImportComparePolicy() {
   state.importCompare.selected = selected;
 }
 
-async function analyzeImportComparison(text = state.importCompare.text) {
+async function analyzeImportComparison(text = state.importCompare.text, extractedCodes = null) {
   state.importCompare.text = String(text || '');
   state.importCompare.metadataByKey = extractRaindropMetadataFromCsv(state.importCompare.text);
-  const codes = api.parseCodeList(state.importCompare.text);
+  const codes = Array.isArray(extractedCodes)
+    ? [...new Set(extractedCodes.map(code => api.normalizeCode(code)).filter(Boolean))]
+    : api.parseCodeList(state.importCompare.text);
   const report = api.dbAnalyzeCodeImport(codes);
   state.importCompare.rows = report.rows || [];
   state.importCompare.filter = 'all';
@@ -6459,21 +7334,38 @@ async function importComparisonFiles() {
   const paths = await api.openFile({
     title: '选择要比对的文件',
     multiSelections: true,
-    filters: [{ name: '文本与数据文件', extensions: ['txt', 'md', 'html', 'htm', 'csv'] }],
+    filters: [{ name: '文本与数据文件', extensions: ['txt', 'md', 'html', 'htm', 'json', 'csv', 'log'] }],
   });
   if (!paths || !paths.length) return;
   const chunks = [];
+  const extractedCodes = [];
   const metadata = new Map();
+  const structuredPaths = paths.filter(filePath => /\.html?$|\.json$/i.test(filePath));
+  let structuredErrors = [];
+  if (structuredPaths.length) {
+    try {
+      const parsed = await api.parseTelegramExport(structuredPaths);
+      for (const message of parsed?.messages || []) extractedCodes.push(...(message?.codes || []));
+      structuredErrors = parsed?.errors || [];
+    } catch (error) {
+      structuredErrors = [{ file: `${structuredPaths.length} 个 Telegram 文件`, error: error.message || String(error) }];
+    }
+  }
   for (const filePath of paths) {
     const text = await api.readFile(filePath, 'utf-8');
     chunks.push(text);
+    if (!/\.html?$|\.json$/i.test(filePath)) extractedCodes.push(...api.parseCodeList(text));
     for (const [key, record] of extractRaindropMetadataFromCsv(text)) if (!metadata.has(key)) metadata.set(key, record);
   }
   state.importCompare.text = chunks.join('\n\n');
   state.importCompare.sourceLabel = `${paths.length} 个文件`;
-  await analyzeImportComparison(state.importCompare.text);
+  await analyzeImportComparison(state.importCompare.text, extractedCodes);
   state.importCompare.metadataByKey = metadata;
   await refreshLibrary();
+  if (structuredErrors.length) {
+    logEvent('warn', 'import_compare_telegram_parse_partial', { errors: structuredErrors });
+    toast(`已跳过 ${structuredErrors.length} 个无法解析的 Telegram 文件；其他文件仍已完成比对`, 'warning');
+  }
 }
 
 function selectedImportCodes() {
@@ -7322,7 +8214,7 @@ function renderLibraryBackups(q) {
       <section class="database-reset-panel">
         <div>
           <strong>正式启用前归零 / 全库重新开始</strong>
-          <p>当前数据库共 ${inventory.businessRows} 行业务数据，分布在 ${inventory.tables.filter(table => table.rowCount > 0).length} 张表。操作会先创建完整 SQLite 备份，再清空番号、标签与关系、处理批次和四阶段任务、站点缓存、Raindrop 映射、Telegram 来源/消息指纹/导入历史，以及旧兼容收藏数据。</p>
+          <p>当前数据库共 ${inventory.businessRows} 行业务数据，分布在 ${inventory.tables.filter(table => table.rowCount > 0).length} 张表。操作会先创建完整 SQLite 备份，再清空番号、标签与关系、五个工具的处理历史、影片处理批次和阶段任务、站点缓存、Raindrop 映射、Telegram 来源/消息指纹/导入历史，以及旧兼容收藏数据。</p>
           <small>保留：数据库结构、备份文件、外观设置，以及 Windows 安全存储中的 Chrome 配对、Raindrop/Telegram 令牌和会话。</small>
         </div>
         <button class="btn btn-danger" data-action="database-reset-all">备份并清空全部业务数据</button>
@@ -7522,7 +8414,7 @@ function renderCodeLibraryItem(row) {
   const id = Number(row.id);
   const selected = state.codeSelected.has(id);
   const focused = Number(state.selectedCodeId) === id;
-  const tags = [...(row.actress_tags || []), ...(row.genre_tags || [])];
+  const tags = row.final_tags || [...(row.actress_tags || []), ...(row.genre_tags || [])];
   return `<article class="raindrop-record-item manager-code-record ${selected ? 'is-selected' : ''} ${focused ? 'is-focused' : ''}" data-code-row="${id}" role="option" aria-selected="${selected ? 'true' : 'false'}" tabindex="0">
     <input type="checkbox" data-code-select-row="${id}" ${selected ? 'checked' : ''} aria-label="选择 ${esc(row.code)}">
     <button class="record-main" data-action="code-focus-row" data-id="${id}">
@@ -7591,6 +8483,7 @@ function renderCodeDetailPanel(row) {
         <label class="code-detail-field"><span>处理状态</span><select data-code-detail-field="status">${statusOptionsHtml(row.status || 'ok')}</select></label>
         <label class="code-detail-field"><span>女优 Tags</span><textarea data-code-detail-field="actress_tags" spellcheck="false">${esc((row.actress_tags || []).join('\n'))}</textarea></label>
         <label class="code-detail-field"><span>类型 Tags</span><textarea data-code-detail-field="genre_tags" spellcheck="false">${esc((row.genre_tags || []).join('\n'))}</textarea></label>
+        <label class="code-detail-field"><span>Raindrop / 最终 Tags</span><textarea data-code-detail-field="raindrop_tags" spellcheck="false">${esc((row.raindrop_tag_list || []).join('\n'))}</textarea></label>
         <label class="code-detail-field"><span>加入时间</span><input value="${esc(row.created_at || '')}" readonly></label>
       </div>
       <div class="code-detail-actions">
@@ -7997,7 +8890,10 @@ function renderLibraryRuns(q = '') {
       </div>
       <div class="batch-toolbar">
         <span>批次数据永久保存在本地数据库；停止或异常退出后可继续剩余项。</span>
-        <button class="btn btn-outline btn-sm" data-action="runs-refresh">刷新</button>
+        <div class="btn-row">
+          <button class="btn btn-outline btn-sm" type="button" data-open-data-table="processing_runs"><i data-lucide="table-properties"></i><span>管理批次数据</span></button>
+          <button class="btn btn-outline btn-sm" data-action="runs-refresh">刷新</button>
+        </div>
       </div>
       <div class="batch-layout">
         <section class="batch-list-pane">
@@ -9421,7 +10317,12 @@ async function saveCodeDetail(id) {
   const panel = DOM.libraryContent.querySelector(`[data-code-detail-id="${id}"]`);
   if (!panel) throw new Error('没有找到详情面板');
   const get = name => panel.querySelector(`[data-code-detail-field="${name}"]`)?.value || '';
-  api.dbUpdateCodeRecord(id, { code: get('code'), best_url: get('best_url'), status: get('status') || 'ok' });
+  api.dbUpdateCodeRecord(id, {
+    code: get('code'),
+    best_url: get('best_url'),
+    status: get('status') || 'ok',
+    raindrop_tags: get('raindrop_tags'),
+  });
   api.dbSetCodeActressTags(id, get('actress_tags'));
   api.dbSetCodeGenreTags(id, get('genre_tags'));
   state.selectedCodeId = id;
@@ -9651,19 +10552,51 @@ async function bulkDeleteCodes() {
 }
 async function addRawRowByPrompt() {
   const data = state.rawDbData || api.dbGetRawTableRows(state.rawDbTable, { limit: 1 });
-  const row = {};
-  for (const col of data.insertable || []) {
-    const value = await showTextInputDialog({
-      title: `新增 ${data.table} 记录`,
-      label: col,
-      value: defaultRawValue(data.table, col),
-      submitLabel: '下一步',
-    });
-    if (value === null) return;
-    row[col] = value;
-  }
+  const row = await showRawRowDialog(data);
+  if (!row) return;
+  createBulkEditBackup(`raw_insert_${data.table}`);
   api.dbInsertRawRow(data.table, row);
   await afterDbWrite('原始表记录已新增');
+}
+
+function showRawRowDialog(data) {
+  return new Promise(resolve => {
+    document.querySelector('.app-input-dialog-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'app-input-dialog-overlay';
+    const fields = (data.insertable || []).map(column => {
+      const value = defaultRawValue(data.table, column);
+      const multiline = /(_json|error|note|excerpt|tags)$/i.test(column);
+      const control = multiline
+        ? `<textarea data-raw-dialog-column="${esc(column)}" rows="2" spellcheck="false">${esc(value)}</textarea>`
+        : `<input data-raw-dialog-column="${esc(column)}" value="${esc(value)}" autocomplete="off" spellcheck="false">`;
+      return `<label><span>${esc(column)}</span>${control}</label>`;
+    }).join('');
+    overlay.innerHTML = `<form class="app-input-dialog raw-row-dialog" role="dialog" aria-modal="true">
+      <div class="app-input-dialog-head"><div><h3>新增 ${esc(data.label || data.table)}记录</h3><small>${esc(data.table)} · 留空字段使用数据库默认值</small></div><button type="button" data-dialog-cancel aria-label="关闭">×</button></div>
+      <div class="raw-row-dialog-fields">${fields}</div>
+      <div class="app-input-dialog-actions"><button type="button" class="btn btn-outline btn-sm" data-dialog-cancel>取消</button><button type="submit" class="btn btn-success btn-sm">新增记录</button></div>
+    </form>`;
+    document.body.appendChild(overlay);
+    const finish = result => { overlay.remove(); resolve(result); };
+    overlay.querySelectorAll('[data-dialog-cancel]').forEach(button => button.addEventListener('click', () => finish(null)));
+    overlay.addEventListener('click', event => { if (event.target === overlay) finish(null); });
+    overlay.querySelector('form').addEventListener('submit', event => {
+      event.preventDefault();
+      const row = {};
+      overlay.querySelectorAll('[data-raw-dialog-column]').forEach(control => {
+        row[control.dataset.rawDialogColumn] = control.value;
+      });
+      finish(row);
+    });
+    overlay.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(null);
+      }
+    });
+    requestAnimationFrame(() => overlay.querySelector('[data-raw-dialog-column]')?.focus());
+  });
 }
 
 function databaseOperationActiveReason() {
@@ -9762,9 +10695,26 @@ function defaultRawValue(table, col) {
   if (col === 'metadata_json') return '{}';
   if (col.endsWith('_json')) return '[]';
   if (col === 'collection_id') return '-1';
+  if (col === 'position') return '0';
+  if (col === 'pipeline_version') return '2';
+  if (col === 'source_type' && table === 'telegram_sources') return 'manual';
+  if (col === 'source_type' && table === 'telegram_import_runs') return 'manual';
+  if (col === 'tool_kind' && table === 'tool_history_runs') return 'twitter';
+  if (col === 'item_status') return 'queued';
+  if (col === 'include_in_import' || col === 'is_selected' || col === 'av123_auto_favorite') return '0';
+  if (col === 'av123_favorite_concurrency') return '1';
+  if (col === 'missav_rate_cap' || col === 'av123_rate_cap') return '16';
+  if (col === 'missav_rate_mode' || col === 'av123_rate_mode') return 'adaptive';
+  if (col === 'missav_speed_policy') return 'stable';
+  if (col === 'av123_speed_policy') return 'staged';
   if (col === 'status' && table === 'site_lookup_cache') return 'not_found';
   if (col === 'status' && table === 'remote_sync_records') return 'succeeded';
+  if (col === 'status' && table === 'processing_runs') return 'paused';
+  if (col === 'status' && table === 'processing_item_tasks') return 'queued';
+  if (col === 'status' && table === 'telegram_sources') return 'idle';
+  if (col === 'status' && table === 'telegram_import_runs') return 'completed';
   if (/_codes$/.test(col)) return '0';
+  if (/(^|_)(count|message_id)$/.test(col) || col.endsWith('_message_id') || col === 'attempt_count') return '0';
   return '';
 }
 
@@ -10407,6 +11357,22 @@ function fileName(filePath) {
   return String(filePath || '').split(/[\\/]/).pop() || String(filePath || '');
 }
 
+function setResultTableExpanded(expanded) {
+  state.resultTableExpanded = Boolean(expanded);
+  const shell = DOM.resultTable?.closest('.results-shell');
+  shell?.classList.toggle('is-table-expanded', state.resultTableExpanded);
+  document.body.classList.toggle('result-table-expanded', state.resultTableExpanded);
+  if (DOM.btnToggleResultTableSize) {
+    const label = DOM.btnToggleResultTableSize.querySelector('span');
+    const icon = DOM.btnToggleResultTableSize.querySelector('i');
+    if (label) label.textContent = state.resultTableExpanded ? '还原表格' : '展开表格';
+    if (icon) icon.dataset.lucide = state.resultTableExpanded ? 'minimize-2' : 'maximize-2';
+    DOM.btnToggleResultTableSize.setAttribute('aria-pressed', state.resultTableExpanded ? 'true' : 'false');
+  }
+  renderIcons();
+  if (state.resultTableExpanded) DOM.resultTableWrapper?.focus({ preventScroll: true });
+}
+
 // ─── Raindrop 直接同步 ───────────────────────────────
 function setRaindropPreviewExpanded(expanded) {
   state.raindropSync.previewExpanded = Boolean(expanded);
@@ -10426,16 +11392,48 @@ function loadRaindropSyncSettings() {
   } catch {
     state.raindropSync.collectionId = -1;
   }
+  try {
+    state.raindropSync.mode = api.normalizeRaindropSyncMode(localStorage.getItem(RAINDROP_SYNC_MODE_KEY) || 'push');
+  } catch {
+    state.raindropSync.mode = 'push';
+  }
+  try {
+    const selected = JSON.parse(localStorage.getItem(RAINDROP_COLLECTION_SCOPE_KEY) || '[]');
+    state.raindropSync.selectedCollectionIds = new Set((Array.isArray(selected) ? selected : [])
+      .map(Number)
+      .filter(id => Number.isSafeInteger(id) && id !== 0 && id >= -1)
+      .slice(0, 100));
+  } catch {
+    state.raindropSync.selectedCollectionIds = new Set();
+  }
+  try {
+    state.raindropSync.includeNested = localStorage.getItem(RAINDROP_INCLUDE_NESTED_KEY) === '1';
+  } catch {
+    state.raindropSync.includeNested = false;
+  }
+}
+
+function persistRaindropSyncSettings() {
+  try {
+    localStorage.setItem(RAINDROP_COLLECTION_KEY, String(state.raindropSync.collectionId));
+    localStorage.setItem(RAINDROP_SYNC_MODE_KEY, state.raindropSync.mode);
+    localStorage.setItem(RAINDROP_COLLECTION_SCOPE_KEY, JSON.stringify([...state.raindropSync.selectedCollectionIds]));
+    localStorage.setItem(RAINDROP_INCLUDE_NESTED_KEY, state.raindropSync.includeNested ? '1' : '0');
+  } catch {}
 }
 
 function setRaindropBusy(busy) {
   state.raindropSync.running = Boolean(busy);
   const disabled = Boolean(busy);
   for (const control of [DOM.btnSaveRaindropToken, DOM.btnTestRaindropAccount, DOM.btnClearRaindropToken,
-    DOM.btnRefreshRaindropCollections, DOM.raindropBatchSelect, DOM.raindropCollectionSelect, DOM.btnPreviewRaindropSync]) {
+    DOM.btnRefreshRaindropCollections, DOM.raindropModeSelect, DOM.raindropBatchSelect, DOM.raindropCollectionSelect,
+    DOM.raindropManualTarget, DOM.raindropCollectionSearch, DOM.raindropIncludeNested,
+    DOM.btnSelectAllRaindropCollections, DOM.btnClearRaindropCollections,
+    DOM.btnPreviewRaindropSync, DOM.btnExportRaindropCsv]) {
     if (control) control.disabled = disabled || (control === DOM.raindropCollectionSelect
       && (!state.raindropSync.auth.configured || isMissavAutoRoutingRun()));
   }
+  if (DOM.raindropCollectionPicker) DOM.raindropCollectionPicker.classList.toggle('is-disabled', disabled);
   if (DOM.btnStartRaindropSync) {
     DOM.btnStartRaindropSync.hidden = disabled;
     DOM.btnStartRaindropSync.disabled = disabled || !raindropPlanIsReady();
@@ -10447,13 +11445,41 @@ function setRaindropBusy(busy) {
 }
 
 function raindropActionLabel(action) {
-  return action === 'create' ? '新建' : action === 'update' ? '更新' : action === 'skip' ? '跳过' : action === 'error' ? '异常' : '待核对';
+  const labels = {
+    create: 'Push 新建',
+    update: 'Push 更新',
+    push_create: 'Push 新建',
+    push_update: 'Push 更新',
+    pull_create: 'Pull 新增本地',
+    pull_update: 'Pull 更新本地',
+    link: '建立双向映射',
+    skip: '内容一致·不写入',
+    exists_both: '双方已有·不写入',
+    conflict: '双方冲突',
+    ignore: '忽略',
+    remote_missing: '远端缺失',
+    error: '异常',
+    check: '待核对',
+  };
+  return labels[action] || '待核对';
+}
+
+function resolvedRaindropAction(row) {
+  if (row?.action !== 'conflict') return row?.action || '';
+  if (row.resolution === 'pull' && row.remote) return row.local ? 'pull_update' : 'pull_create';
+  if (row.resolution === 'push' && row.local) return row.remote ? 'push_update' : 'push_create';
+  if (row.resolution === 'skip') return 'ignore';
+  return 'conflict';
 }
 
 function raindropPlanIsReady() {
-  return Boolean(state.raindropSync.auth.configured && state.raindropSync.plan.length &&
-    state.raindropSync.plan.every(row => ['create', 'update', 'skip', 'error'].includes(row.action)) &&
-    state.raindropSync.plan.some(row => ['create', 'update'].includes(row.action) || (row.action === 'skip' && row.taskStatus !== 'succeeded')));
+  const plan = state.raindropSync.plan;
+  if (!state.raindropSync.auth.configured || !plan.length) return false;
+  if (plan.some(row => resolvedRaindropAction(row) === 'conflict')) return false;
+  return plan.some(row => [
+    'create', 'update', 'push_create', 'push_update',
+    'pull_create', 'pull_update', 'link',
+  ].includes(resolvedRaindropAction(row)));
 }
 
 function currentRaindropCollectionLabel() {
@@ -10462,12 +11488,8 @@ function currentRaindropCollectionLabel() {
   return state.raindropSync.collections.find(row => Number(row.id) === id)?.path || `Collection ${id}`;
 }
 
-function selectedRaindropRun() {
-  return state.raindropSync.runId ? api.dbGetRun(Number(state.raindropSync.runId)) : null;
-}
-
-function isMissavAutoRoutingRun(run = selectedRaindropRun()) {
-  return run?.toolKind === 'missav';
+function isMissavAutoRoutingRun() {
+  return !state.raindropSync.manualOverride;
 }
 
 function raindropCollectionLabelForId(id) {
@@ -10476,15 +11498,57 @@ function raindropCollectionLabelForId(id) {
   return state.raindropSync.collections.find(row => Number(row.id) === collectionId)?.path || `Collection ${collectionId}`;
 }
 
-function routingTargetForItem(run, item) {
-  if (!isMissavAutoRoutingRun(run)) {
+function buildRaindropAccountIndex(items = []) {
+  const byCode = new Map();
+  const byRemoteId = new Map();
+  const byUrl = new Map();
+  for (const remote of Array.isArray(items) ? items : []) {
+    const remoteId = String(remote?.id || '').trim();
+    if (remoteId && !byRemoteId.has(remoteId)) byRemoteId.set(remoteId, remote);
+    const comparableUrl = api.normalizeRaindropComparableUrl(remote?.link);
+    if (comparableUrl && !byUrl.has(comparableUrl)) byUrl.set(comparableUrl, remote);
+    const code = api.extractRaindropRemoteCode(remote);
+    const codeKey = api.codeComparableKey(code);
+    if (codeKey && !byCode.has(codeKey)) byCode.set(codeKey, remote);
+  }
+  return { byCode, byRemoteId, byUrl };
+}
+
+function selectedRaindropCollectionScopeIds() {
+  const scope = new Set([...state.raindropSync.selectedCollectionIds].map(Number));
+  if (!state.raindropSync.includeNested) return scope;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const collection of state.raindropSync.collections) {
+      const id = Number(collection.id);
+      const parentId = Number(collection.parentId || 0);
+      if (Number.isSafeInteger(id) && scope.has(parentId) && !scope.has(id)) {
+        scope.add(id);
+        changed = true;
+      }
+    }
+  }
+  return scope;
+}
+
+function raindropBothExistStatusText(code, remote) {
+  const remoteId = String(remote?.id || '').trim();
+  const collectionLabel = raindropCollectionLabelForId(remote?.collectionId ?? -1);
+  return `本地永久库和 Raindrop 全账号都已有 ${code}${remoteId ? `（远端 #${remoteId}` : ''}${remoteId ? `，位于 ${collectionLabel}）` : ''}；忽略 Collection 和内容差异，本轮不写入`;
+}
+
+function routingTargetForItem(_run, item) {
+  if (!isMissavAutoRoutingRun()) {
     return {
       key: 'manual',
       collectionId: Number(state.raindropSync.collectionId),
       collectionLabel: currentRaindropCollectionLabel(),
     };
   }
-  const key = api.selectMissavRaindropCollection(item.actresses || [], run.knownActresses || []);
+  const key = ['missav1', 'missav2'].includes(String(item.raindropTarget || ''))
+    ? String(item.raindropTarget)
+    : 'missav2';
   const collectionId = Number(state.raindropSync.routingCollections[key]);
   return {
     key,
@@ -10493,17 +11557,28 @@ function routingTargetForItem(run, item) {
   };
 }
 
-async function ensureMissavRoutingCollections(run) {
-  if (!isMissavAutoRoutingRun(run)) return state.raindropSync.routingCollections;
+async function ensureMissavRoutingCollections() {
+  if (!isMissavAutoRoutingRun()) return state.raindropSync.routingCollections;
   if (!state.raindropSync.auth.configured) throw new Error('请先配置 Raindrop 访问令牌，才能建立 missav1 / missav2');
   const ready = ['missav1', 'missav2'].every(key => Number(state.raindropSync.routingCollections[key]) > 0);
-  if (ready) return state.raindropSync.routingCollections;
+  if (ready) {
+    for (const id of Object.values(state.raindropSync.routingCollections)) {
+      state.raindropSync.selectedCollectionIds.add(Number(id));
+    }
+    persistRaindropSyncSettings();
+    renderRaindropCollectionPicker();
+    return state.raindropSync.routingCollections;
+  }
   const response = await api.ensureRaindropCollections(['missav1', 'missav2']);
   state.raindropSync.routingCollections = {
     missav1: Number(response?.routing?.missav1) || null,
     missav2: Number(response?.routing?.missav2) || null,
   };
+  for (const id of Object.values(state.raindropSync.routingCollections)) {
+    if (Number(id) > 0) state.raindropSync.selectedCollectionIds.add(Number(id));
+  }
   state.raindropSync.collections = Array.isArray(response?.items) ? response.items : state.raindropSync.collections;
+  persistRaindropSyncSettings();
   renderRaindropCollections();
   if (response?.created?.length) {
     toast(`已在 Raindrop 根目录创建：${response.created.map(row => row.title).join('、')}`, 'success');
@@ -10513,33 +11588,50 @@ async function ensureMissavRoutingCollections(run) {
 
 function updateRaindropMetrics() {
   const plan = state.raindropSync.plan;
-  const count = action => plan.filter(row => row.action === action).length;
+  const actions = plan.map(resolvedRaindropAction);
+  const count = action => actions.filter(value => value === action).length;
   if (DOM.raindropMetricEligible) DOM.raindropMetricEligible.textContent = String(plan.length);
-  if (DOM.raindropMetricCreate) DOM.raindropMetricCreate.textContent = String(count('create') + count('check'));
-  if (DOM.raindropMetricUpdate) DOM.raindropMetricUpdate.textContent = String(count('update'));
-  if (DOM.raindropMetricSkip) DOM.raindropMetricSkip.textContent = String(count('skip'));
-  if (DOM.raindropMetricError) DOM.raindropMetricError.textContent = String(count('error'));
+  if (DOM.raindropMetricPull) DOM.raindropMetricPull.textContent =
+    String(count('pull_create') + count('pull_update') + count('link'));
+  if (DOM.raindropMetricPush) DOM.raindropMetricPush.textContent =
+    String(count('create') + count('update') + count('push_create') + count('push_update') + count('check'));
+  if (DOM.raindropMetricSkip) DOM.raindropMetricSkip.textContent =
+    String(count('skip') + count('exists_both'));
+  if (DOM.raindropMetricConflict) DOM.raindropMetricConflict.textContent = String(count('conflict'));
+  if (DOM.raindropMetricError) DOM.raindropMetricError.textContent =
+    String(count('error') + count('ignore') + count('remote_missing'));
 }
 
 function renderRaindropPlan() {
   updateRaindropMetrics();
   const plan = state.raindropSync.plan;
   const pendingCheck = plan.filter(row => row.action === 'check').length;
-  const actionable = plan.filter(row => ['create', 'update'].includes(row.action)).length;
-  const errors = plan.filter(row => row.action === 'error').length;
+  const effective = plan.map(resolvedRaindropAction);
+  const pullCount = effective.filter(action => ['pull_create', 'pull_update', 'link'].includes(action)).length;
+  const pushCount = effective.filter(action => ['create', 'update', 'push_create', 'push_update'].includes(action)).length;
+  const sameCount = effective.filter(action => action === 'skip').length;
+  const existsBothCount = effective.filter(action => action === 'exists_both').length;
+  const conflictCount = effective.filter(action => action === 'conflict').length;
+  const errors = effective.filter(action => ['error', 'remote_missing'].includes(action)).length;
+  const actionable = pullCount + pushCount;
   if (DOM.raindropPlanTitle) {
     DOM.raindropPlanTitle.textContent = !plan.length ? '尚未生成同步预览'
       : pendingCheck ? `已准备 ${plan.length} 条，尚有 ${pendingCheck} 条待远端核对`
-        : `预览完成：需要写入 ${actionable} 条`;
+        : conflictCount ? `预览完成：${conflictCount} 条冲突等待选择`
+          : `预览完成：Pull ${pullCount} 条 · Push ${pushCount} 条`;
   }
   if (DOM.raindropPlanDetail) {
-    const estimate = Math.max(1, Math.ceil(actionable * 0.55));
+    const estimate = Math.ceil(actionable * 0.55);
     DOM.raindropPlanDetail.textContent = !plan.length
-      ? isMissavAutoRoutingRun()
-        ? '选择 MissAV 批次后生成预览；目标会自动分流到 missav1 / missav2。'
-        : '选择批次和 Collection 后，先核对远端再执行。'
+      ? state.raindropSync.mode === 'pull'
+        ? '选择一个或多个 Collection 后生成 Pull 预览；只读官网，不会写入远端。'
+        : state.raindropSync.mode === 'bidirectional'
+          ? '双向模式比较上次快照、本地当前值和官网当前值，双方都修改时进入冲突。'
+          : isMissavAutoRoutingRun()
+            ? 'Push 使用永久记录已保存的 missav1 / missav2 目标。'
+            : 'Push 当前范围会统一使用默认 Collection。'
       : pendingCheck ? '点击“生成预览”后会按每组最多 100 个链接检查是否已存在。'
-        : `${plan.filter(row => row.action === 'create').length} 条新建 · ${plan.filter(row => row.action === 'update').length} 条更新 · ${plan.filter(row => row.action === 'skip').length} 条跳过 · 预计至少 ${processingEta?.formatDuration(estimate * 1000) || `${estimate} 秒`}${errors ? ` · ${errors} 条数据异常` : ''}`;
+        : `Pull ${pullCount} 条 · Push ${pushCount} 条 · ${existsBothCount} 条双方已有（不写入） · ${sameCount} 条内容一致（不写入）${conflictCount ? ` · ${conflictCount} 条冲突` : ''}${actionable ? ` · 预计至少 ${processingEta?.formatDuration(estimate * 1000) || `${estimate} 秒`}` : ' · 无需写入'}${errors ? ` · ${errors} 条异常` : ''}`;
   }
   if (DOM.raindropPreviewBody) {
     if (!plan.length) {
@@ -10547,15 +11639,31 @@ function renderRaindropPlan() {
     } else {
       DOM.raindropPreviewBody.innerHTML = plan.slice(0, 300).map(row => `
         <tr>
-          <td>${esc(row.code)}</td>
-          <td class="raindrop-action-${esc(row.action)}">${esc(raindropActionLabel(row.action))}</td>
+          <td>${esc(row.code || '-')}</td>
+          <td class="raindrop-action-${esc(resolvedRaindropAction(row))}">${esc(raindropActionLabel(resolvedRaindropAction(row)))}</td>
           <td>${esc(row.collectionLabel || currentRaindropCollectionLabel())}</td>
-          <td>${esc((row.payload?.tags || []).join(', ')) || '-'}</td>
-          <td>${esc(row.statusText || (row.action === 'skip' ? '远端内容无需变化' : row.action === 'check' ? '等待核对远端 URL' : '等待执行'))}</td>
+          <td>${esc((row.payload?.tags || row.remote?.tags || []).join(', ')) || '-'}</td>
+          <td>${esc(row.statusText || (row.action === 'skip' ? '两边内容一致' : row.action === 'exists_both' ? '本地和 Raindrop 账号都已有该番号' : row.action === 'check' ? '等待核对远端 URL' : '等待执行'))}
+            ${row.action === 'conflict' ? `<select class="raindrop-conflict-select" data-raindrop-conflict-index="${row.planIndex}">
+              <option value="" ${!row.resolution ? 'selected' : ''}>请选择处理方式</option>
+              ${row.remote ? `<option value="pull" ${row.resolution === 'pull' ? 'selected' : ''}>保留官网（Pull）</option>` : ''}
+              ${row.local ? `<option value="push" ${row.resolution === 'push' ? 'selected' : ''}>${row.remote ? '保留本地（Push）' : '用本地重新建立官网收藏（Push）'}</option>` : ''}
+              <option value="skip" ${row.resolution === 'skip' ? 'selected' : ''}>本轮跳过</option>
+            </select>` : ''}</td>
         </tr>`).join('') + (plan.length > 300 ? `<tr><td colspan="5">仅显示前 300 条，完整计划共 ${plan.length} 条</td></tr>` : '');
     }
   }
   setRaindropBusy(state.raindropSync.running);
+}
+
+function handleRaindropConflictResolution(event) {
+  const select = event.target.closest('[data-raindrop-conflict-index]');
+  if (!select) return;
+  const index = Number(select.dataset.raindropConflictIndex);
+  const row = state.raindropSync.plan.find(item => Number(item.planIndex) === index);
+  if (!row || row.action !== 'conflict') return;
+  row.resolution = ['pull', 'push', 'skip'].includes(select.value) ? select.value : '';
+  renderRaindropPlan();
 }
 
 function updateRaindropAuthUI() {
@@ -10565,7 +11673,10 @@ function updateRaindropAuthUI() {
     DOM.raindropAccountStatus.textContent = !auth.encryptionAvailable ? '系统安全存储不可用'
       : auth.account?.label ? `已连接：${auth.account.label}` : auth.configured ? '令牌已加密保存' : '尚未保存令牌';
   }
-  if (DOM.raindropCollectionSelect) DOM.raindropCollectionSelect.disabled = !auth.configured || state.raindropSync.running || isMissavAutoRoutingRun();
+  const pullOnly = state.raindropSync.mode === 'pull';
+  if (DOM.raindropCollectionSelect) DOM.raindropCollectionSelect.disabled =
+    !auth.configured || state.raindropSync.running || pullOnly || isMissavAutoRoutingRun();
+  if (DOM.raindropManualTarget) DOM.raindropManualTarget.disabled = !auth.configured || state.raindropSync.running || pullOnly;
 }
 
 async function refreshRaindropSyncPage() {
@@ -10575,6 +11686,10 @@ async function refreshRaindropSyncPage() {
     state.raindropSync.auth = { ...state.raindropSync.auth, ...auth };
     updateRaindropAuthUI();
     refreshRaindropRunOptions();
+    if (DOM.raindropModeSelect) DOM.raindropModeSelect.value = state.raindropSync.mode;
+    if (DOM.raindropManualTarget) DOM.raindropManualTarget.checked = state.raindropSync.manualOverride;
+    if (DOM.raindropIncludeNested) DOM.raindropIncludeNested.checked = state.raindropSync.includeNested;
+    selectRaindropRun(state.raindropSync.scope, { render: false });
     if (auth.configured && !state.raindropSync.collections.length) await loadRaindropCollections();
     else renderRaindropPlan();
   } catch (err) {
@@ -10585,44 +11700,57 @@ async function refreshRaindropSyncPage() {
 
 function refreshRaindropRunOptions() {
   if (!DOM.raindropBatchSelect || !state.dbReady) return;
-  const runs = (api.dbGetRecentRuns?.(100) || []).filter(run =>
-    Number(run.pipelineVersion) >= 2
-    && run.toolKind !== 'av123'
-    && Number(run.stages?.raindropSync?.total || 0) > 0);
-  const preferred = Number(state.raindropSync.runId || state.selectedRunId || state.preparedRunId || state.resumableRun?.id || 0);
-  const selected = runs.some(run => Number(run.id) === preferred) ? preferred : Number(runs[0]?.id || 0);
-  DOM.raindropBatchSelect.innerHTML = runs.length
-    ? runs.map(run => `<option value="${run.id}">${esc(run.name)} · ${run.stages.raindropSync.statusCounts.ready || 0} 待同步</option>`).join('')
-    : '<option value="">暂无包含 MissAV 结果的批次</option>';
-  DOM.raindropBatchSelect.value = selected ? String(selected) : '';
-  if (selected !== Number(state.raindropSync.runId || 0)) selectRaindropRun(selected, { render: false });
-  const run = selected ? api.dbGetRun(selected) : null;
-  if (DOM.raindropBatchStatus) DOM.raindropBatchStatus.textContent = run ? `${run.name} · ${run.total} 条` : '请选择批次';
+  const counts = {
+    pending: api.dbGetGlobalRaindropRows?.({ scope: 'pending', limit: 100000 })?.length || 0,
+    errors: api.dbGetGlobalRaindropRows?.({ scope: 'errors', limit: 100000 })?.length || 0,
+    all: api.dbGetGlobalRaindropRows?.({ scope: 'all', limit: 100000 })?.length || 0,
+  };
+  DOM.raindropBatchSelect.innerHTML = `
+    <option value="pending">全部待同步与需重试 (${counts.pending})</option>
+    <option value="errors">仅异常重试 (${counts.errors})</option>
+    <option value="all">全部 APP 管理的 MissAV 记录 (${counts.all})</option>`;
+  if (!['pending', 'errors', 'all'].includes(state.raindropSync.scope)) state.raindropSync.scope = 'pending';
+  DOM.raindropBatchSelect.value = state.raindropSync.scope;
+  if (DOM.raindropBatchStatus) DOM.raindropBatchStatus.textContent = `永久库 · 当前 ${counts[state.raindropSync.scope]} 条`;
 }
 
 function selectRaindropRun(value, options = {}) {
-  state.raindropSync.runId = Number(value) || null;
+  state.raindropSync.scope = ['pending', 'errors', 'all'].includes(String(value)) ? String(value) : 'pending';
   state.raindropSync.plan = [];
-  if (DOM.raindropBatchStatus) {
-    const run = state.raindropSync.runId ? api.dbGetRun(state.raindropSync.runId) : null;
-    DOM.raindropBatchStatus.textContent = run ? `${run.name} · ${run.total} 条` : '请选择批次';
-  }
-  const run = selectedRaindropRun();
-  const auto = isMissavAutoRoutingRun(run);
-  if (DOM.raindropCollectionLabel) DOM.raindropCollectionLabel.textContent = auto ? '自动目标 Collection' : '目标 Collection';
+  const rows = api.dbGetGlobalRaindropRows?.({ scope: state.raindropSync.scope, limit: 100000 }) || [];
+  if (DOM.raindropBatchStatus) DOM.raindropBatchStatus.textContent = `永久库 · 当前 ${rows.length} 条`;
+  const auto = isMissavAutoRoutingRun();
+  const mode = state.raindropSync.mode;
+  if (DOM.raindropCollectionLabel) DOM.raindropCollectionLabel.textContent =
+    mode === 'pull' ? 'Pull 不使用写入目标' : auto ? '自动 Push 目标' : 'Push 默认目标 Collection';
   if (DOM.raindropRoutingNote) {
-    DOM.raindropRoutingNote.textContent = auto
-      ? '本批次使用创建时冻结的女优底库：命中任一已知女优 → missav1；全是新女优或没有女优 → missav2。目录缺失时在根目录自动创建。'
-      : '这是旧版或兼容批次，继续使用上方手动选择的目标 Collection。';
+    DOM.raindropRoutingNote.textContent = mode === 'pull'
+      ? 'Pull 只读取所选 Collection 并更新本地，不会调用任何官网写入接口。'
+      : auto
+        ? 'Push 沿用永久记录目标：命中当时已知女优 → missav1；全是新女优或没有女优 → missav2。'
+        : '需要 Push 的记录统一使用上方默认 Collection；Pull 记录仍保留官网当前目录。';
   }
-  if (DOM.raindropCollectionSelect) DOM.raindropCollectionSelect.disabled = auto || !state.raindropSync.auth.configured || state.raindropSync.running;
+  updateRaindropAuthUI();
   if (options.render !== false) void buildRaindropSyncPlan({ checkRemote: false });
+}
+
+function selectRaindropSyncMode() {
+  state.raindropSync.mode = api.normalizeRaindropSyncMode(DOM.raindropModeSelect?.value || 'push');
+  state.raindropSync.plan = [];
+  persistRaindropSyncSettings();
+  selectRaindropRun(state.raindropSync.scope, { render: false });
+  renderRaindropCollections();
+  renderRaindropPlan();
 }
 
 function selectRaindropCollection() {
   state.raindropSync.collectionId = Number(DOM.raindropCollectionSelect?.value ?? -1);
-  try { localStorage.setItem(RAINDROP_COLLECTION_KEY, String(state.raindropSync.collectionId)); } catch {}
+  if (!state.raindropSync.selectedCollectionIds.has(state.raindropSync.collectionId)) {
+    state.raindropSync.selectedCollectionIds.add(state.raindropSync.collectionId);
+  }
+  persistRaindropSyncSettings();
   state.raindropSync.plan = [];
+  renderRaindropCollectionPicker();
   void buildRaindropSyncPlan({ checkRemote: false });
 }
 
@@ -10686,7 +11814,85 @@ function renderRaindropCollections() {
   const selected = items.some(row => Number(row.id) === Number(state.raindropSync.collectionId)) ? Number(state.raindropSync.collectionId) : -1;
   state.raindropSync.collectionId = selected;
   DOM.raindropCollectionSelect.value = String(selected);
-  DOM.raindropCollectionSelect.disabled = !state.raindropSync.auth.configured || state.raindropSync.running || isMissavAutoRoutingRun();
+  const validIds = new Set([-1, ...items.map(row => Number(row.id))]);
+  state.raindropSync.selectedCollectionIds = new Set([...state.raindropSync.selectedCollectionIds].filter(id => validIds.has(Number(id))));
+  if (!state.raindropSync.selectedCollectionIds.size) {
+    const automatic = items.filter(row =>
+      Number(row.parentId || 0) === 0 && ['missav1', 'missav2'].includes(String(row.title || '').toLowerCase()));
+    if (automatic.length) automatic.forEach(row => state.raindropSync.selectedCollectionIds.add(Number(row.id)));
+    else state.raindropSync.selectedCollectionIds.add(selected);
+  }
+  persistRaindropSyncSettings();
+  renderRaindropCollectionPicker();
+  updateRaindropAuthUI();
+}
+
+function visibleRaindropCollections() {
+  const query = String(state.raindropSync.collectionSearch || '').trim().toLocaleLowerCase();
+  const rows = [{ id: -1, title: 'Unsorted', path: 'Unsorted', parentId: 0, count: 0 }, ...state.raindropSync.collections];
+  return rows.filter(row => !query || `${row.title || ''} ${row.path || ''}`.toLocaleLowerCase().includes(query));
+}
+
+function renderRaindropCollectionPicker() {
+  if (!DOM.raindropCollectionPicker) return;
+  const visible = visibleRaindropCollections();
+  const selected = state.raindropSync.selectedCollectionIds;
+  DOM.raindropCollectionPicker.innerHTML = visible.length ? visible.map(row => {
+    const id = Number(row.id);
+    const active = selected.has(id);
+    return `<button class="raindrop-collection-option ${active ? 'is-selected' : ''}" type="button"
+      role="option" aria-selected="${active ? 'true' : 'false'}" data-raindrop-collection-id="${id}">
+      <span class="group-picker-check"><i data-lucide="check"></i></span>
+      <span class="raindrop-collection-option-copy"><strong>${esc(row.title || row.path)}</strong><small>${esc(row.path || row.title)}</small></span>
+      <b>${Math.max(0, Number(row.count) || 0)}</b>
+    </button>`;
+  }).join('') : '<div class="group-picker-empty">没有匹配的 Collection</div>';
+  if (DOM.raindropSelectedCollectionSummary) {
+    const names = [...selected].map(id => raindropCollectionLabelForId(id));
+    DOM.raindropSelectedCollectionSummary.textContent = selected.size
+      ? `已选 ${selected.size} 个${names.length ? ` · ${names.slice(0, 2).join('、')}${names.length > 2 ? '…' : ''}` : ''}`
+      : '尚未选择 Collection';
+  }
+  renderIcons();
+}
+
+function handleRaindropCollectionPicker(event) {
+  if (state.raindropSync.running) return;
+  const button = event.target.closest('[data-raindrop-collection-id]');
+  if (!button) return;
+  const id = Number(button.dataset.raindropCollectionId);
+  const selected = state.raindropSync.selectedCollectionIds;
+  if (selected.has(id)) selected.delete(id);
+  else if (selected.size >= 100) {
+    toast('最多选择 100 个 Collection', 'warning');
+    return;
+  } else selected.add(id);
+  state.raindropSync.plan = [];
+  persistRaindropSyncSettings();
+  renderRaindropCollectionPicker();
+  renderRaindropPlan();
+}
+
+function selectAllVisibleRaindropCollections() {
+  if (state.raindropSync.running) return;
+  const selected = state.raindropSync.selectedCollectionIds;
+  for (const row of visibleRaindropCollections()) {
+    if (selected.size >= 100) break;
+    selected.add(Number(row.id));
+  }
+  state.raindropSync.plan = [];
+  persistRaindropSyncSettings();
+  renderRaindropCollectionPicker();
+  renderRaindropPlan();
+}
+
+function clearRaindropCollectionSelection() {
+  if (state.raindropSync.running) return;
+  state.raindropSync.selectedCollectionIds.clear();
+  state.raindropSync.plan = [];
+  persistRaindropSyncSettings();
+  renderRaindropCollectionPicker();
+  renderRaindropPlan();
 }
 
 async function loadRaindropCollections(options = {}) {
@@ -10702,7 +11908,7 @@ async function loadRaindropCollections(options = {}) {
       state.raindropSync.routingCollections[key] = root ? Number(root.id) : null;
     }
     renderRaindropCollections();
-    if (options.force) toast(`已载入 ${state.raindropSync.collections.length} 个 Collection`, 'success');
+    if (options.force && !options.quiet) toast(`已载入 ${state.raindropSync.collections.length} 个 Collection`, 'success');
   } catch (err) {
     toast(err.message, 'error');
     logEvent('warn', 'raindrop_collections_failed', { error: err.message });
@@ -10711,17 +11917,13 @@ async function loadRaindropCollections(options = {}) {
   }
 }
 
-function raindropEligibleTask(task) {
-  return ['ready', 'succeeded', 'network_error', 'failed', 'verify_required'].includes(String(task?.status || ''));
-}
-
 async function buildRaindropSyncPlan(options = {}) {
-  if (!state.dbReady || !state.raindropSync.runId) { state.raindropSync.plan = []; renderRaindropPlan(); return []; }
-  const run = api.dbGetRun(state.raindropSync.runId);
-  if (!run) { state.raindropSync.plan = []; renderRaindropPlan(); return []; }
-  if (isMissavAutoRoutingRun(run)) {
+  if (!state.dbReady) { state.raindropSync.plan = []; renderRaindropPlan(); return []; }
+  const requestedMode = api.normalizeRaindropSyncMode(options.forceMode || state.raindropSync.mode);
+  if (requestedMode !== 'push') return buildRaindropMirrorSyncPlan({ ...options, mode: requestedMode });
+  if (isMissavAutoRoutingRun() && !options.offlineCsv) {
     try {
-      await ensureMissavRoutingCollections(run);
+      await ensureMissavRoutingCollections();
     } catch (err) {
       state.raindropSync.plan = [];
       renderRaindropPlan();
@@ -10730,70 +11932,548 @@ async function buildRaindropSyncPlan(options = {}) {
     }
   }
   const plan = [];
-  for (const item of run.items || []) {
-    const task = item.tasks?.raindropSync;
-    if (!raindropEligibleTask(task)) continue;
+  const items = api.dbGetGlobalRaindropRows?.({ scope: state.raindropSync.scope, limit: 100000 }) || [];
+  for (const item of items) {
     try {
-      const target = routingTargetForItem(run, item);
+      const target = options.offlineCsv && isMissavAutoRoutingRun()
+        ? {
+          key: ['missav1', 'missav2'].includes(item.raindropTarget) ? item.raindropTarget : 'missav2',
+          collectionId: -1,
+          collectionLabel: ['missav1', 'missav2'].includes(item.raindropTarget) ? item.raindropTarget : 'missav2',
+        }
+        : routingTargetForItem(null, item);
+      const targetInScope = options.offlineCsv
+        || state.raindropSync.selectedCollectionIds.has(Number(target.collectionId));
+      if (!targetInScope && !options.checkRemote) {
+        throw new Error(`Push 目标 ${target.collectionLabel} 不在已选择的 Collection 同步范围`);
+      }
       const payload = api.buildRaindropSyncPayload(item, target.collectionId);
       const hash = api.raindropPayloadHash(payload);
-      const record = api.dbGetRemoteSyncRecord('raindrop', item.code);
+      const record = item.remoteRecord || api.dbGetRemoteSyncRecord('raindrop', item.code);
       const same = record?.status === 'succeeded' && record.payloadHash === hash && Number(record.collectionId) === Number(target.collectionId);
       plan.push({
-        runId: run.id,
-        position: item.position,
+        codeId: item.id,
         code: item.code,
+        item,
+        raindropTarget: item.raindropTarget,
         collectionId: target.collectionId,
         collectionLabel: target.collectionLabel,
+        targetInScope,
         routingKey: target.key,
         payload,
         payloadHash: hash,
         remoteId: record?.remoteId || '',
-        taskStatus: task.status,
+        taskStatus: item.raindropStatus,
         action: same ? 'skip' : record?.remoteId ? 'update' : 'check',
         statusText: same ? `上次同步于 ${record.syncedAt || record.updatedAt || '本机记录时间'}` : record?.remoteId ? `已关联远端 #${record.remoteId}` : '',
       });
     } catch (err) {
-      plan.push({ runId: run.id, position: item.position, code: item.code, payload: null, payloadHash: '', remoteId: '', collectionId: null, collectionLabel: '-', action: 'error', statusText: err.message });
+      plan.push({ codeId: item.id, code: item.code, item, payload: null, payloadHash: '', remoteId: '', collectionId: null, collectionLabel: '-', action: 'error', statusText: err.message });
     }
   }
+  plan.forEach((row, index) => { row.planIndex = index; });
   state.raindropSync.plan = plan;
   renderRaindropPlan();
   if (!options.checkRemote) return plan;
   if (!state.raindropSync.auth.configured) { toast('请先配置 Raindrop 访问令牌', 'error'); return plan; }
 
-  const unknown = plan.filter(row => row.action === 'check');
-  if (DOM.raindropPlanTitle) DOM.raindropPlanTitle.textContent = `正在核对 ${unknown.length} 个远端链接…`;
   try {
+    if (DOM.raindropPlanTitle) DOM.raindropPlanTitle.textContent = '正在扫描 Raindrop 全账号并按番号查重…';
+    const accountResponse = await api.scanRaindropAccount();
+    const accountItems = Array.isArray(accountResponse?.items) ? accountResponse.items : [];
+    const accountIndex = buildRaindropAccountIndex(accountItems);
+    for (const row of plan) {
+      if (row.action === 'error' || !row.payload) continue;
+      const remote = accountIndex.byCode.get(api.codeComparableKey(row.code))
+        || accountIndex.byUrl.get(api.normalizeRaindropComparableUrl(row.payload.link))
+        || null;
+      if (remote) {
+        row.remote = remote;
+        row.remoteId = String(remote.id || '');
+        row.collectionId = Number(remote.collectionId);
+        row.collectionLabel = raindropCollectionLabelForId(remote.collectionId);
+        row.action = 'exists_both';
+        row.statusText = raindropBothExistStatusText(row.code, remote);
+      } else if (!row.targetInScope) {
+        row.remote = null;
+        row.remoteId = '';
+        row.action = 'error';
+        row.statusText = `Raindrop 全账号不存在该番号，但 Push 目标 ${row.collectionLabel} 不在已选择的 Collection 范围`;
+      } else {
+        // A stale local mapping must not be trusted. Only the fresh account scan
+        // decides whether this code already exists remotely.
+        row.remote = null;
+        row.remoteId = '';
+        row.action = 'check';
+        row.statusText = 'Raindrop 全账号未找到同番号，继续核对同一链接';
+      }
+    }
+    const unknown = plan.filter(row => row.action === 'check');
+    if (DOM.raindropPlanTitle) DOM.raindropPlanTitle.textContent = `全账号番号查重完成，正在核对 ${unknown.length} 个链接…`;
     for (let offset = 0; offset < unknown.length; offset += 100) {
       const chunk = unknown.slice(offset, offset + 100);
       const response = await api.checkRaindropUrls(chunk.map(row => row.payload.link));
       const byUrl = new Map((response?.items || []).map(row => [row.url, row.remoteId]));
       for (const row of chunk) {
         const remoteId = byUrl.get(row.payload.link);
-        row.remoteId = remoteId || '';
-        row.action = remoteId ? 'update' : 'create';
-        row.statusText = remoteId
-          ? `官网已有同一链接（书签 ID #${remoteId}），将更新标题/Tags，并放入 ${row.collectionLabel}`
-          : `官网不存在同一链接，将新建到 ${row.collectionLabel}`;
+        const remote = remoteId ? accountIndex.byRemoteId.get(String(remoteId)) || null : null;
+        if (remote) {
+          row.remoteId = String(remote.id || remoteId);
+          row.remote = remote;
+          row.collectionId = Number(remote.collectionId);
+          row.collectionLabel = raindropCollectionLabelForId(remote.collectionId);
+          row.action = 'exists_both';
+          row.statusText = raindropBothExistStatusText(row.code, remote);
+        } else {
+          row.remoteId = '';
+          row.remote = null;
+          row.action = 'create';
+          row.statusText = `Raindrop 全账号不存在该番号，将新建到 ${row.collectionLabel}`;
+        }
       }
       renderRaindropPlan();
     }
     logEvent('info', 'raindrop_sync_previewed', {
-      runId: run.id,
+      scope: state.raindropSync.scope,
       total: plan.length,
       create: plan.filter(row => row.action === 'create').length,
       update: plan.filter(row => row.action === 'update').length,
       skip: plan.filter(row => row.action === 'skip').length,
+      existsBoth: plan.filter(row => row.action === 'exists_both').length,
+      accountRemoteCount: accountItems.length,
       missav1: plan.filter(row => row.routingKey === 'missav1').length,
       missav2: plan.filter(row => row.routingKey === 'missav2').length,
     });
   } catch (err) {
-    logEvent('warn', 'raindrop_sync_preview_failed', { runId: run.id, error: err.message });
+    logEvent('warn', 'raindrop_sync_preview_failed', { scope: state.raindropSync.scope, error: err.message });
     toast(`远端核对失败：${err.message}`, 'error');
   }
   renderRaindropPlan();
   return plan;
+}
+
+function mirrorTargetForLocal(local, remote = null) {
+  if (!local) return {
+    collectionId: Number(remote?.collectionId ?? -1),
+    collectionLabel: raindropCollectionLabelForId(remote?.collectionId ?? -1),
+    key: 'remote',
+  };
+  if (!isMissavAutoRoutingRun()) {
+    return {
+      collectionId: Number(state.raindropSync.collectionId),
+      collectionLabel: currentRaindropCollectionLabel(),
+      key: 'manual',
+    };
+  }
+  const storedCollectionId = Number(local.raindropCollectionId ?? local.remoteRecord?.collectionId);
+  if (Number.isSafeInteger(storedCollectionId) && storedCollectionId !== 0 && storedCollectionId >= -1) {
+    return {
+      collectionId: storedCollectionId,
+      collectionLabel: raindropCollectionLabelForId(storedCollectionId),
+      key: 'mapped',
+    };
+  }
+  return routingTargetForItem(null, local);
+}
+
+function raindropMirrorStatusText(action, local, remote, target) {
+  const remoteLabel = remote ? raindropCollectionLabelForId(remote.collectionId) : '';
+  if (action === 'pull_create') return `官网新增记录将写入本地永久库；来源 ${remoteLabel}`;
+  if (action === 'pull_update') return `官网内容有变化，将更新本地 Raindrop 字段；来源 ${remoteLabel}`;
+  if (action === 'push_create') return `本地记录将新建到官网 ${target.collectionLabel}`;
+  if (action === 'push_update') return `本地内容有变化，将更新官网 #${remote?.id || local?.raindropRemoteId || ''}`;
+  if (action === 'link') return `两边内容一致，将保存远端 #${remote?.id || ''} 的双向映射`;
+  if (action === 'conflict') return '本地与官网都发生变化，请选择保留哪一边';
+  if (action === 'remote_missing') return '上次绑定的官网记录未出现在所选 Collection，正在等待核对';
+  if (action === 'ignore') return '不是可信 MissAV 详情链接，不进入本地番号库';
+  if (action === 'skip') return '本地与官网内容一致，无需修改';
+  return '';
+}
+
+async function buildRaindropMirrorSyncPlan(options = {}) {
+  const mode = api.normalizeRaindropSyncMode(options.mode || state.raindropSync.mode);
+  const selectedCollectionIds = [...state.raindropSync.selectedCollectionIds];
+  if (!selectedCollectionIds.length) {
+    state.raindropSync.plan = [];
+    renderRaindropPlan();
+    if (options.checkRemote) toast('请先选择至少一个 Collection', 'error');
+    return [];
+  }
+  if (!state.raindropSync.auth.configured) {
+    state.raindropSync.plan = [];
+    renderRaindropPlan();
+    if (options.checkRemote) toast('请先配置 Raindrop 访问令牌', 'error');
+    return [];
+  }
+  if (!options.checkRemote) {
+    state.raindropSync.plan = [];
+    renderRaindropPlan();
+    return [];
+  }
+
+  if (DOM.raindropPlanTitle) DOM.raindropPlanTitle.textContent =
+    `正在扫描 Raindrop 全账号并按番号查重…`;
+  if (DOM.btnPreviewRaindropSync) DOM.btnPreviewRaindropSync.disabled = true;
+  try {
+    if (mode === 'bidirectional' && isMissavAutoRoutingRun()) await ensureMissavRoutingCollections();
+    const response = await api.scanRaindropAccount();
+    const accountItems = Array.isArray(response?.items) ? response.items : [];
+    const accountIndex = buildRaindropAccountIndex(accountItems);
+    const selectedScopeIds = selectedRaindropCollectionScopeIds();
+    const remoteItems = accountItems.filter(remote => selectedScopeIds.has(Number(remote.collectionId)));
+    const localRows = api.dbGetRaindropSyncLocalRows({
+      scope: state.raindropSync.scope,
+      limit: 100000,
+    }) || [];
+    const localByRemoteId = new Map();
+    const localByUrl = new Map();
+    const localByCode = new Map();
+    for (const local of localRows) {
+      const identity = api.raindropLocalIdentity(local);
+      if (identity.remoteId && !localByRemoteId.has(identity.remoteId)) localByRemoteId.set(identity.remoteId, local);
+      for (const url of identity.urls) if (!localByUrl.has(url)) localByUrl.set(url, local);
+      if (identity.codeKey && !localByCode.has(identity.codeKey)) localByCode.set(identity.codeKey, local);
+    }
+
+    const matchedLocalIds = new Set();
+    const plannedRemoteCodeKeys = new Set();
+    const plan = [];
+    for (const remote of remoteItems) {
+      const remoteId = String(remote.id || '');
+      const comparableUrl = api.normalizeRaindropComparableUrl(remote.link);
+      const remoteCode = api.extractRaindropRemoteCode(remote);
+      const remoteCodeKey = api.codeComparableKey(remoteCode);
+      if (remoteCodeKey && plannedRemoteCodeKeys.has(remoteCodeKey)) continue;
+      if (remoteCodeKey) plannedRemoteCodeKeys.add(remoteCodeKey);
+      const local = localByRemoteId.get(remoteId)
+        || localByUrl.get(comparableUrl)
+        || localByCode.get(remoteCodeKey)
+        || null;
+      if (!local && !remoteCode) {
+        plan.push({
+          code: '',
+          remote,
+          collectionId: Number(remote.collectionId),
+          collectionLabel: raindropCollectionLabelForId(remote.collectionId),
+          action: 'ignore',
+          statusText: raindropMirrorStatusText('ignore', null, remote, {}),
+        });
+        continue;
+      }
+      if (local) matchedLocalIds.add(Number(local.id));
+      const target = mirrorTargetForLocal(local, remote);
+      const remotePayload = api.buildRaindropRemotePayload(remote);
+      const remoteHash = api.raindropRemoteItemHash(remote);
+      if (local && remoteCode && api.codeComparableKey(local.code) !== api.codeComparableKey(remoteCode)) {
+        plan.push({
+          codeId: local.id,
+          code: local.code,
+          local,
+          remote,
+          remoteId,
+          remoteHash,
+          remotePayload,
+          collectionId: Number(remote.collectionId),
+          collectionLabel: raindropCollectionLabelForId(remote.collectionId),
+          action: 'error',
+          statusText: `远端 #${remoteId} 的链接番号已变为 ${remoteCode}，与本地映射 ${local.code} 不一致；为防止串号，本轮不写入，请在高级表格核对远端映射`,
+        });
+        continue;
+      }
+      if (!local) {
+        plan.push({
+          code: remoteCode,
+          local: null,
+          remote,
+          remoteId,
+          remoteHash,
+          remoteLastUpdate: remote.lastUpdate || '',
+          remotePayload,
+          payload: remotePayload,
+          payloadHash: remoteHash,
+          collectionId: Number(remote.collectionId),
+          collectionLabel: raindropCollectionLabelForId(remote.collectionId),
+          action: 'pull_create',
+          statusText: raindropMirrorStatusText('pull_create', null, remote, target),
+        });
+        continue;
+      }
+      const record = local.remoteRecord || api.dbGetRemoteSyncRecord('raindrop', local.code);
+      const action = api.classifyRaindropMirrorPair({
+        mode,
+        hasMapping: Boolean(record?.remoteId),
+        bothExist: true,
+      });
+      plan.push({
+        codeId: local.id,
+        code: local.code || remoteCode,
+        local,
+        remote,
+        record,
+        remoteId,
+        remotePayload,
+        remoteHash,
+        remoteLastUpdate: remote.lastUpdate || '',
+        payload: remotePayload,
+        payloadHash: remoteHash,
+        collectionId: Number(remote.collectionId),
+        collectionLabel: raindropCollectionLabelForId(remote.collectionId),
+        action,
+        taskStatus: local.raindropStatus,
+        statusText: raindropBothExistStatusText(local.code || remoteCode, remote),
+      });
+    }
+
+    for (const local of localRows) {
+      if (matchedLocalIds.has(Number(local.id))) continue;
+      const accountRemote = accountIndex.byCode.get(api.codeComparableKey(local.code)) || null;
+      if (accountRemote) {
+        const remotePayload = api.buildRaindropRemotePayload(accountRemote);
+        const remoteHash = api.raindropRemoteItemHash(accountRemote);
+        plan.push({
+          codeId: local.id,
+          code: local.code,
+          local,
+          remote: accountRemote,
+          remoteId: String(accountRemote.id || ''),
+          remotePayload,
+          remoteHash,
+          remoteLastUpdate: accountRemote.lastUpdate || '',
+          payload: remotePayload,
+          payloadHash: remoteHash,
+          collectionId: Number(accountRemote.collectionId),
+          collectionLabel: raindropCollectionLabelForId(accountRemote.collectionId),
+          action: 'exists_both',
+          taskStatus: local.raindropStatus,
+          statusText: raindropBothExistStatusText(local.code, accountRemote),
+        });
+        continue;
+      }
+      const record = local.remoteRecord || api.dbGetRemoteSyncRecord('raindrop', local.code);
+      const mappedCollectionId = Number(record?.collectionId ?? local.raindropCollectionId);
+      const mappedInScope = selectedScopeIds.has(mappedCollectionId);
+      if (record?.remoteId && mappedInScope) {
+        plan.push({
+          codeId: local.id,
+          code: local.code,
+          local,
+          record,
+          remoteId: String(record.remoteId),
+          collectionId: mappedCollectionId,
+          collectionLabel: raindropCollectionLabelForId(mappedCollectionId),
+          action: 'remote_missing',
+          statusText: raindropMirrorStatusText('remote_missing', local, null, {}),
+        });
+        continue;
+      }
+      if (mode !== 'bidirectional' || !local.eligibleForPush || !local.matchesScope) continue;
+      const target = mirrorTargetForLocal(local);
+      if (!selectedScopeIds.has(Number(target.collectionId))) {
+        plan.push({
+          codeId: local.id,
+          code: local.code,
+          local,
+          collectionId: target.collectionId,
+          collectionLabel: target.collectionLabel,
+          action: 'error',
+          statusText: `Push 目标 ${target.collectionLabel} 不在已选择的 Collection 范围`,
+        });
+        continue;
+      }
+      try {
+        const localPayload = api.buildRaindropSyncPayload(local, target.collectionId);
+        plan.push({
+          codeId: local.id,
+          code: local.code,
+          local,
+          remote: null,
+          localPayload,
+          localHash: api.raindropPayloadHash(localPayload),
+          payload: localPayload,
+          payloadHash: api.raindropPayloadHash(localPayload),
+          remoteId: '',
+          collectionId: target.collectionId,
+          collectionLabel: target.collectionLabel,
+          action: 'check',
+          taskStatus: local.raindropStatus,
+          statusText: '本地存在、所选 Collection 中未找到，等待全账号 URL 核对',
+        });
+      } catch (error) {
+        plan.push({
+          codeId: local.id,
+          code: local.code,
+          local,
+          collectionId: target.collectionId,
+          collectionLabel: target.collectionLabel,
+          action: 'error',
+          statusText: error.message,
+        });
+      }
+    }
+
+    const missing = plan.filter(row => row.action === 'remote_missing');
+    for (const row of missing) {
+      const checked = await api.getRaindropItem(row.remoteId);
+      if (checked.found) {
+        row.remote = checked.item;
+        row.collectionId = Number(checked.item.collectionId);
+        row.collectionLabel = raindropCollectionLabelForId(checked.item.collectionId);
+        const checkedCode = api.extractRaindropRemoteCode(checked.item);
+        if (checkedCode && api.codeComparableKey(checkedCode) === api.codeComparableKey(row.code)) {
+          row.action = 'exists_both';
+          row.statusText = raindropBothExistStatusText(row.code, checked.item);
+        } else {
+          row.action = 'ignore';
+          row.statusText = selectedScopeIds.has(Number(checked.item.collectionId))
+            ? '远端记录仍存在，但无法确认同一番号；本轮不修改'
+            : `远端记录已移动到未选择的 ${row.collectionLabel}，且无法确认同一番号`;
+        }
+      } else if (mode === 'bidirectional' && row.local?.eligibleForPush) {
+        const target = mirrorTargetForLocal(row.local);
+        row.localPayload = api.buildRaindropSyncPayload(row.local, target.collectionId);
+        row.localHash = api.raindropPayloadHash(row.localPayload);
+        row.payload = row.localPayload;
+        row.payloadHash = row.localHash;
+        row.collectionId = target.collectionId;
+        row.collectionLabel = target.collectionLabel;
+        row.remote = null;
+        row.action = 'conflict';
+        row.statusText = '官网记录已经不存在；可选择用本地重新 Push，或本轮跳过';
+      } else {
+        row.statusText = '官网记录已经不存在；本地番号保留，不自动删除';
+      }
+    }
+
+    const unknown = plan.filter(row => row.action === 'check');
+    for (let offset = 0; offset < unknown.length; offset += 100) {
+      const chunk = unknown.slice(offset, offset + 100);
+      const checked = await api.checkRaindropUrls(chunk.map(row => row.payload.link));
+      const byUrl = new Map((checked?.items || []).map(row => [row.url, row.remoteId]));
+      for (const row of chunk) {
+        const remoteId = byUrl.get(row.payload.link);
+        const remote = remoteId ? accountIndex.byRemoteId.get(String(remoteId)) || null : null;
+        if (remote) {
+          row.remoteId = String(remote.id || remoteId);
+          row.remote = remote;
+          row.collectionId = Number(remote.collectionId);
+          row.collectionLabel = raindropCollectionLabelForId(remote.collectionId);
+          row.action = 'exists_both';
+          row.statusText = raindropBothExistStatusText(row.code, remote);
+        } else {
+          row.remoteId = '';
+          row.remote = null;
+          row.action = 'push_create';
+          row.statusText = `Raindrop 全账号不存在该番号，将新建到 ${row.collectionLabel}`;
+        }
+      }
+    }
+
+    plan.forEach((row, index) => { row.planIndex = index; });
+    state.raindropSync.plan = plan;
+    logEvent('info', 'raindrop_bidirectional_previewed', {
+      mode,
+      collectionCount: state.raindropSync.selectedCollectionIds.size,
+      remoteCount: remoteItems.length,
+      accountRemoteCount: accountItems.length,
+      localCount: localRows.length,
+      pull: plan.filter(row => ['pull_create', 'pull_update', 'link'].includes(row.action)).length,
+      push: plan.filter(row => ['push_create', 'push_update'].includes(row.action)).length,
+      conflicts: plan.filter(row => row.action === 'conflict').length,
+      existsBoth: plan.filter(row => row.action === 'exists_both').length,
+      ignored: plan.filter(row => ['ignore', 'remote_missing'].includes(row.action)).length,
+    });
+    renderRaindropPlan();
+    return plan;
+  } catch (error) {
+    state.raindropSync.plan = [];
+    renderRaindropPlan();
+    logEvent('warn', 'raindrop_bidirectional_preview_failed', { mode, error: error.message });
+    toast(`Raindrop ${mode === 'pull' ? 'Pull' : '双向'}预览失败：${error.message}`, 'error');
+    return [];
+  } finally {
+    if (DOM.btnPreviewRaindropSync) DOM.btnPreviewRaindropSync.disabled = state.raindropSync.running;
+  }
+}
+
+async function exportRaindropCsv() {
+  const previousPlan = state.raindropSync.plan;
+  try {
+    if (!state.dbReady) throw new Error('数据库尚未就绪');
+    const plan = await buildRaindropSyncPlan({ checkRemote: false, offlineCsv: true, forceMode: 'push' });
+    const rows = plan.filter(row => row.payload).map(row => ({
+      title: row.payload.title || row.code,
+      note: row.payload.note || '',
+      excerpt: row.payload.excerpt || '',
+      url: row.payload.link,
+      folder: row.collectionLabel || currentRaindropCollectionLabel(),
+      tags: (row.payload.tags || []).join(','),
+      cover: row.payload.cover || '',
+      favorite: false,
+    }));
+    if (!rows.length) throw new Error('当前范围没有可导出的 MissAV 记录');
+    const directory = await api.openDirectory({ title: '选择 Raindrop 官网 CSV 保存目录' });
+    if (!directory) return;
+    const filePath = `${directory}\\${api.timePrefixToMinute()}_raindrop_官网导入_${rows.length}条.csv`;
+    await api.writeFile(filePath, '\ufeff' + api.generateOfficialRaindropCSV(rows), 'utf-8');
+    toast(`已导出 ${rows.length} 条 Raindrop 官网 CSV`, 'success');
+    logEvent('info', 'raindrop_official_csv_exported', {
+      scope: state.raindropSync.scope,
+      count: rows.length,
+      manualTarget: state.raindropSync.manualOverride,
+      filePath,
+    });
+  } catch (err) {
+    toast(`Raindrop CSV 导出失败：${err.message}`, 'error');
+    logEvent('warn', 'raindrop_official_csv_export_failed', { error: err.message });
+  } finally {
+    if (state.raindropSync.mode !== 'push') {
+      state.raindropSync.plan = previousPlan;
+      renderRaindropPlan();
+    }
+  }
+}
+
+function renderRaindropFailures() {
+  const rows = state.raindropSync.failedRows || [];
+  if (DOM.raindropFailedPanel) DOM.raindropFailedPanel.hidden = !rows.length;
+  if (DOM.raindropFailedCodesOutput) DOM.raindropFailedCodesOutput.value = rows.map(row => row.code).join('\n');
+}
+
+async function exportRaindropFailedCodes() {
+  const rows = state.raindropSync.failedRows || [];
+  if (!rows.length) { toast('当前没有同步失败番号', 'warning'); return; }
+  const directory = await api.openDirectory({ title: '选择 Raindrop 失败番号保存目录' });
+  if (!directory) return;
+  const filePath = `${directory}\\${api.timePrefixToMinute()}_raindrop_失败番号_${rows.length}条.txt`;
+  await api.writeFile(filePath, rows.map(row => row.code).join('\n'), 'utf-8');
+  toast(`已导出 ${rows.length} 条失败番号`, 'success');
+}
+
+function isMissingRaindropCollectionError(message) {
+  return /HTTP 404|Collection.*(?:不存在|not found)|collection.*not found/i.test(String(message || ''));
+}
+
+async function upsertRaindropPlanRow(row) {
+  try {
+    return await api.upsertRaindropItem({ remoteId: row.remoteId || null, payload: row.payload });
+  } catch (err) {
+    if (!isMissingRaindropCollectionError(err.message)) throw err;
+    if (!isMissavAutoRoutingRun() || !['missav1', 'missav2'].includes(row.routingKey)) {
+      await loadRaindropCollections({ force: true, quiet: true });
+      throw new Error('目标 Collection 已不存在；列表已刷新，请重新选择目标并生成预览');
+    }
+    state.raindropSync.routingCollections[row.routingKey] = null;
+    await loadRaindropCollections({ force: true, quiet: true });
+    await ensureMissavRoutingCollections();
+    const target = routingTargetForItem(null, row.item || row);
+    row.collectionId = target.collectionId;
+    row.collectionLabel = target.collectionLabel;
+    row.payload = api.buildRaindropSyncPayload(row.item || row, target.collectionId);
+    row.payloadHash = api.raindropPayloadHash(row.payload);
+    row.statusText = `旧目录失效，已自动改用重新确认的 ${target.collectionLabel}`;
+    logEvent('warn', 'raindrop_collection_recovered', { code: row.code, routingKey: row.routingKey, collectionId: target.collectionId });
+    return api.upsertRaindropItem({ remoteId: row.remoteId || null, payload: row.payload });
+  }
 }
 
 function updateRaindropProgress(completed, total, label) {
@@ -10812,26 +12492,233 @@ function classifyRaindropSyncFailure(message, sideEffectStarted) {
   return 'failed';
 }
 
+function raindropPullRecordFromPlan(row, action) {
+  const remote = row.remote;
+  if (!remote) throw new Error('Pull 记录缺少官网数据，请重新生成预览');
+  const payload = row.remotePayload || api.buildRaindropRemotePayload(remote);
+  const remoteHash = row.remoteHash || api.raindropRemoteItemHash(remote);
+  return {
+    code: row.code || api.extractRaindropRemoteCode(remote),
+    remoteId: remote.id,
+    link: remote.link,
+    title: remote.title,
+    tags: remote.tags,
+    excerpt: remote.excerpt,
+    note: remote.note,
+    cover: remote.cover,
+    created: remote.created,
+    collectionId: remote.collectionId,
+    collectionLabel: raindropCollectionLabelForId(remote.collectionId),
+    payloadHash: remoteHash,
+    remoteHash,
+    remoteLastUpdate: remote.lastUpdate || '',
+    action,
+    metadata: {
+      mode: state.raindropSync.mode,
+      localHashBefore: row.localHash || '',
+      remoteHash,
+    },
+    persist: false,
+    payload,
+  };
+}
+
+async function startRaindropMirrorSync() {
+  if (state.raindropSync.running) return;
+  if (!raindropPlanIsReady()) {
+    await buildRaindropSyncPlan({ checkRemote: true });
+    if (!raindropPlanIsReady()) {
+      const conflicts = state.raindropSync.plan.filter(row => resolvedRaindropAction(row) === 'conflict').length;
+      toast(conflicts ? `请先处理 ${conflicts} 条同步冲突` : '当前预览没有可执行的同步动作', 'error');
+      return;
+    }
+  }
+  const rows = state.raindropSync.plan;
+  const actions = rows.map(resolvedRaindropAction);
+  const pullCount = actions.filter(action => ['pull_create', 'pull_update', 'link'].includes(action)).length;
+  const pushCount = actions.filter(action => ['push_create', 'push_update'].includes(action)).length;
+  const noWrite = actions.filter(action => ['skip', 'exists_both'].includes(action)).length;
+  const ignored = actions.filter(action => ['ignore', 'remote_missing', 'error'].includes(action)).length;
+  const modeLabel = state.raindropSync.mode === 'pull' ? 'Pull' : '双向同步';
+  if (!confirm(`${modeLabel} 将执行：\nPull 到本地 ${pullCount} 条\nPush 到官网 ${pushCount} 条\n双方已有/内容一致，不写入 ${noWrite} 条\n仅忽略/提示 ${ignored} 条\n\n不会自动删除本地或官网记录。继续吗？`)) return;
+
+  state.raindropSync.stopRequested = false;
+  state.raindropSync.progress = { completed: 0, total: rows.length, errors: 0 };
+  state.raindropSync.failedRows = [];
+  renderRaindropFailures();
+  setRaindropBusy(true);
+  logEvent('info', 'raindrop_mirror_sync_started', {
+    mode: state.raindropSync.mode,
+    total: rows.length,
+    pull: pullCount,
+    push: pushCount,
+    collections: [...state.raindropSync.selectedCollectionIds],
+  });
+  let writesSinceCheckpoint = 0;
+  try {
+    for (let index = 0; index < rows.length; index++) {
+      if (state.raindropSync.stopRequested) break;
+      const row = rows[index];
+      const action = resolvedRaindropAction(row);
+      if (['ignore', 'remote_missing', 'error', 'exists_both', 'skip'].includes(action)) {
+        if (action === 'error') {
+          state.raindropSync.progress.errors++;
+          state.raindropSync.failedRows.push(row);
+        }
+      } else if (['pull_create', 'pull_update', 'link'].includes(action)) {
+        try {
+          const result = api.dbApplyRaindropPullRecord(raindropPullRecordFromPlan(row, action));
+          row.code = result.code;
+          row.action = 'skip';
+          row.resolution = '';
+          row.taskStatus = 'succeeded';
+          row.statusText = action === 'pull_create'
+            ? `已从官网加入本地永久库（远端 #${result.remoteId}）`
+            : action === 'link'
+              ? `已建立本地与远端 #${result.remoteId} 的双向映射`
+              : `已用官网内容更新本地（远端 #${result.remoteId}）`;
+          writesSinceCheckpoint++;
+        } catch (error) {
+          row.action = 'error';
+          row.statusText = error.message;
+          state.raindropSync.progress.errors++;
+          state.raindropSync.failedRows.push(row);
+          logEvent('warn', 'raindrop_pull_item_failed', { code: row.code, remoteId: row.remoteId, error: error.message });
+        }
+      } else if (['push_create', 'push_update'].includes(action)) {
+        const payload = row.localPayload || row.payload;
+        try {
+          if (!payload) throw new Error('Push 记录缺少本地同步内容，请重新生成预览');
+          if (row.local?.code) {
+            api.dbCompleteGlobalRaindropSync(row.local.code, {
+              status: 'running',
+              url: payload.link,
+              error: '',
+              collectionId: payload.collection?.$id ?? row.collectionId,
+              metadata: { direction: 'push', collectionLabel: row.collectionLabel },
+              persist: false,
+            }, null);
+          }
+          const result = await api.upsertRaindropItem({
+            remoteId: action === 'push_update' ? (row.remoteId || null) : null,
+            payload,
+          });
+          const remoteId = String(result.item.id);
+          const payloadHash = row.localHash || api.raindropPayloadHash(payload);
+          api.dbCompleteGlobalRaindropSync(row.local?.code || row.code, {
+            status: 'succeeded',
+            url: payload.link,
+            error: '',
+            remoteId,
+            collectionId: payload.collection?.$id ?? row.collectionId,
+            metadata: {
+              action: result.action,
+              direction: 'push',
+              remoteId,
+              collectionLabel: row.collectionLabel,
+            },
+            persist: false,
+          }, {
+            code: row.local?.code || row.code,
+            remoteId,
+            link: payload.link,
+            collectionId: payload.collection?.$id ?? row.collectionId,
+            payloadHash,
+            status: 'succeeded',
+            metadata: {
+              action: result.action,
+              direction: 'push',
+              remoteHash: payloadHash,
+              remoteLastUpdate: '',
+              collectionLabel: row.collectionLabel,
+              lastSeenAt: new Date().toISOString(),
+            },
+          });
+          row.remoteId = remoteId;
+          row.action = 'skip';
+          row.resolution = '';
+          row.taskStatus = 'succeeded';
+          row.statusText = result.action === 'updated'
+            ? `已更新官网 #${remoteId}`
+            : `已在官网新建 #${remoteId}`;
+          writesSinceCheckpoint++;
+        } catch (error) {
+          const status = classifyRaindropSyncFailure(error.message, true);
+          row.action = 'error';
+          row.taskStatus = status;
+          row.statusText = status === 'verify_required' ? `${error.message}；需重新预览核对官网` : error.message;
+          state.raindropSync.progress.errors++;
+          state.raindropSync.failedRows.push(row);
+          if (row.local?.code) {
+            api.dbCompleteGlobalRaindropSync(row.local.code, {
+              status,
+              url: payload?.link || '',
+              error: row.statusText,
+              collectionId: row.collectionId,
+              metadata: { direction: 'push', collectionLabel: row.collectionLabel },
+              persist: false,
+            }, null);
+          }
+          logEvent('warn', 'raindrop_push_item_failed', { code: row.code, status, error: error.message });
+          if (status === 'not_logged_in') {
+            state.raindropSync.stopRequested = true;
+            toast('Raindrop 授权失效，同步已暂停', 'error');
+          }
+        }
+      }
+      state.raindropSync.progress.completed = index + 1;
+      updateRaindropProgress(index + 1, rows.length, state.raindropSync.stopRequested ? '正在停止' : modeLabel);
+      if (writesSinceCheckpoint >= 20) {
+        api.dbCheckpoint?.();
+        writesSinceCheckpoint = 0;
+      }
+      if (index % 5 === 0) renderRaindropPlan();
+    }
+  } finally {
+    api.dbCheckpoint?.();
+    const stopped = state.raindropSync.stopRequested;
+    state.raindropSync.running = false;
+    setRaindropBusy(false);
+    renderRaindropPlan();
+    renderRaindropFailures();
+    refreshRaindropRunOptions();
+    updateRaindropProgress(state.raindropSync.progress.completed, rows.length, stopped ? '已停止' : '同步完成');
+    logEvent('info', stopped ? 'raindrop_mirror_sync_stopped' : 'raindrop_mirror_sync_finished', {
+      mode: state.raindropSync.mode,
+      completed: state.raindropSync.progress.completed,
+      total: rows.length,
+      errors: state.raindropSync.progress.errors,
+    });
+    toast(stopped
+      ? 'Raindrop 同步已安全停止，可重新生成预览后继续'
+      : `Raindrop ${modeLabel}完成，异常 ${state.raindropSync.progress.errors} 条`,
+    stopped || state.raindropSync.progress.errors ? 'warning' : 'success');
+  }
+}
+
 async function startRaindropSync() {
+  if (state.raindropSync.mode !== 'push') return startRaindropMirrorSync();
   if (state.raindropSync.running) return;
   if (!raindropPlanIsReady()) {
     await buildRaindropSyncPlan({ checkRemote: true });
     if (!raindropPlanIsReady()) { toast('没有需要写入的条目，或同步预览尚未完成', 'error'); return; }
   }
   const writeRows = state.raindropSync.plan.filter(row => ['create', 'update'].includes(row.action));
-  const unchanged = state.raindropSync.plan.filter(row => row.action === 'skip').length;
-  const targetCounts = state.raindropSync.plan.reduce((map, row) => {
+  const unchanged = state.raindropSync.plan.filter(row => ['skip', 'exists_both'].includes(row.action)).length;
+  const targetCounts = writeRows.reduce((map, row) => {
     const label = row.collectionLabel || currentRaindropCollectionLabel();
     map[label] = (map[label] || 0) + 1;
     return map;
   }, {});
   const targetSummary = Object.entries(targetCounts).map(([label, count]) => `${label} ${count} 条`).join('，');
-  if (!confirm(`将按预览目标向 Raindrop 写入 ${writeRows.length} 条（新建 ${writeRows.filter(row => row.action === 'create').length}，更新 ${writeRows.filter(row => row.action === 'update').length}），另有 ${unchanged} 条确认无需变化。\n目标分布：${targetSummary}。\n继续吗？`)) return;
+  if (!confirm(`将按预览目标向 Raindrop 写入 ${writeRows.length} 条（新建 ${writeRows.filter(row => row.action === 'create').length}，更新 ${writeRows.filter(row => row.action === 'update').length}），另有 ${unchanged} 条双方已有或内容一致、不发出写入请求。\n目标分布：${targetSummary}。\n继续吗？`)) return;
 
   state.raindropSync.stopRequested = false;
   state.raindropSync.progress = { completed: 0, total: state.raindropSync.plan.length, errors: 0 };
+  state.raindropSync.failedRows = [];
+  renderRaindropFailures();
   setRaindropBusy(true);
-  logEvent('info', 'raindrop_sync_started', { runId: state.raindropSync.runId, total: state.raindropSync.plan.length, targets: targetCounts });
+  logEvent('info', 'raindrop_sync_started', { scope: state.raindropSync.scope, total: state.raindropSync.plan.length, targets: targetCounts });
   let writesSinceCheckpoint = 0;
   try {
     for (let index = 0; index < state.raindropSync.plan.length; index++) {
@@ -10839,10 +12726,25 @@ async function startRaindropSync() {
       const row = state.raindropSync.plan[index];
       if (row.action === 'error') {
         state.raindropSync.progress.errors++;
+        state.raindropSync.failedRows.push(row);
+        api.dbCompleteGlobalRaindropSync(row.code, {
+          status: 'failed',
+          error: row.statusText || '同步数据不完整',
+          collectionId: row.collectionId,
+          metadata: { collectionLabel: row.collectionLabel },
+          persist: false,
+        }, null);
+      } else if (row.action === 'exists_both') {
+        // Account-wide code preflight already proved both sides have the code.
+        // Do not update local mappings, content or Collection placement.
+        row.taskStatus = 'succeeded';
       } else if (row.action === 'skip') {
-        api.dbCompleteRemoteSyncTask(row.runId, row.position, {
+        api.dbCompleteGlobalRaindropSync(row.code, {
           status: 'succeeded',
+          url: row.payload?.link || '',
           error: '',
+          remoteId: row.remoteId || '',
+          collectionId: row.collectionId,
           metadata: {
             action: 'unchanged',
             remoteId: row.remoteId || '',
@@ -10850,23 +12752,51 @@ async function startRaindropSync() {
             collectionLabel: row.collectionLabel,
           },
           persist: false,
-        }, null);
+        }, row.remoteId ? {
+          code: row.code,
+          remoteId: row.remoteId,
+          link: row.payload?.link || '',
+          collectionId: row.collectionId,
+          payloadHash: row.payloadHash,
+          status: 'succeeded',
+          metadata: {
+            action: 'unchanged',
+            direction: 'push',
+            remoteHash: row.payloadHash,
+            collectionLabel: row.collectionLabel,
+            lastSeenAt: new Date().toISOString(),
+          },
+        } : null);
         row.taskStatus = 'succeeded';
       } else {
-        api.dbUpdateRunTask(row.runId, row.position, 'raindrop', 'sync', { status: 'running', error: '', persist: false });
+        api.dbCompleteGlobalRaindropSync(row.code, {
+          status: 'running',
+          url: row.payload.link,
+          error: '',
+          collectionId: row.collectionId,
+          metadata: { collectionLabel: row.collectionLabel },
+          persist: false,
+        }, null);
         try {
-          const result = await api.upsertRaindropItem({ remoteId: row.remoteId || null, payload: row.payload });
+          const result = await upsertRaindropPlanRow(row);
           row.remoteId = String(result.item.id);
           row.action = 'skip';
           row.taskStatus = 'succeeded';
           row.statusText = result.action === 'updated' ? `已更新远端 #${result.item.id}` : `已新建远端 #${result.item.id}`;
-          api.dbCompleteRemoteSyncTask(row.runId, row.position, {
-            status: 'succeeded', url: row.payload.link, error: '',
+          api.dbCompleteGlobalRaindropSync(row.code, {
+            status: 'succeeded', url: row.payload.link, error: '', remoteId: result.item.id,
+            collectionId: row.collectionId,
             metadata: { action: result.action, remoteId: result.item.id, collectionId: row.collectionId, collectionLabel: row.collectionLabel }, persist: false,
           }, {
             code: row.code, remoteId: result.item.id, link: row.payload.link,
             collectionId: row.collectionId, payloadHash: row.payloadHash,
-            status: 'succeeded', metadata: { action: result.action },
+            status: 'succeeded', metadata: {
+              action: result.action,
+              direction: 'push',
+              remoteHash: row.payloadHash,
+              collectionLabel: row.collectionLabel,
+              lastSeenAt: new Date().toISOString(),
+            },
           });
           writesSinceCheckpoint++;
         } catch (err) {
@@ -10875,8 +12805,16 @@ async function startRaindropSync() {
           row.taskStatus = status;
           row.statusText = status === 'verify_required' ? `${err.message}；需核对远端后再重试` : err.message;
           state.raindropSync.progress.errors++;
-          api.dbCompleteRemoteSyncTask(row.runId, row.position, { status, error: row.statusText, metadata: { collectionId: row.collectionId, collectionLabel: row.collectionLabel }, persist: false }, null);
-          logEvent('warn', 'raindrop_sync_item_failed', { runId: row.runId, position: row.position, code: row.code, status, error: err.message });
+          state.raindropSync.failedRows.push(row);
+          api.dbCompleteGlobalRaindropSync(row.code, {
+            status,
+            url: row.payload?.link || '',
+            error: row.statusText,
+            collectionId: row.collectionId,
+            metadata: { collectionId: row.collectionId, collectionLabel: row.collectionLabel },
+            persist: false,
+          }, null);
+          logEvent('warn', 'raindrop_sync_item_failed', { scope: state.raindropSync.scope, code: row.code, status, error: err.message });
           if (status === 'not_logged_in') {
             state.raindropSync.stopRequested = true;
             toast('Raindrop 授权失效，同步已暂停', 'error');
@@ -10894,13 +12832,12 @@ async function startRaindropSync() {
     state.raindropSync.running = false;
     setRaindropBusy(false);
     renderRaindropPlan();
-    const fresh = api.dbGetRun(state.raindropSync.runId);
-    if (fresh && [state.selectedRunId, state.preparedRunId, state.currentRunId].map(Number).includes(Number(fresh.id))) {
-      state.results = fresh.items.map(batchItemToResult);
-      if (state.activePage === 'results') renderTable();
-    }
+    renderRaindropFailures();
+    refreshRaindropRunOptions();
+    const resultRunId = loadedResultRunId();
+    if (resultRunId) refreshResultsFromRun(resultRunId);
     updateRaindropProgress(state.raindropSync.progress.completed, state.raindropSync.plan.length, stopped ? '已停止' : '同步完成');
-    logEvent('info', stopped ? 'raindrop_sync_stopped' : 'raindrop_sync_finished', { runId: state.raindropSync.runId, completed: state.raindropSync.progress.completed, total: state.raindropSync.plan.length, errors: state.raindropSync.progress.errors });
+    logEvent('info', stopped ? 'raindrop_sync_stopped' : 'raindrop_sync_finished', { scope: state.raindropSync.scope, completed: state.raindropSync.progress.completed, total: state.raindropSync.plan.length, errors: state.raindropSync.progress.errors });
     toast(stopped ? 'Raindrop 同步已安全停止，可重新预览后继续' : `Raindrop 同步完成，异常 ${state.raindropSync.progress.errors} 条`, stopped || state.raindropSync.progress.errors ? 'warning' : 'success');
   }
 }
@@ -10914,7 +12851,7 @@ function stopRaindropSync() {
 
 // ─── 辅助 ────────────────────────────────────────────
 function clearAll() {
-  DOM.codeInput.value = ''; state.inputCodes = []; state.results = [];
+  DOM.codeInput.value = ''; state.inputCodes = []; state.inputEntries = []; state.results = [];
   state.preparedRunId = null;
   state.preparedInputSignature = '';
   state.selectedRunId = null;

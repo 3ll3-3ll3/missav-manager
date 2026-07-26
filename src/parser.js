@@ -151,7 +151,7 @@ const NOISE_CODE_PREFIXES = new Set([
   'ALL', 'PDF', 'TELEGRAM', 'LOGO', 'JOHREN', 'IEOR', 'PROBABILITY',
   'STATISTICS', 'PYTHON', 'OFFICE', 'GITHUB', 'SERIES', 'WEIXIN',
   'RESULT', 'RELATED', 'THREAD', 'XIUREN', 'WXSYNC', 'JAVA', 'LARGE',
-  'RJ', 'NO',
+  'RJ', 'NO', 'PRO', 'YOUPORN',
 ]);
 
 const DATE_WORD_PREFIXES = new Set([
@@ -192,8 +192,13 @@ function addCode(codes, raw, index = 0) {
   if (isLikelyStandardCode(code)) codes.push({ code, index });
 }
 
+function addTrustedCode(codes, raw, index = 0) {
+  const code = normalizeCode(raw);
+  if (/^(FC2-PPV-\d{4,10}|[A-Z]{2,8}-\d{2,5})$/.test(code)) codes.push({ code, index });
+}
+
 const TRUSTED_AV_HOSTS = [
-  'missav.ai', '123av.com', 'avbase.net', 'javdb.com', 'javbus.com',
+  'missav.ai', 'missav.ws', '123av.com', 'avbase.net', 'javdb.com', 'javbus.com',
   'javlibrary.com', 'supjav.com', 'njav.tv', 'jable.tv', 'jav.guru',
 ];
 
@@ -211,6 +216,8 @@ function extractCodesFromTrustedAvUrl(input) {
 
   const source = decodeURIComponent(url.pathname);
   const matches = [];
+  const exactSlugCode = extractCodeFromUrl(url.href);
+  if (/^(FC2-PPV-\d{4,10}|[A-Z]{2,8}-\d{2,5})$/.test(exactSlugCode)) matches.push(exactSlugCode);
   const fc2Pattern = /(?:^|[^a-z0-9])fc2(?:[\s_-]*ppv)?[\s_-]*(\d{4,10})(?=$|[^0-9])/gi;
   for (const match of source.matchAll(fc2Pattern)) matches.push(`FC2-PPV-${match[1]}`);
   const standardPattern = /(?:^|[^a-z])([a-z]{2,8})[\s_-]+(\d{2,5})(?=$|[^0-9])/gi;
@@ -225,7 +232,19 @@ function maskGenericNoise(text) {
   const preserveLength = match => match.replace(/[^\r\n]/g, ' ');
   return String(text || '')
     .replace(/https?:\/\/[^\s"'<>)]*/gi, preserveLength)
-    .replace(/<[^>]*>/g, preserveLength);
+    .replace(/<[^>]*>/g, preserveLength)
+    .replace(/\b\d{1,5}\s*[×x]\s*\d{1,5}\b/gi, preserveLength)
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:bytes?|[kmgt]i?b)\b/gi, preserveLength)
+    // Telegram 导出中的机器人/站点名称后面经常紧跟日期或时间，不能把它们拼成番号。
+    .replace(/\bview\s+results\s+page\b/gi, preserveLength)
+    .replace(/\b(?:powered\s+by\s+)?whos\.tv\b/gi, preserveLength)
+    .replace(/\bmissav\s+daily\b/gi, preserveLength)
+    // 保留前面的真实番号，只遮蔽详情后缀，避免 LEAK + 时钟小时组成 LEAK-13。
+    .replace(/\buncensored[\s_-]+leak(?:ed)?\b/gi, preserveLength)
+    // Telegram 用户名、年龄和“几分钟前”不是番号上下文。
+    .replace(/@\s*[a-z][a-z0-9_]{1,31}/gi, preserveLength)
+    .replace(/\b[a-z][a-z0-9_]{1,31}\s+\d{1,2}\s*(?:岁|years?\s+old)/gi, preserveLength)
+    .replace(/\b[a-z][a-z0-9_]{1,31}\s+\d{1,3}\s*(?:秒|分钟|小时|小時|天)前/gi, preserveLength);
 }
 
 /**
@@ -239,19 +258,20 @@ function parseCodeList(text) {
   // 可信 AV URL 优先；普通网页 URL 和图片路径不参与通用番号匹配。
   const urlPattern = /https?:\/\/[^\s"'<>)]*/gi;
   for (const match of decoded.matchAll(urlPattern)) {
-    for (const code of extractCodesFromTrustedAvUrl(match[0])) addCode(codes, code, match.index || 0);
+    for (const code of extractCodesFromTrustedAvUrl(match[0])) addTrustedCode(codes, code, match.index || 0);
   }
 
   const visibleText = maskGenericNoise(decoded);
 
   // FC2 系列：FC2-PPV-1234567、FC2 1234567、FC2_1234567。
-  const fc2Pattern = /(^|[^A-Za-z0-9])FC2(?:[\s_-]*PPV)?[\s_-]*(\d{4,10})(?=$|[^A-Za-z0-9])/gi;
+  const fc2Pattern = /(^|[^A-Za-z0-9])FC2(?:[ \t_-]*PPV)?[ \t_-]*(\d{4,10})(?=$|[^A-Za-z0-9])/gi;
   for (const match of visibleText.matchAll(fc2Pattern)) {
     addCode(codes, `FC2-PPV-${match[2]}`, (match.index || 0) + match[1].length);
   }
 
   // 带分隔符的普通番号：ABF-354、sone_314、ABF 354。
-  const separatedPattern = /(^|[^A-Za-z0-9])([A-Za-z]{2,8})[\s_-]+(\d{2,5})(?=$|[^A-Za-z0-9])/g;
+  // 番号前缀与数字只允许同一行；换行代表消息/字段边界，禁止跨消息拼接。
+  const separatedPattern = /(^|[^A-Za-z0-9])([A-Za-z]{2,8})[ \t_-]+(\d{2,5})(?=$|[^A-Za-z0-9])/g;
   for (const match of visibleText.matchAll(separatedPattern)) {
     addCode(codes, `${match[2]}-${match[3]}`, (match.index || 0) + match[1].length);
   }

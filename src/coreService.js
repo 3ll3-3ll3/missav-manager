@@ -9,13 +9,14 @@ const exporter = require('./exporter');
 const csvTools = require('./csvTools');
 const raindrop = require('./raindrop');
 const raindropApi = require('./raindropApi');
+const raindropSync = require('./raindropSync');
 const inputExtractor = require('./inputExtractor');
 const toolboxFilters = require('./toolboxFilters');
 const toolRegistry = require('./tools/registry');
 
 const DATABASE_METHODS = new Set([
   'importFromCSV', 'findCode', 'searchActressTag', 'getOrCreateActressTag',
-  'upsertCode', 'persistProcessedCode', 'linkActressCode', 'linkGenreCode',
+  'upsertCode', 'registerInputCodes', 'persistProcessedCode', 'linkActressCode', 'linkGenreCode',
   'getStats', 'getActressLibrary', 'getCodeLibrary', 'getCodeLibraryPage',
   'getCodeLibraryIds', 'getCodeLibraryByIds', 'getBookmarkLibrary', 'getBookmarkStats',
   'getBookmarkCollections', 'getBookmarkCollectionInfo', 'createBookmarkCollection',
@@ -32,11 +33,15 @@ const DATABASE_METHODS = new Set([
   'deleteCodeRecord', 'setCodeActressTags', 'setCodeGenreTags', 'getEditableTables',
   'getRawTableRows', 'updateRawCell', 'bulkUpdateRawCells', 'insertRawRow',
   'deleteRawRow', 'bulkDeleteRawRows', 'exportRawTableRows', 'exportToCSV',
+  'createToolHistory', 'getToolHistories', 'getToolHistory', 'renameToolHistory',
+  'deleteToolHistory',
   'createProcessingRun', 'markProcessingRunItemRunning', 'updateProcessingRunItem',
   'completeMissavProcessingRunItem', 'updateProcessingItemTask',
-  'completeProcessingItemTaskWithCache', 'getRemoteSyncRecord', 'completeRemoteSyncTask',
+  'completeProcessingItemTaskWithCache', 'getRemoteSyncRecord', 'getGlobalRaindropRows',
+  'getRaindropSyncLocalRows', 'applyRaindropPullRecord',
+  'completeRemoteSyncTask', 'completeGlobalRaindropSync',
   'getTelegramSource', 'upsertTelegramSource', 'getTelegramGroupSources',
-  'setTelegramGroupSources', 'recordTelegramImport', 'getTelegramImportHistory',
+  'removeTelegramGroupSource', 'setTelegramGroupSources', 'recordTelegramImport', 'getTelegramImportHistory',
   'getSiteLookupCache', 'setProcessingRunStatus', 'finishProcessingRun',
   'getRecentRuns', 'getProcessingRun', 'getProcessingRunItem', 'getProcessingRunItems',
   'getResumableProcessingRun', 'renameProcessingRun', 'deleteProcessingRun',
@@ -50,7 +55,7 @@ const MODULES = Object.freeze({
   },
   input: {
     module: inputExtractor,
-    methods: new Set(['parseInputCodeList']),
+    methods: new Set(['parseInputCodeList', 'parseInputEntries']),
   },
   fetcher: {
     module: fetcher,
@@ -85,10 +90,18 @@ const MODULES = Object.freeze({
     module: raindropApi,
     methods: new Set(['buildSyncPayload', 'payloadHash', 'selectMissavCollectionName']),
   },
+  raindropSync: {
+    module: raindropSync,
+    methods: new Set([
+      'normalizeSyncMode', 'normalizeComparableUrl', 'extractRemoteCode',
+      'remoteItemToPayload', 'remoteItemHash', 'localItemIdentity', 'classifyMirrorPair',
+    ]),
+  },
   toolbox: {
     module: toolboxFilters,
     methods: new Set([
-      'extractTwitterProfiles', 'extractBadNewsLinks', 'filterMessagesByTime', 'messageTimeExtent',
+      'extractTwitterProfiles', 'extractBadNewsLinks', 'extractHaijiaoLinks',
+      'filterMessagesByTime', 'messageTimeExtent',
     ]),
   },
   tools: {

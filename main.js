@@ -9,7 +9,7 @@ const { createRuntimeLogger } = require('./src/logger');
 const av123Account = require('./src/av123Account');
 const raindropApi = require('./src/raindropApi');
 const telegramSource = require('./src/telegramSource');
-const { TelegramUserService } = require('./src/telegramClient');
+const { TelegramUserService, normalizeTelegramNetworkConfig } = require('./src/telegramClient');
 const { TelegramBotService, normalizeBotToken, redactBotSecrets } = require('./src/telegramBot');
 const { fetchWithElectronRequest } = require('./src/networkTransport');
 const { ChromeFavoriteBridge } = require('./src/chromeFavoriteBridge');
@@ -38,6 +38,11 @@ app.setPath('userData', selectedUserData.path);
 const selectedDatabaseLocation = databaseLocation.readDatabaseDirectory(app.getPath('userData'));
 let activeDatabaseDirectory = selectedDatabaseLocation.directory;
 const PACKAGE_SMOKE_MODE = process.argv.includes('--package-smoke');
+// Packaged smoke runs can execute on machines without a usable GPU process.
+// Keep normal desktop rendering unchanged and make only the headless check deterministic.
+if (PACKAGE_SMOKE_MODE) {
+  app.disableHardwareAcceleration();
+}
 
 let runtimeLogger = null;
 let raindropEnsureCollectionsPromise = null;
@@ -134,6 +139,30 @@ function readOrCreateChromeFavoriteBridgeToken() {
 
 function telegramSecretPath() {
   return path.join(app.getPath('userData'), 'secure', 'telegram-user.bin');
+}
+
+function telegramNetworkConfigPath() {
+  return path.join(app.getPath('userData'), 'config', 'telegram-network.json');
+}
+
+function readTelegramNetworkConfig() {
+  const filePath = telegramNetworkConfigPath();
+  if (!fs.existsSync(filePath)) return normalizeTelegramNetworkConfig();
+  try {
+    return normalizeTelegramNetworkConfig(JSON.parse(fs.readFileSync(filePath, 'utf8')));
+  } catch (error) {
+    writeRuntimeLog('warn', 'telegram_network_config_invalid', { message: String(error?.message || error || '') });
+    return normalizeTelegramNetworkConfig();
+  }
+}
+
+function writeTelegramNetworkConfig(value) {
+  const config = normalizeTelegramNetworkConfig(value);
+  const filePath = telegramNetworkConfigPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  writeRuntimeLog('info', 'telegram_network_config_saved', config);
+  return config;
 }
 
 function readTelegramSecret() {
@@ -311,7 +340,11 @@ async function raindropApiRequest(endpoint, options = {}) {
       const raw = await response.text();
       let data = {};
       try { data = raw ? JSON.parse(raw) : {}; } catch { data = {}; }
-      if (response.ok && data?.result !== false) return { data, rate, statusCode: response.status };
+      if (raindropApi.isSuccessfulApiResponse(response.ok, data, {
+        allowResultFalse: options.allowResultFalse,
+      })) {
+        return { data, rate, statusCode: response.status };
+      }
 
       if (response.status === 429 && attempt < maxAttempts) {
         const retryAt = rate.resetAt || Date.now() + Math.min(15000, 1500 * attempt);
@@ -420,6 +453,7 @@ function getTelegramUserService() {
     readSecret: readTelegramSecret,
     writeSecret: writeTelegramSecret,
     clearSecret: clearTelegramSecret,
+    readNetworkConfig: readTelegramNetworkConfig,
     emitState: state => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('telegram:state', state);
     },
@@ -598,8 +632,6 @@ function createWindow() {
     show: false,
   });
 
-  console.log('[Main] Loading renderer...');
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, targetUrl) => {
     const currentUrl = mainWindow?.webContents?.getURL() || '';
@@ -619,16 +651,14 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     writeRuntimeLog('info', 'app_window_ready', {});
     console.log('[Main] Window ready to show');
-    if (PACKAGE_SMOKE_MODE) {
-      writeRuntimeLog('info', 'app_package_smoke_ready', {});
-      setTimeout(() => app.quit(), 250);
-      return;
-    }
     mainWindow.show();
     if (process.argv.includes('--dev')) {
       mainWindow.webContents.openDevTools();
     }
   });
+
+  console.log('[Main] Loading renderer...');
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -638,22 +668,57 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  let databaseStatus = null;
   try {
-    const status = await coreService.init({
+    databaseStatus = await coreService.init({
       dbDir: activeDatabaseDirectory,
       applicationDir: __dirname,
     });
     writeRuntimeLog('info', 'database_ready', {
-      path: status.path,
-      engine: status.engine,
-      schemaVersion: status.schemaVersion,
-      migrationBackup: status.migrationBackup?.fileName || '',
+      path: databaseStatus.path,
+      engine: databaseStatus.engine,
+      schemaVersion: databaseStatus.schemaVersion,
+      migrationBackup: databaseStatus.migrationBackup?.fileName || '',
       locationSource: selectedDatabaseLocation.configured ? 'configured' : 'default',
       userDataSource: selectedUserData.source,
     });
   } catch (error) {
     writeRuntimeLog('error', 'database_init_failed', { error: error.message || String(error) });
   }
+
+  if (PACKAGE_SMOKE_MODE) {
+    try {
+      if (!databaseStatus) throw new Error('数据库初始化失败');
+      const rendererAssets = [
+        'preload.js',
+        path.join('renderer', 'index.html'),
+        path.join('renderer', 'app.js'),
+        path.join('renderer', 'styles.css'),
+      ];
+      for (const relativePath of rendererAssets) {
+        const filePath = path.join(__dirname, relativePath);
+        if (!fs.existsSync(filePath) || fs.statSync(filePath).size <= 0) {
+          throw new Error(`打包资源缺失或为空：${relativePath}`);
+        }
+      }
+      readOrCreateChromeFavoriteBridgeToken();
+      writeRuntimeLog('info', 'app_window_ready', {
+        mode: 'package_smoke',
+        rendererAssets: rendererAssets.length,
+      });
+      writeRuntimeLog('info', 'app_package_smoke_ready', {
+        version: app.getVersion(),
+        databaseEngine: databaseStatus.engine,
+        schemaVersion: databaseStatus.schemaVersion,
+      });
+      setTimeout(() => app.exit(0), 50);
+    } catch (error) {
+      writeRuntimeLog('error', 'app_package_smoke_failed', { error: error.message || String(error) });
+      setTimeout(() => app.exit(1), 50);
+    }
+    return;
+  }
+
   try {
     await ensureChromeFavoriteBridge();
   } catch (error) {
@@ -906,6 +971,14 @@ ipcMain.handle('telegram:status', async () => ({
   encryptionAvailable: raindropEncryptionAvailable(),
 }));
 
+ipcMain.handle('telegram:network-config', async () => readTelegramNetworkConfig());
+
+ipcMain.handle('telegram:network-save', async (_event, value = {}) => writeTelegramNetworkConfig(value));
+
+ipcMain.handle('telegram:network-test', async (_event, value = {}) => (
+  getTelegramUserService().testNetworkConfig(normalizeTelegramNetworkConfig(value))
+));
+
 ipcMain.handle('telegram:connect-stored', async () => ({
   ...(await getTelegramUserService().connectStored()),
   encryptionAvailable: raindropEncryptionAvailable(),
@@ -935,7 +1008,13 @@ ipcMain.handle('telegram:auth-submit', async (_event, options = {}) => ({
 ipcMain.handle('telegram:auth-cancel', async () => getTelegramUserService().cancelAuthorization());
 ipcMain.handle('telegram:logout', async () => getTelegramUserService().logOut());
 ipcMain.handle('telegram:sync-stop', async () => getTelegramUserService().stopSync());
-ipcMain.handle('telegram:list-groups', async () => getTelegramUserService().listGroupDialogs({ limit: 500 }));
+ipcMain.handle('telegram:list-groups', async () => getTelegramUserService().listGroupDialogs({ limit: 1000 }));
+ipcMain.handle('telegram:mark-read', async (_event, options = {}) => (
+  getTelegramUserService().markGroupRead({
+    chatKey: options.chatKey,
+    maxId: options.maxId,
+  })
+));
 ipcMain.handle('telegram:sync-group', async (_event, options = {}) => {
   const result = await getTelegramUserService().syncGroupMessages({
     chatKey: options.chatKey,
@@ -983,6 +1062,7 @@ ipcMain.handle('telegram:sync-group', async (_event, options = {}) => {
     syncTargetMessageId: result.syncTargetMessageId,
     hasMore: result.hasMore,
     stopped: result.stopped,
+    maxFetchedMessageId: result.maxFetchedMessageId,
   };
 });
 
@@ -1480,6 +1560,86 @@ ipcMain.handle('raindrop:collections', async () => {
   };
 });
 
+async function scanRaindropPages(collectionIds, options = {}) {
+  const nested = Boolean(options.includeNested);
+  const itemsById = new Map();
+  let pageCount = 0;
+  let lastRate = null;
+  for (const collectionId of collectionIds) {
+    for (let page = 0; page < 10000; page++) {
+      const query = new URLSearchParams({
+        page: String(page),
+        perpage: String(raindropApi.RAINDROPS_PER_PAGE),
+        sort: '-lastUpdate',
+        nested: nested && collectionId > 0 ? 'true' : 'false',
+      });
+      const response = await raindropApiRequest(`/raindrops/${collectionId}?${query.toString()}`);
+      const rows = raindropApi.parseRaindropsResponse(response.data, collectionId);
+      for (const row of rows) itemsById.set(row.id, row);
+      pageCount++;
+      lastRate = response.rate;
+      if (rows.length < raindropApi.RAINDROPS_PER_PAGE) break;
+    }
+  }
+  return {
+    pageCount,
+    items: [...itemsById.values()].sort((a, b) =>
+      String(b.lastUpdate || b.created || '').localeCompare(String(a.lastUpdate || a.created || ''))),
+    rate: lastRate,
+  };
+}
+
+ipcMain.handle('raindrop:scan-collections', async (_event, options = {}) => {
+  const collectionIds = raindropApi.normalizeCollectionSelection(options.collectionIds);
+  const nested = Boolean(options.includeNested);
+  const scanned = await scanRaindropPages(collectionIds, { includeNested: nested });
+  writeRuntimeLog('info', 'raindrop_collections_scanned', {
+    collectionCount: collectionIds.length,
+    includeNested: nested,
+    pageCount: scanned.pageCount,
+    itemCount: scanned.items.length,
+  });
+  return {
+    collectionIds,
+    includeNested: nested,
+    pageCount: scanned.pageCount,
+    items: scanned.items,
+    rate: scanned.rate,
+  };
+});
+
+ipcMain.handle('raindrop:scan-account', async () => {
+  // Raindrop reserves collectionId=0 for all account raindrops except Trash.
+  // This account-wide read is intentionally separate from selectable sync scopes:
+  // collection location must never cause the same code to be pushed twice.
+  const scanned = await scanRaindropPages([0]);
+  writeRuntimeLog('info', 'raindrop_account_scanned', {
+    pageCount: scanned.pageCount,
+    itemCount: scanned.items.length,
+  });
+  return {
+    collectionId: 0,
+    pageCount: scanned.pageCount,
+    items: scanned.items,
+    rate: scanned.rate,
+  };
+});
+
+ipcMain.handle('raindrop:get-item', async (_event, remoteId) => {
+  const id = Number(remoteId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Raindrop 书签 ID 无效');
+  try {
+    const response = await raindropApiRequest(`/raindrop/${id}`, { maxAttempts: 2 });
+    const row = response.data?.item || response.data?.raindrop || response.data || {};
+    const item = raindropApi.normalizeRemoteRaindrop(row);
+    if (!item) throw new Error('Raindrop 返回的书签数据无效');
+    return { found: true, item, rate: response.rate };
+  } catch (error) {
+    if (error.statusCode === 404) return { found: false, item: null };
+    throw error;
+  }
+});
+
 ipcMain.handle('raindrop:ensure-collections', async (_event, names) => {
   if (raindropEnsureCollectionsPromise) return raindropEnsureCollectionsPromise;
   raindropEnsureCollectionsPromise = (async () => {
@@ -1526,7 +1686,12 @@ ipcMain.handle('raindrop:ensure-collections', async (_event, names) => {
 
 ipcMain.handle('raindrop:check-urls', async (_event, urls) => {
   const safeUrls = raindropApi.sanitizeUrls(urls);
-  const result = await raindropApiRequest('/import/url/exists', { method: 'POST', body: { urls: safeUrls } });
+  const result = await raindropApiRequest('/import/url/exists', {
+    method: 'POST',
+    body: { urls: safeUrls },
+    // Raindrop uses HTTP 200 + result:false when none of the URLs exists yet.
+    allowResultFalse: true,
+  });
   return { items: raindropApi.parseExistsResponse(result.data, safeUrls), rate: result.rate };
 });
 

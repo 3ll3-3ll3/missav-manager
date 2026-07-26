@@ -75,6 +75,40 @@ test('parses Telegram HTML messages into stable message envelopes', () => {
   assert.equal(messages[0].sourceLabel, 'messages.html');
 });
 
+test('extracts a MissAV ws mirror code without treating Telegram file-size metadata as a code', () => {
+  const html = `
+    <div class="message default clearfix" id="message601">
+      <div class="text"><a href="https://missav.ws/alog-030?utm_source=telegram">https://missav.ws/alog-030</a></div>
+      <div class="media_wrap"><div class="status details">800×540, 161.2 KB</div></div>
+    </div>`;
+  const messages = parseTelegramHtml(html, { sourceLabel: 'messages.html' });
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0].codes, ['ALOG-030']);
+  assert.equal(messages[0].codes.some(code => code.startsWith('KB-')), false);
+});
+
+test('splits Telegram HTML with negative message IDs and ignores service boundaries and metadata noise', () => {
+  const html = `
+    <div class="message service" id="message-1"><div class="body details">17 July 2026</div></div>
+    <div class="message default clearfix" id="message-999981060">
+      <div class="pull_right date details" title="17.07.2026 00:50:02 UTC+08:00">00:50</div>
+      <div class="from_name">Whos.tv</div>
+      <div class="text">Whos.tv 17.07.2026 真实番号 ABF-369</div>
+      <div class="media_wrap"><div class="status details">59:34, 636.5 MB</div></div>
+    </div>
+    <div class="message default clearfix joined" id="message-999981059">
+      <div class="pull_right date details" title="17.07.2026 01:00:02 UTC+08:00">01:00</div>
+      <div class="text">▶️ SIRO-5690-UNCENSORED-LEAK 13:48</div>
+    </div>`;
+
+  const messages = parseTelegramHtml(html, { sourceLabel: 'messages.html' });
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].messageId, '-999981060');
+  assert.equal(messages[1].messageId, '-999981059');
+  assert.deepEqual(messages[0].codes, ['ABF-369']);
+  assert.deepEqual(messages[1].codes, ['SIRO-5690']);
+});
+
 test('deduplicates the same group message across API and JSON import', () => {
   const api = telegramApiMessagesToEnvelopes([
     { id: 9001, date: new Date('2026-07-21T08:00:00Z'), message: 'JUQ-999 https://123av.com/cn/v/juq-999' },

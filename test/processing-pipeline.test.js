@@ -312,7 +312,7 @@ test('dual-pipeline batches create four independent tasks with correct initial s
     Object.fromEntries(TASK_KEYS.map(key => [key, run.items[0].tasks[key].status])),
     {
       missavLookup: 'succeeded',
-      raindropSync: 'skipped',
+      raindropSync: 'ready',
       av123Lookup: 'queued',
       av123Favorite: 'blocked',
     },
@@ -337,14 +337,14 @@ test('dual-pipeline batches create four independent tasks with correct initial s
   );
 
   assertStage(run, 'missavLookup', { succeeded: 1, skipped: 1, queued: 1 });
-  assertStage(run, 'raindropSync', { skipped: 2, blocked: 1 });
+  assertStage(run, 'raindropSync', { ready: 1, skipped: 1, blocked: 1 });
   assertStage(run, 'av123Lookup', { skipped: 1, queued: 2 });
   assertStage(run, 'av123Favorite', { skipped: 1, blocked: 2 });
   assertPipelineTotals(run);
   assert.equal(run.pipelineTaskCount, 12);
-  assert.equal(run.pipelineCompleted, 6);
-  assert.equal(run.pipelinePending, 6);
-  assert.equal(run.pipelineProgress, 50);
+  assert.equal(run.pipelineCompleted, 5);
+  assert.equal(run.pipelinePending, 7);
+  assert.equal(run.pipelineProgress, 42);
 
   database.close();
   assert.equal(await countPersistedTasks(dir), 12);

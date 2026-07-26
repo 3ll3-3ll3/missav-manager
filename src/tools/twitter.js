@@ -21,7 +21,7 @@ const manifest = Object.freeze({
     timeRange: true,
     network: false,
     accountAction: false,
-    persistentResults: false,
+    persistentResults: true,
   }),
 });
 
@@ -29,6 +29,20 @@ function validTwitterHandle(value) {
   const handle = String(value || '').trim().replace(/^[@#]/, '');
   if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) return '';
   if (TWITTER_RESERVED_PATHS.has(handle.toLowerCase())) return '';
+  return handle;
+}
+
+function validTwitterHashtag(value, context = {}) {
+  const handle = validTwitterHandle(value);
+  if (!handle || handle.length < 4) return '';
+  const prefix = String(context.text || '').slice(Math.max(0, Number(context.index || 0) - 24), Number(context.index || 0));
+  if (/传送门[\s：:→-]*$/u.test(prefix)) return '';
+  return handle;
+}
+
+function validMentionedTwitterHandle(value) {
+  const handle = validTwitterHandle(value);
+  if (!handle || /_bot$/i.test(handle)) return '';
   return handle;
 }
 
@@ -47,8 +61,11 @@ function extractTwitterProfiles(input, options = {}) {
   };
   for (const message of messages) {
     const text = messageText(message);
-    for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])[@#]([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) {
-      add(match[1]);
+    for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])#([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) {
+      add(validTwitterHashtag(match[1], { text, index: Number(match.index || 0) + match[0].lastIndexOf('#') }));
+    }
+    for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])@([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) {
+      add(validMentionedTwitterHandle(match[1]));
     }
     for (const match of text.matchAll(/https?:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})(?=$|[/?#\s"'<>])/gi)) {
       add(match[1]);
@@ -61,5 +78,7 @@ module.exports = {
   manifest,
   TWITTER_RESERVED_PATHS,
   validTwitterHandle,
+  validTwitterHashtag,
+  validMentionedTwitterHandle,
   extractTwitterProfiles,
 };

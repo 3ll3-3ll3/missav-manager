@@ -121,6 +121,11 @@ test('persists Telegram checkpoints and deduplicates API and export messages wit
   assert.equal(completed.source.checkpointMessageId, 110);
   assert.equal(completed.source.syncCursorMessageId, 0);
   assert.equal(completed.source.syncTargetMessageId, 0);
+  const removed = database.removeTelegramGroupSource(sourceKey);
+  assert.equal(removed.removed, true);
+  assert.equal(database.getTelegramGroupSources('42').length, 0);
+  assert.equal(database.getTelegramSource(sourceKey).status, 'removed');
+  assert.match(database.getTelegramSource(sourceKey).lastError, /历史仍保留/);
   database.setTelegramGroupSources({ accountKey: '42', groups: [] });
   assert.equal(database.getTelegramGroupSources('42').length, 0);
   selected = database.setTelegramGroupSources({
@@ -135,13 +140,22 @@ test('persists Telegram checkpoints and deduplicates API and export messages wit
   assert.equal(selected[0].baselineMessageId, 99);
   assert.equal(selected[0].checkpointMessageId, 110);
   assert.equal(selected[0].sourceLabel, '番号收集群（改名）');
-  assert.throws(() => database.setTelegramGroupSources({
-    accountKey: '42',
-    groups: Array.from({ length: 6 }, (_value, index) => ({
+  const maxSources = database.setTelegramGroupSources({
+    accountKey: 'limit-account',
+    groups: Array.from({ length: 100 }, (_value, index) => ({
       chatKey: String(index + 1),
-      title: `群 ${index + 1}`,
+      title: `来源 ${index + 1}`,
+      chatType: index % 2 ? 'channel' : 'supergroup',
     })),
-  }), /最多只能选择 5 个/);
+  });
+  assert.equal(maxSources.length, 100);
+  assert.throws(() => database.setTelegramGroupSources({
+    accountKey: 'limit-account',
+    groups: Array.from({ length: 101 }, (_value, index) => ({
+      chatKey: String(index + 1),
+      title: `来源 ${index + 1}`,
+    })),
+  }), /最多只能选择 100 个/);
 
   const botGroups = database.setTelegramGroupSources({
     accountKey: 'bot:123456789',

@@ -16,7 +16,7 @@ const manifest = Object.freeze({
     timeRange: true,
     network: false,
     accountAction: false,
-    persistentResults: false,
+    persistentResults: true,
   }),
 });
 

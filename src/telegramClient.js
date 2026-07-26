@@ -1,7 +1,101 @@
 const { TelegramClient } = require('teleproto');
 const { StringSession } = require('teleproto/sessions');
+const { PromisedNetSockets, PromisedWebSockets } = require('teleproto/extensions');
+const net = require('node:net');
 const QRCode = require('qrcode');
 const { telegramApiMessagesToEnvelopes } = require('./telegramSource');
+
+const LOCAL_SOCKS_PORTS = Object.freeze([7890, 7891, 1080, 10808]);
+const TELEGRAM_NETWORK_MODES = new Set(['auto', 'socks5', 'websocket', 'direct']);
+
+function normalizeTelegramNetworkConfig(value = {}) {
+  const mode = TELEGRAM_NETWORK_MODES.has(String(value.mode || '').trim())
+    ? String(value.mode).trim()
+    : 'auto';
+  const host = String(value.host || '127.0.0.1').trim();
+  const port = Math.trunc(Number(value.port || 7890));
+  if (!host || host.length > 253 || !/^[A-Za-z0-9_.:-]+$/.test(host)) {
+    throw new Error('代理主机格式无效；Clash 本机代理通常填写 127.0.0.1');
+  }
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error('代理端口必须是 1–65535 的整数');
+  }
+  return { mode, host, port };
+}
+
+function localPortIsOpen(host, port, timeoutMs = 180) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ host: String(host), port: Number(port) });
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(Boolean(value));
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function socksTransportCandidate(host, port) {
+  return {
+    id: `socks5-${host}-${port}`,
+    label: `SOCKS5 ${host}:${port}`,
+    clientOptions: {
+      networkSocket: PromisedNetSockets,
+      proxy: { socksType: 5, ip: host, port },
+    },
+  };
+}
+
+async function defaultTelegramTransportCandidates(value = {}) {
+  const config = normalizeTelegramNetworkConfig(value);
+  if (config.mode === 'socks5') return [socksTransportCandidate(config.host, config.port)];
+  if (config.mode === 'websocket') return [{
+    id: 'websocket',
+    label: 'Telegram WebSocket',
+    clientOptions: { networkSocket: PromisedWebSockets },
+  }];
+  if (config.mode === 'direct') return [{
+    id: 'tcp',
+    label: 'Telegram 直连',
+    clientOptions: { networkSocket: PromisedNetSockets },
+  }];
+
+  const endpoints = [
+    { host: config.host, port: config.port },
+    ...LOCAL_SOCKS_PORTS.map(port => ({ host: '127.0.0.1', port })),
+  ].filter((endpoint, index, all) => all.findIndex(candidate => (
+    candidate.host === endpoint.host && candidate.port === endpoint.port
+  )) === index);
+  const openEndpoints = (await Promise.all(endpoints.map(async endpoint => (
+    (await localPortIsOpen(endpoint.host, endpoint.port)) ? endpoint : null
+  )))).filter(Boolean);
+  return [
+    ...openEndpoints.map(endpoint => socksTransportCandidate(endpoint.host, endpoint.port)),
+    {
+      id: 'websocket',
+      label: 'Telegram WebSocket',
+      clientOptions: {
+        networkSocket: PromisedWebSockets,
+      },
+    },
+    {
+      id: 'tcp',
+      label: 'Telegram 直连',
+      clientOptions: { networkSocket: PromisedNetSockets },
+    },
+  ];
+}
+
+function authorizationCancelledError() {
+  const error = new Error('Telegram 授权已取消');
+  error.name = 'AbortError';
+  return error;
+}
 
 function cleanTelegramError(error) {
   const message = String(error?.errorMessage || error?.message || error || 'Telegram 操作失败')
@@ -55,6 +149,8 @@ class TelegramUserService {
     this.clearSecret = options.clearSecret || (() => {});
     this.emitState = options.emitState || (() => {});
     this.log = options.log || (() => {});
+    this.getTransportCandidates = options.getTransportCandidates || defaultTelegramTransportCandidates;
+    this.readNetworkConfig = options.readNetworkConfig || (() => normalizeTelegramNetworkConfig());
     this.renderQrCode = options.renderQrCode || (value => QRCode.toDataURL(value, {
       errorCorrectionLevel: 'M',
       margin: 2,
@@ -63,7 +159,7 @@ class TelegramUserService {
     }));
     this.client = null;
     this.secret = null;
-    this.state = { status: 'disconnected', configured: false, accountKey: '', accountLabel: '', error: '' };
+    this.state = { status: 'disconnected', configured: false, accountKey: '', accountLabel: '', error: '', transport: '' };
     this.authWaiter = null;
     this.authPromise = null;
     this.authAbortController = null;
@@ -80,6 +176,7 @@ class TelegramUserService {
       accountKey: String(this.state.accountKey || ''),
       accountLabel: String(this.state.accountLabel || ''),
       error: String(this.state.error || ''),
+      transport: String(this.state.transport || ''),
       waitSeconds: Number(this.state.waitSeconds || 0),
       hint: String(this.state.hint || ''),
       siteKey: String(this.state.siteKey || ''),
@@ -108,14 +205,87 @@ class TelegramUserService {
     });
   }
 
-  makeClient(secret) {
+  makeClient(secret, transport = {}) {
     return this.createClient(secret.session || '', Number(secret.apiId), String(secret.apiHash), {
-      connectionRetries: 5,
+      connectionRetries: 1,
       requestRetries: 3,
       autoReconnect: true,
       floodSleepThreshold: 60,
-      useWSS: false,
+      timeout: 10,
+      ...(transport.clientOptions || {}),
     });
+  }
+
+  networkConfig() {
+    return normalizeTelegramNetworkConfig(this.readNetworkConfig());
+  }
+
+  async connectWithFallback(secret, options = {}) {
+    const candidates = await this.getTransportCandidates(this.networkConfig());
+    const attempted = [];
+    let lastError = null;
+    for (const candidate of candidates) {
+      if (options.signal?.aborted) throw authorizationCancelledError();
+      const client = this.makeClient(secret, candidate);
+      this.client = client;
+      attempted.push(candidate.label);
+      this.publicState({
+        status: 'connecting',
+        error: '',
+        transport: candidate.label,
+        hint: `正在通过${candidate.label}连接`,
+      });
+      this.log('debug', 'telegram_transport_attempt', { transport: candidate.id });
+      try {
+        await client.connect();
+        if (options.signal?.aborted) throw authorizationCancelledError();
+        this.log('info', 'telegram_transport_connected', { transport: candidate.id });
+        return client;
+      } catch (error) {
+        try { await client.disconnect(); } catch {}
+        if (this.client === client) this.client = null;
+        if (isAuthorizationCancelled(error) || options.signal?.aborted) throw authorizationCancelledError();
+        lastError = error;
+        this.log('warn', 'telegram_transport_failed', {
+          transport: candidate.id,
+          ...cleanTelegramError(error),
+        });
+      }
+    }
+    const clean = cleanTelegramError(lastError);
+    const error = new Error(`无法连接 Telegram 网络（已尝试：${attempted.join('、') || '无可用通道'}）。请检查代理/VPN 配置后重试。最后错误：${clean.message}`);
+    error.code = 'TELEGRAM_NETWORK_UNREACHABLE';
+    throw error;
+  }
+
+  async testNetworkConfig(value = {}) {
+    const config = normalizeTelegramNetworkConfig(value);
+    const candidates = await this.getTransportCandidates(config);
+    const attempted = [];
+    let lastError = null;
+    for (const candidate of candidates) {
+      const client = this.makeClient({
+        apiId: 1,
+        apiHash: '00000000000000000000000000000000',
+        session: '',
+      }, candidate);
+      attempted.push(candidate.label);
+      try {
+        await client.connect();
+        try { await client.disconnect(); } catch {}
+        this.log('info', 'telegram_network_test_succeeded', { transport: candidate.id });
+        return { ok: true, config, transport: candidate.label, attempted };
+      } catch (error) {
+        lastError = error;
+        try { await client.disconnect(); } catch {}
+        this.log('warn', 'telegram_network_test_failed', {
+          transport: candidate.id,
+          ...cleanTelegramError(error),
+        });
+      }
+    }
+    const clean = cleanTelegramError(lastError);
+    throw new Error(`Telegram 代理测试失败：${clean.message}`);
   }
 
   async connectStored() {
@@ -124,8 +294,7 @@ class TelegramUserService {
     if (this.client && this.state.status === 'ready') return this.status();
     this.publicState({ status: 'connecting', configured: true, error: '' });
     try {
-      const client = this.makeClient(secret);
-      await client.connect();
+      const client = await this.connectWithFallback(secret);
       if (!(await client.checkAuthorization())) {
         try { await client.disconnect(); } catch {}
         this.client = null;
@@ -136,6 +305,7 @@ class TelegramUserService {
       this.groupPeers.clear();
       this.secret = {
         ...secret,
+        session: String(client.session?.save?.() || secret.session || ''),
         accountKey: String(user?.id || secret.accountKey || ''),
         accountLabel: accountLabel(user) || secret.accountLabel || '',
       };
@@ -146,6 +316,7 @@ class TelegramUserService {
         accountKey: this.secret.accountKey,
         accountLabel: this.secret.accountLabel,
         error: '',
+        hint: '',
       });
     } catch (error) {
       const clean = cleanTelegramError(error);
@@ -200,9 +371,9 @@ class TelegramUserService {
     }
     this.groupPeers.clear();
     const pendingSecret = { apiId, apiHash, session: '', accountKey: '', accountLabel: '' };
-    const client = this.makeClient(pendingSecret);
-    this.client = client;
-    this.authAbortController = null;
+    const controller = new AbortController();
+    let client = null;
+    this.authAbortController = controller;
     this.publicState({
       status: 'connecting',
       configured: false,
@@ -214,6 +385,7 @@ class TelegramUserService {
     });
     this.authPromise = (async () => {
       try {
+        client = await this.connectWithFallback(pendingSecret, { signal: controller.signal });
         await client.start({
           phoneNumber,
           phoneCode: async isCodeViaApp => this.requestAuthValue('code', { hint: isCodeViaApp ? '验证码已发送到 Telegram 应用' : '请输入 Telegram 验证码' }),
@@ -259,13 +431,13 @@ class TelegramUserService {
       } catch (error) {
         if (isAuthorizationCancelled(error)) {
           this.log('info', 'telegram_auth_cancelled', { method: 'phone' });
-          try { await client.disconnect(); } catch {}
+          try { await client?.disconnect(); } catch {}
           this.client = null;
           return this.publicState({ status: 'disconnected', configured: Boolean(this.loadSecret()), error: '', waitSeconds: 0 });
         }
         const clean = cleanTelegramError(error);
         this.log('error', 'telegram_auth_failed', clean);
-        try { await client.disconnect(); } catch {}
+        try { await client?.disconnect(); } catch {}
         this.client = null;
         return this.publicState({ status: 'error', configured: false, error: clean.message, waitSeconds: clean.seconds });
       } finally {
@@ -292,9 +464,8 @@ class TelegramUserService {
     }
     this.groupPeers.clear();
     const pendingSecret = { apiId, apiHash, session: '', accountKey: '', accountLabel: '' };
-    const client = this.makeClient(pendingSecret);
     const controller = new AbortController();
-    this.client = client;
+    let client = null;
     this.authAbortController = controller;
     this.publicState({
       status: 'connecting',
@@ -308,7 +479,7 @@ class TelegramUserService {
     });
     this.authPromise = (async () => {
       try {
-        await client.connect();
+        client = await this.connectWithFallback(pendingSecret, { signal: controller.signal });
         const user = await client.signInUserWithQrCode({ apiId, apiHash }, {
           qrCode: async ({ token, expires }) => {
             if (controller.signal.aborted) {
@@ -370,7 +541,7 @@ class TelegramUserService {
       } catch (error) {
         if (isAuthorizationCancelled(error)) {
           this.log('info', 'telegram_auth_cancelled', { method: 'qr' });
-          try { await client.disconnect(); } catch {}
+          try { await client?.disconnect(); } catch {}
           this.client = null;
           return this.publicState({
             status: 'disconnected',
@@ -384,7 +555,7 @@ class TelegramUserService {
         }
         const clean = cleanTelegramError(error);
         this.log('error', 'telegram_qr_auth_failed', clean);
-        try { await client.disconnect(); } catch {}
+        try { await client?.disconnect(); } catch {}
         this.client = null;
         return this.publicState({
           status: 'error',
@@ -468,7 +639,9 @@ class TelegramUserService {
     const limit = Math.max(1, Math.min(1000, Number(options.limit) || 500));
     this.publicState({ status: 'listing_groups', error: '' });
     try {
-      const dialogs = await client.getDialogs({ limit, ignoreMigrated: true });
+      // teleproto 1.228.4 has an inverted ignoreMigrated condition that drops
+      // every normal dialog. Fetch all dialogs and filter private users here.
+      const dialogs = await client.getDialogs({ limit, ignoreMigrated: false });
       const groups = [];
       this.groupPeers.clear();
       for (const dialog of dialogs || []) {
@@ -476,6 +649,7 @@ class TelegramUserService {
         const chatKey = String(dialog.id?.toString?.() || dialog.id || '').trim();
         if (!chatKey) continue;
         const entity = dialog.entity || {};
+        if (entity.migratedTo) continue;
         const chatType = entity.megagroup
           ? 'supergroup'
           : dialog.isGroup && !dialog.isChannel
@@ -506,6 +680,10 @@ class TelegramUserService {
       this.log('info', 'telegram_group_dialogs_listed', {
         accountKey: this.secret?.accountKey || '',
         count: groups.length,
+        dialogCount: Number(dialogs?.length || 0),
+        groupCount: groups.filter(group => group.chatType !== 'channel').length,
+        channelCount: groups.filter(group => group.chatType === 'channel').length,
+        archivedCount: groups.filter(group => group.archived).length,
       });
       this.publicState({ status: 'ready', error: '' });
       return {
@@ -526,7 +704,7 @@ class TelegramUserService {
     if (!key) throw new Error('缺少 Telegram 群组标识');
     if (!this.groupPeers.has(key)) await this.listGroupDialogs();
     const group = this.groupPeers.get(key);
-    if (!group) throw new Error('所选 Telegram 群组不可用；请刷新群组列表并重新选择');
+    if (!group) throw new Error('所选 Telegram 群组/频道不可用；请刷新来源列表并重新选择');
     return group;
   }
 
@@ -538,6 +716,21 @@ class TelegramUserService {
       sourceLabel: group.title,
       chatType: group.chatType,
     }, options);
+  }
+
+  async markGroupRead(options = {}) {
+    await this.ensureConnected();
+    const group = await this.resolveGroup(options.chatKey);
+    const maxId = Math.max(0, Number(options.maxId) || 0);
+    if (!maxId) return { marked: false, chatKey: String(options.chatKey || ''), maxId: 0 };
+    await this.client.markAsRead(group.inputEntity, undefined, { maxId });
+    this.log('info', 'telegram_group_marked_read', {
+      accountKey: this.secret?.accountKey || '',
+      chatKey: String(options.chatKey || ''),
+      sourceLabel: group.title,
+      maxId,
+    });
+    return { marked: true, chatKey: String(options.chatKey || ''), maxId };
   }
 
   async syncPeerMessages(peer, metadata = {}, options = {}) {
@@ -615,6 +808,7 @@ class TelegramUserService {
         syncTargetMessageId: checkpointComplete ? 0 : targetMessageId,
         hasMore,
         stopped,
+        maxFetchedMessageId,
         accountKey: this.secret?.accountKey || '',
         accountLabel: this.secret?.accountLabel || '',
         chatKey: metadata.chatKey || '',
@@ -636,4 +830,10 @@ class TelegramUserService {
   }
 }
 
-module.exports = { TelegramUserService, cleanTelegramError, accountLabel };
+module.exports = {
+  TelegramUserService,
+  cleanTelegramError,
+  accountLabel,
+  normalizeTelegramNetworkConfig,
+  defaultTelegramTransportCandidates,
+};
