@@ -2,6 +2,8 @@
 node_modules/
 dist/
 release/
+target/
+apps/desktop-v05/src-tauri/gen/
 
 # Local application data and backups
 data/

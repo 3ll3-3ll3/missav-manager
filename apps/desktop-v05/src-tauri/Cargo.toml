@@ -1,0 +1,26 @@
+[package]
+name = "tg-content-toolbox-v05"
+version = "0.5.0-alpha.1"
+description = "TG Content Toolbox v0.5 redesign prototype"
+authors = ["WJL"]
+edition = "2021"
+
+[lib]
+name = "tg_content_toolbox_v05_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio = { version = "1", features = ["rt", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

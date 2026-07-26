@@ -6,6 +6,15 @@
 
 项目目录：`E:\Desktop\codex项目\missav-manager`
 
+## v0.5 重构分支说明
+
+`codex/v0.5-redesign` 分支已经建立独立的 `apps/desktop-v05` Tauri/Vue 原型。当前完成阶段 0：工具首页、10 万行统一数据表、可恢复后台任务和旧库只读迁移报告。新应用使用 `com.wjl.tg-content-toolbox.next` 及独立 `prototype-v05.sqlite`，不得把它误当作 v0.4.5 发布版，也不得在阶段 0 接入正式库。继续开发前阅读：
+
+- `docs/v0.5/PRODUCT_DESIGN.md`
+- `docs/v0.5/PHASE0.md`
+
+根目录 Electron v0.4.5 仍是当前可日常使用和对外发布的稳定版；v0.5 每个阶段必须独立验收后才能继续迁移工具。
+
 本地版本只看当前源码、正式 SQLite 和 `dist` 中实际构建的 EXE，不以 Git 提交、标签或远端 Release 判断。`0.4.5` 完整修复 Telegram HTML 负数消息 ID、跨消息拼接及 Whos.tv/Daily/LEAK/年龄/时间噪声，并让数据中心 HTML/JSON 导入复用结构化消息解析；继续保留 0.4.4 的 Raindrop 全账号番号预检、统一 CRUD、大表格、Telegram 来源清理、五工具历史和 100 来源上限，不包含此前被丢弃的 Codex 接管、任务包或女优关注实验。
 
 ## 1. 产品范围

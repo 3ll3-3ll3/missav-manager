@@ -6,6 +6,8 @@ TG 内容工具箱是一个本地桌面 App。它统一接收最多 100 个 Tele
 
 开发与 agent 接手请先阅读：[项目交接说明](docs/PROJECT_HANDOFF.md) 和 [2026-07-12 修改日志](docs/CHANGELOG_2026-07-12.md)。
 
+> v0.5 正在 `codex/v0.5-redesign` 分支以独立 Tauri/Vue 应用重构。它当前只是阶段 0 技术原型，不替代可日常使用的 v0.4.5，也不会读取正式数据库。设计边界与运行方式见 [v0.5 产品设计](docs/v0.5/PRODUCT_DESIGN.md) 和 [阶段 0 验证记录](docs/v0.5/PHASE0.md)。
+
 ## 目录
 
 - [给 Windows 用户](#给-windows-用户)
@@ -62,6 +64,17 @@ npm run build:portable
 ```bash
 npm run dev
 ```
+
+v0.5 独立原型：
+
+```bash
+npm install --prefix apps/desktop-v05
+npm run v05:check
+npm run v05:test
+npm run v05:dev
+```
+
+v0.5 使用独立应用标识 `com.wjl.tg-content-toolbox.next` 和独立原型数据库，不会打开 v0.4.5 正式库。
 
 ## 核心功能
 

@@ -21,7 +21,11 @@
     "test:network-transport": "electron scripts/network-timeout-smoke.cjs",
     "test": "node --test",
     "build": "electron-builder --win --publish never",
-    "build:portable": "node scripts/build-portable.cjs"
+    "build:portable": "node scripts/build-portable.cjs",
+    "v05:dev": "npm --prefix apps/desktop-v05 run tauri dev",
+    "v05:check": "npm --prefix apps/desktop-v05 run check",
+    "v05:test": "npm --prefix apps/desktop-v05 run test:rust",
+    "v05:build": "npm --prefix apps/desktop-v05 run tauri build"
   },
   "build": {
     "appId": "com.wjl.missav-manager",
