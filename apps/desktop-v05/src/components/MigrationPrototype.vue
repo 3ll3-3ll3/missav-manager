@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { open } from "@tauri-apps/plugin-dialog";
 import { ref } from "vue";
-import { analyzeLegacyDatabase } from "../api";
-import type { MigrationReport } from "../types";
+import { analyzeLegacyDatabase, migrateLegacyDatabase } from "../api";
+import type { LegacyMigrationResult, MigrationReport } from "../types";
 
 const selectedPath = ref("");
 const report = ref<MigrationReport | null>(null);
 const busy = ref(false);
 const error = ref("");
+const migration = ref<LegacyMigrationResult | null>(null);
+const replace = ref(false);
 
 async function chooseDatabase() {
   const selected = await open({
@@ -24,6 +26,15 @@ async function chooseDatabase() {
     report.value = null;
     error.value = "";
   }
+}
+
+async function migrate() {
+  if (!selectedPath.value || !report.value || report.value.integrityCheck.toLowerCase() !== "ok") return;
+  if (!confirm("正式迁移会先备份 v0.5 数据库，再完整归档旧库所有业务表并映射核心数据。旧库始终只读。继续吗？")) return;
+  busy.value = true; error.value = "";
+  try { migration.value = await migrateLegacyDatabase(selectedPath.value, replace.value); }
+  catch (reason) { error.value = String(reason); }
+  finally { busy.value = false; }
 }
 
 async function analyze() {
@@ -44,14 +55,14 @@ async function analyze() {
 <template>
   <section class="page-intro compact">
     <div>
-      <span class="section-kicker">零写入迁移原型</span>
-      <h2>先看懂旧库，再决定迁移什么</h2>
-      <p>当前功能只以 SQLite 只读模式打开副本，检查结构和规模；不会执行正式迁移。</p>
+      <span class="section-kicker">只读源 + 可恢复目标</span>
+      <h2>检查并正式迁移 v0.4.5</h2>
+      <p>旧库全程只读；正式迁移前自动备份 v0.5。所有旧表完整归档，同时把番号、标签、网站状态和 Telegram 来源映射到新数据中心。</p>
     </div>
   </section>
 
   <div class="notice warning">
-    请先复制一份 v0.4.5 数据库再选择。虽然程序强制只读，但副本能进一步隔离误操作风险。
+    可以直接选择 v0.4.5 数据库，程序用 SQLite 只读模式打开；仍建议先复制一份以便人工留档。
   </div>
 
   <section class="migration-picker panel">
@@ -105,6 +116,15 @@ async function analyze() {
       <ul class="warning-list">
         <li v-for="warning in report.warnings" :key="warning">{{ warning }}</li>
       </ul>
+    </section>
+    <section class="panel migration-action">
+      <h3>正式执行</h3>
+      <p class="muted">完整归档保证尚未映射的旧字段也不会丢失；可识别核心数据会立即出现在新数据中心。此操作不修改源数据库。</p>
+      <label class="check-label"><input v-model="replace" type="checkbox" /> 已迁移过时，重新归档并覆盖核心映射</label>
+      <button class="primary-button" :disabled="busy || report.integrityCheck.toLowerCase() !== 'ok'" @click="migrate">{{ busy ? "迁移中…" : "备份并正式迁移" }}</button>
+    </section>
+    <section v-if="migration" class="report-summary migration-result">
+      <div><strong>{{ migration.archivedTables }}</strong><span>完整归档表</span></div><div><strong>{{ migration.archivedRows.toLocaleString() }}</strong><span>完整归档行</span></div><div><strong>{{ migration.missavRecords }}</strong><span>MissAV 记录</span></div><div><strong>{{ migration.av123Records }}</strong><span>123AV 记录</span></div><div><strong>{{ migration.telegramSources }}</strong><span>Telegram 来源</span></div>
     </section>
   </template>
 </template>

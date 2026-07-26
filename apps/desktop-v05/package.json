@@ -1,10 +1,13 @@
 {
   "name": "tg-content-toolbox-v05",
   "private": true,
-  "version": "0.5.0-alpha.1",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
+    "legacy:bundle": "node scripts/build-legacy.mjs",
+    "predev": "npm run legacy:bundle",
     "dev": "vite",
+    "prebuild:web": "npm run legacy:bundle",
     "build:web": "vue-tsc --noEmit && vite build",
     "check": "vue-tsc --noEmit && cargo check --manifest-path src-tauri/Cargo.toml",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
@@ -13,13 +16,16 @@
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
+    "qrcode": "^1.5.4",
     "tabulator-tables": "^6.3.1",
     "vue": "^3.5.22"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.4",
+    "@types/qrcode": "^1.5.5",
     "@types/tabulator-tables": "^6.3.1",
     "@vitejs/plugin-vue": "^6.0.1",
+    "esbuild": "^0.27.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.9",
     "vue-tsc": "^3.1.1"

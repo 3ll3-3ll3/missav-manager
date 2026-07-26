@@ -1,39 +1,44 @@
 <script setup lang="ts">
-import type { PrototypeInfo, ViewName } from "../types";
+import type { AppInfo, ViewName } from "../types";
 
-defineProps<{ info: PrototypeInfo | null }>();
+defineProps<{ info: AppInfo | null }>();
 const emit = defineEmits<{ navigate: [view: ViewName] }>();
 
 const tools = [
   {
+    id: "haijiao",
     name: "海角链接",
-    state: "首个正式工具",
-    description: "从 Telegram 或文件提取可访问帖子链接，作为新架构的第一条完整流程。",
+    state: "可用",
+    description: "从 Telegram、粘贴内容或多个文件提取可访问帖子链接。",
     tone: "active",
   },
   {
+    id: "twitter",
     name: "推特博主",
-    state: "待迁移",
+    state: "可用",
     description: "提取 #标签中的博主名，分别输出名称和主页链接。",
-    tone: "planned",
+    tone: "active",
   },
   {
+    id: "badnews",
     name: "Bad.news",
-    state: "待迁移",
+    state: "可用",
     description: "提取帖子链接并过滤官网 App、广告和无关地址。",
-    tone: "planned",
+    tone: "active",
   },
   {
+    id: "missav",
     name: "MissAV",
-    state: "阶段 2",
-    description: "番号查询、标签清洗、永久库与 Raindrop 同步将拆成可暂停任务。",
-    tone: "planned",
+    state: "独立工作区",
+    description: "番号提取、永久历史、查询标签与 Raindrop 同步互不混杂。",
+    tone: "active",
   },
   {
+    id: "av123",
     name: "123AV",
-    state: "暂用 v0.4.5",
-    description: "查询和收藏逻辑暂不搬迁，待新任务底座稳定后单独重做。",
-    tone: "legacy",
+    state: "独立工作区",
+    description: "番号提取、查询和账号收藏独立于 MissAV，按网站单独限速。",
+    tone: "active",
   },
 ];
 </script>
@@ -47,7 +52,7 @@ const tools = [
     </div>
     <div class="hero-stat">
       <strong>{{ info?.recordCount.toLocaleString() ?? 0 }}</strong>
-      <span>原型数据行</span>
+      <span>永久业务记录</span>
     </div>
   </section>
 
@@ -65,34 +70,43 @@ const tools = [
           <span class="state-chip">{{ tool.state }}</span>
         </div>
         <p>{{ tool.description }}</p>
-        <button v-if="tool.tone === 'active'" disabled>阶段 1 接入完整流程</button>
-        <button v-else class="quiet-button" disabled>尚未开放</button>
+        <button @click="emit('navigate', `tool:${tool.id}` as ViewName)">打开工具</button>
       </article>
     </div>
   </section>
 
-  <section class="prototype-section">
+  <section class="management-section">
     <div class="section-heading">
       <div>
-        <span class="section-kicker">阶段 0 验证台</span>
-        <h2>先证明新底座不卡、不丢任务、不碰旧库</h2>
+        <span class="section-kicker">管理与维护</span>
+        <h2>数据、处理历史和旧库迁移各自独立</h2>
       </div>
     </div>
-    <div class="prototype-grid">
-      <button class="prototype-card" @click="emit('navigate', 'grid')">
-        <span class="prototype-index">01</span>
-        <strong>10 万行统一数据表</strong>
-        <small>虚拟滚动、全文搜索、分页、选择、编辑与 CSV 导出</small>
+    <div class="management-grid">
+      <button class="management-card" @click="emit('navigate', 'data')">
+        <span class="management-index">01</span>
+        <strong>10 万行统一数据中心</strong>
+        <small>真实业务数据的全文搜索、分页、选择、编辑与 CSV 导出</small>
       </button>
-      <button class="prototype-card" @click="emit('navigate', 'tasks')">
-        <span class="prototype-index">02</span>
-        <strong>可靠后台任务</strong>
-        <small>暂停、继续、取消、进度持久化与意外退出恢复</small>
+      <button class="management-card" @click="emit('navigate', 'sources')">
+        <span class="management-index">04</span>
+        <strong>Telegram 来源</strong>
+        <small>群组与频道可多选绑定多个工具，退出后的旧来源可删除</small>
       </button>
-      <button class="prototype-card" @click="emit('navigate', 'migration')">
-        <span class="prototype-index">03</span>
-        <strong>旧库只读迁移报告</strong>
-        <small>先检查完整性、表规模与映射，不自动写入任何数据库</small>
+      <button class="management-card" @click="emit('navigate', 'logs')">
+        <span class="management-index">05</span>
+        <strong>运行日志</strong>
+        <small>集中查看网络、同步和数据库问题，敏感凭据不会写入日志</small>
+      </button>
+      <button class="management-card" @click="emit('navigate', 'settings')">
+        <span class="management-index">06</span>
+        <strong>设置与备份</strong>
+        <small>独立管理代理、网站速度、数据库自动备份与恢复</small>
+      </button>
+      <button class="management-card" @click="emit('navigate', 'migration')">
+        <span class="management-index">02</span>
+        <strong>v0.4.5 数据迁移</strong>
+        <small>旧库始终只读；迁移前自动备份，完整归档后映射进新数据中心</small>
       </button>
     </div>
   </section>

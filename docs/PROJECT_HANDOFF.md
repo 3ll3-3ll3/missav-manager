@@ -1,257 +1,65 @@
-# TG 内容工具箱项目交接说明
+# TG 内容工具箱 v0.5 交接说明
 
 更新时间：2026-07-26
+主线分支：`codex/v0.5-redesign`
+项目根目录：`E:\Desktop\codex项目\missav-manager`
 
-当前本地主线：`0.4.5`
+## 当前正式结构
 
-项目目录：`E:\Desktop\codex项目\missav-manager`
+新应用全部位于 `apps/desktop-v05`：
 
-## v0.5 重构分支说明
+```text
+apps/desktop-v05/
+├─ src/                         Vue 工具页面
+│  ├─ components/               首页、五工具、Raindrop、来源、数据中心等
+│  ├─ processing.ts             输入文件和五类工具的规则编排
+│  └─ generated/legacyBundle.js 已测试 v0.4.5 规则的浏览器包
+├─ src-tauri/src/
+│  ├─ workspace.rs              正式 SQLite、CRUD、备份、迁移、日志
+│  ├─ network.rs                受限 HTTPS 请求、站点与 Raindrop 网关
+│  ├─ telegram_user.rs          Telegram 个人 API、DPAPI 凭据、群/频道增量
+│  ├─ chrome_bridge.rs          Chrome 扩展本机串行收藏桥
+│  └─ lib.rs                    Tauri 命令边界和启动迁移
+└─ scripts/build-legacy.mjs     将根目录已测试规则预构建为 ESM
+```
 
-`codex/v0.5-redesign` 分支已经建立独立的 `apps/desktop-v05` Tauri/Vue 原型。当前完成阶段 0：工具首页、10 万行统一数据表、可恢复后台任务和旧库只读迁移报告。新应用使用 `com.wjl.tg-content-toolbox.next` 及独立 `prototype-v05.sqlite`，不得把它误当作 v0.4.5 发布版，也不得在阶段 0 接入正式库。继续开发前阅读：
+根目录 Electron v0.4.5 仅作旧版本与规则来源保留。不要在 v0.5 工作中修改其正式数据库；v0.5 只通过“v0.4.5 数据迁移”页面只读导入。
 
-- `docs/v0.5/PRODUCT_DESIGN.md`
-- `docs/v0.5/PHASE0.md`
+## 数据位置与迁移
 
-根目录 Electron v0.4.5 仍是当前可日常使用和对外发布的稳定版；v0.5 每个阶段必须独立验收后才能继续迁移工具。
+v0.5 默认数据库为 `tg-content-toolbox-v05.sqlite`。启动时优先使用用户选择的位置；否则使用 v0.5 应用数据目录。早期 `prototype-v05.sqlite` 与早期 `.next` 应用目录会被安全迁移到正式文件名，不会触碰 `com.wjl.missav-manager` 的 v0.4.5 数据。
 
-本地版本只看当前源码、正式 SQLite 和 `dist` 中实际构建的 EXE，不以 Git 提交、标签或远端 Release 判断。`0.4.5` 完整修复 Telegram HTML 负数消息 ID、跨消息拼接及 Whos.tv/Daily/LEAK/年龄/时间噪声，并让数据中心 HTML/JSON 导入复用结构化消息解析；继续保留 0.4.4 的 Raindrop 全账号番号预检、统一 CRUD、大表格、Telegram 来源清理、五工具历史和 100 来源上限，不包含此前被丢弃的 Codex 接管、任务包或女优关注实验。
+`workspace.rs` 是唯一的业务表写入口。写入前必须维持：父记录校验、唯一键校验、JSON/数值校验、自动备份、事务与日志脱敏。任何测试应设置 `TG_TOOLBOX_V05_DATA_DIR` 到临时目录。
 
-## 1. 产品范围
+## Telegram 安全与网络
 
-应用负责：
+个人 API 由 Rust `grammers` 驱动；API 凭据用 Windows DPAPI 加密，Telegram 会话独立存放在 v0.5 数据目录。日志不得写 API hash、手机号、验证码、密码、二维码 URL、Bot Token 或 Raindrop Token。
 
-- 以推特博主、Bad.news、海角帖子、MissAV、123AV 五个入口组织功能，各自保存可多选的群组/频道绑定、输入和输出；
-- 从推特相关消息输出博主名与 x.com 主页；从 Bad.news 和海角消息只输出各自规则允许的规范帖子链接；
-- 从普通文本、TXT、MD、CSV、Telegram 官方 JSON/HTML、Telegram Bot API 或个人账号 API 中提取并规范番号；
-- 番号首次完成过滤时立即登记永久 SQLite 主表；批次只记录来源与运行历史；
-- 由用户分别启动 MissAV 与 123AV 两条独立查询支线；
-- MissAV 命中后抓取、清洗女优与类型标签，并供 Raindrop 同步或文件导出；
-- Raindrop 以用户选择的 Collection 决定 Pull 来源和 Push 目标；预览前扫描全账号作番号去重，双方已有时不写入；
-- 123AV 命中后生成待收藏任务，可由 Chrome 扩展、APP 内执行器处理，或仅导出 TXT/CSV 清单；
-- 管理批次、异常重跑、表格式筛选、多选、复制、导出、日志、体检和备份恢复。
-- 在每个工具的“处理历史”中回看、恢复/载入、搜索、重命名、导出和删除过去结果。
+个人 API 使用 SOCKS5。设置页的 Clash `http://127.0.0.1:7890`/Mixed Port 会自动转换为 `socks5://127.0.0.1:7890`。群组/超级群/频道通过 API 真实枚举；每个来源用消息 ID 检查点增量读取。Bot 仅用于 Bot API 更新，不得假装能读取完整历史。
 
-不在当前范围：本地 Favorite/Collection 管理、女优关注、Codex 接管、任务包和自动对外执行方式对比。
+## 123AV 约束
 
-## 2. 当前页面与运行顺序
+同一个 123AV 账号操作永远只有一路。Chrome 扩展由 `chrome_bridge.rs` 提供随机本机配对码，扩展仅允许访问 `127.0.0.1` 并 Bearer 鉴权。不得新增读取 Cookie、密码、Local Storage、Session Storage 或完整页面 HTML 的逻辑。
 
-侧边栏只保留全局导航，工具和阶段在工作区内分级：
+APP 内窗口仅为人工串行助手；自动收藏交给 Chrome 扩展。所有不确定、网络或验证状态应持久化为待核验/网络错误，不能默认成功或无条件重试。
 
-1. `工具首页`：按文本工具、影片工具分类展示五个入口；侧栏不逐项堆工具。
-2. `任务中心`：显示 MissAV、123AV 查询、123AV 收藏、Raindrop、Telegram 的运行状态。
-3. 工具工作区：推特/Bad.news/海角各一个独立页面；MissAV/123AV 进入后再显示输入、执行、结果及可用同步阶段；右侧公共入口打开当前工具的处理历史。
-4. `Telegram 来源`：Bot、个人账号 API、官方群组导出；最多选择 100 个指定群组或频道，均为手动同步。
-5. `数据中心`：永久记录、标签、批次、维护、备份和高级表格编辑。
-6. `日志、备份与外观`：公共配置与数据库位置。
+## Raindrop 约束
 
-为兼容历史和逐批证据，数据库仍为每个批次明细保存四个固定任务槽，但永久 `codes` 记录保存双站与 Raindrop 的当前主状态，`tool_kind` 决定批次有效支线：
+同步前必须预览。Collection 由用户多选，Pull/Push/双向均以规范化番号和可信 MissAV 链接为身份。全账号已经同时存在的番号一律不写入，忽略 Collection 位置；Pull 必须保留远端全部 Tags。令牌仅当前会话使用。
 
-- `missavLookup`
-- `raindropSync`
-- `av123Lookup`
-- `av123Favorite`
-
-- MissAV 新批次：`missavLookup` / `raindropSync` 有效，两个 123AV 槽直接 `skipped`；
-- 123AV 新批次：`av123Lookup` / `av123Favorite` 有效，两个 MissAV 槽直接 `skipped`；
-- 旧 `dual` 批次继续兼容四任务双支线。
-
-## 3. 123AV 收藏方式与站点级队列
-
-`0.1.30` 保留三种明确方式：
-
-- `Chrome 扩展`：本地 Chrome Manifest V3 扩展复用用户现有登录状态；
-- `APP 内执行器`：使用 `persist:missav-manager-123av-account` 独立会话与隐藏工作页；
-- `仅导出`：生成 TXT/CSV，不访问账号、不点击收藏。
-
-共同约束：
-
-- APP 启动只绑定 `127.0.0.1` 本机端口；
-- 使用 256 位随机密钥和 Bearer 认证，密钥经 Windows `safeStorage` 加密；
-- 首次由用户在 `chrome://extensions` 手动“加载已解压的扩展程序”并粘贴配对码；
-- 扩展只读取可见账号数字、番号、标题和“保存/已保存”状态；
-- 禁止读取或输出密码、Cookie、Local Storage、Session Storage、完整 HTML；
-- “已保存”直接成功；只有明确看到“保存”才点击，点击后必须再次看到“已保存”；
-- Chrome 与 APP 远端收藏均固定 1 路；渲染层和主进程各自兜底，主进程只有一条 123AV 收藏 Promise 队列；
-- APP 模式遇到 Error 1015、网络异常或状态不明时整条 123AV 收藏队列休息 10 秒后继续，并在主轮后最多重跑一次；
-- 123AV 查询和收藏不重叠；自动收藏只在查询完全结束后启动；
-- MissAV 与未来其他网站使用自己的队列，不被 123AV 收藏暂停；
-- 登录失效或 CAPTCHA 暂停收藏；
-- 重启时遗留的 `running` 收藏必须恢复为 `verify_required`，不能盲目重复点击。
-
-实现文件：
-
-- `src/chromeFavoriteBridge.js`
-- `chrome-extension/manifest.json`
-- `chrome-extension/service-worker.js`
-- `chrome-extension/content-script.js`
-- `chrome-extension/popup.html`
-- `chrome-extension/popup.js`
-
-## 4. 数据与安全边界
-
-数据库默认位于 Electron `userData/data`，也可由用户迁入项目文件夹中的专用空目录。迁移必须先创建备份、执行 WAL 完整检查点、复制并校验新数据库、保留原文件，然后写入独立位置配置并重启。任何自动测试必须使用临时数据库，禁止接触正式库。
-
-`0.3.0` 使用 Electron/Node 内置 `node:sqlite`，数据库只在主进程核心服务中打开，启用 WAL、外键、忙等待和 FULL 同步。渲染器通过白名单 IPC 调用，不再加载数据库、文件系统或业务 Node 模块。旧 sql.js 文件是标准 SQLite，可首次原生打开；迁移前会自动在 `backups` 生成一次快照和迁移标记。
-
-番号管理使用数据库端搜索、筛选、排序、ID 选择和每页最多 500 条的分页，不再把 5 万条记录一次塞进渲染器。高级表格覆盖核心数据、关系数据、任务历史、缓存/同步和 Telegram 公开表；支持新增、查询、逐格编辑、文件式多选、批量修改、单条/批量删除、复制和 CSV 导出，写入前自动备份并校验父子关系、唯一键和 JSON。隔离压测已覆盖 100,200 条番号。
-
-长期主数据：
-
-- `codes`：永久番号、输入真实链接、MissAV/123AV 当前状态与错误、Raindrop 目标与同步状态；首次见到即以 `pending` 登记；
-- `actresses`、`genres` 及关联表：长期标签数据；
-- `processing_runs`、`processing_run_items`、`processing_tasks`：批次、明细和四任务状态；
-- `tool_history_runs`、`tool_history_items`：推特、Bad.news、海角由用户明确保存的规范结果快照；
-- `av123_lookup_cache`：123AV 只读查询缓存；
-- `remote_sync_records`：Raindrop 等远端服务的 ID、Collection、内容哈希与上次成功快照；
-- Telegram 来源、消息指纹、群组绑定与检查点相关表。
-
-`bookmarks` 与 `bookmark_collections` 只用于旧版兼容，不在当前 UI 公开，不得从 `codes` 自动重建，也不得升级时擅自删除。
-
-`0.1.32` 增加用户主动触发的“全库归零”。它与升级迁移不同：只有用户输入确认文字后才执行，先创建完整备份，然后枚举并清空 SQLite 中全部用户业务表（包括未知旧版遗留表），重置自增序号、压缩并做完整性检查。备份目录、外观设置和 Windows 安全存储凭据不属于 SQLite 业务数据，不会被删除。
-
-批次删除只删除指定批次、明细和任务，必须先安全停止并自动备份；永久番号库、标签、导出文件和其他批次不能被连带删除。Raindrop 队列不得依赖批次存在。
-
-## 5. 查询与速度语义
-
-- MissAV 与 123AV 各自保存工作路、自动/固定 RPS、速率上限、学习值和网络错误策略。
-- 两站均支持 1、智能、4、6、8、12、16 路档位及 1～32 RPS 上限。
-- 123AV 不使用搜索页；访问标准详情地址及受控的已知详情后缀，必须从可见标题或代码字段精确核验番号。
-- MissAV 输入解析必须保留可信详情 URL，并把它放在规则生成候选之前；未找到与网络错误仍保留实际/候选 URL 供文本结果输出。
-- HTTP 429、连接重置、超时、验证页等归为 `network_error`，可单条、所选或整批重跑。
-- 收藏速度与查询速度完全独立；收藏固定单路，查询仍按用户选择的高并发与 RPS 工作。
-
-## 6. Telegram 与 Raindrop
-
-- 历史底库优先使用每个自建群的 Telegram Desktop 官方 JSON/HTML 导出。
-- 今后增量优先使用 Bot API；无需 `api_id/api_hash`。个人账号 API 保留为高级补读入口。
-- 两种 API 都只允许选择最多 100 个指定群组或频道；同步必须由用户手动发起。
-- 个人 API 可选在当前来源完整同步并成功落库后调用标记已读，默认关闭；分页未完成或用户停止时不得标记。Bot 不支持该副作用。
-- Bot 只有一个全局更新队列；工具通过持久化的群 `sourceKey` 分别接收。一个群可同时绑定多个工具，消息不会被某个工具“消费掉”。
-- 推特、Bad.news 与海角的当前结果只在会话中变化；用户点击“保存本次历史”后，规范化结果进入 `tool_history_*`，但原始 TG 正文不保存。MissAV 与 123AV 历史直接复用 `processing_runs`，不复制一套批次数据。Telegram 来源、消息指纹、每个工具的多来源绑定和断点继续持久化；旧版字符串形式的单来源绑定自动迁移为数组。
-- 工具来源绑定由可搜索的勾选面板完成，普通单击切换选择；不要求 Ctrl/Shift。一个工具可绑定多个来源，一个来源也可绑定多个工具。
-- 五个工具的时间范围精确到分钟；有时间的 Telegram 消息按范围过滤，无时间的手动粘贴文本继续参与。
-- Bot Token、个人会话、API 凭据和 Raindrop Token 使用 Windows 安全存储加密。
-- 本地只保存消息身份、来源、时间、指纹、提取番号和断点，不保存完整 Telegram 消息正文。
-- MissAV 查询使用批次创建时的 `known_actresses_json` 判断默认 Push 目标：影片任一女优命中快照进入 `missav1`，否则进入 `missav2`；判断结果写入永久 `codes.raindrop_target`。
-- Raindrop 不选择批次，使用永久库的待同步/异常/全部范围。用户另行搜索并勾选最多 100 个 Collection，可包含子目录；未选择范围只参与全账号番号查重，不得 Pull、导入或修改。
-- `Pull` 只读官网并把可信 MissAV 书签写入本地；`Push` 默认沿用逐条 `missav1`/`missav2` 目标，也可把当前范围统一切到一个默认 Collection；`双向同步` 比较本地哈希、远端哈希与 `remote_sync_records` 上次成功快照。
-- 单边修改自动选择方向；双方修改必须人工选择；无变化不得重复写入。远端删除不传播到本地，远端移出所选范围后只提示，不更新；远端 ID 与番号身份冲突必须拒绝覆盖。
-- 所有同步都必须先预览再手动确认。根目录缺失或旧 ID 404 时刷新并恢复；官网兼容 CSV 是独立的 Push 离线方式。
-
-## 7. 验证要求
-
-最低验证：
+## 验收命令
 
 ```powershell
+cd E:\Desktop\codex项目\missav-manager\apps\desktop-v05
 npm run check
+npm run test:rust
+npm run build:web
+npm run tauri -- build
+
+cd E:\Desktop\codex项目\missav-manager
 npm test
 ```
 
-当前单元测试基线为 133 项。涉及 UI 时运行隔离 Electron 冒烟：
+当前验收基线：根目录规则回归 139 项；v0.5 Rust 单测 9 项；`npm run check` 与 `npm run build:web` 均通过。最终文件为 `apps/desktop-v05/src-tauri/target/release/tg-content-toolbox-v05.exe`，大小 `19,280,384` 字节，SHA-256 为 `2CE74E6D77315C811D0789F886A2EE6C03D5F18D3BF22FAE90C8582181E259B2`。
 
-```powershell
-.\node_modules\.bin\electron.cmd .\scripts\ui-smoke.cjs
-```
-
-冒烟测试必须使用临时用户目录、临时 SQLite、模拟网络和模拟账号，不得连接正式数据库，不得执行真实收藏。
-
-打包后运行：
-
-```powershell
-node .\scripts\verify-package.cjs
-```
-
-并检查：
-
-- EXE 文件/产品版本均为 `0.4.5`；
-- ASAR 包含工具注册表、原生 SQLite、数据库位置迁移、工具首页、任务中心和完整嵌套视觉资源；
-- ASAR 包含 Chrome 桥、APP 内执行器、仅导出入口、单路队列、10 秒恢复和自动第二轮；
-- ASAR 不包含 Codex 接管、任务包或女优关注代码；
-- 使用独立 `MISSAV_USER_DATA_DIR` 首启，确认窗口、日志、加密桥接密钥和空数据库创建成功。
-
-## 8. 构建
-
-```powershell
-$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
-$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'
-npm run build:portable
-```
-
-目标产物：`dist\TG_Content_Toolbox_v0.4.5.exe`。
-
-构建前只关闭能够通过路径、启动时间或唯一测试用户目录确认属于本项目的测试进程；不得结束用户其他 Electron 或 Chrome 进程。构建完成后把实际大小、时间、版本和 SHA-256 写回本文件。
-
-## 9. 当前构建信息
-
-- 路径：`dist\TG_Content_Toolbox_v0.4.5.exe`
-- 文件大小：`400,093,453` 字节
-- 最后写入：`2026-07-26 12:19:25`
-- 文件版本 / 产品版本：`0.4.5` / `0.4.5`
-- SHA-256：`F147199C0DC1261D9B9DAA878A93E48444F8B547C22C50561A6D4C0B4CE8D340`
-
-打包后需确认永久库主数据、真实 MissAV URL、Telegram 结构化导入与过滤修复、Raindrop Pull Tags、全账号番号去重、Pull/Push/双向同步与官网 CSV、双站文本输出、Telegram 可选已读标记和 Raindrop 独立页面滚动均已入包，运行包不含 sql.js。构建使用本地 `node_modules/electron/dist`，无需再次下载 Electron Windows 资源。使用唯一临时 `MISSAV_USER_DATA_DIR` 对最终便携 EXE 执行无界面隔离首启；日志必须包含 `0.4.5`、`app_window_ready` 和 `app_package_smoke_ready`，数据库引擎为 `node:sqlite`、Schema 为 `302`，且没有残留应用进程。
-
-上一版：
-
-- 路径：`dist\TG_Content_Toolbox_v0.4.4.exe`
-- 文件大小：`400,091,095` 字节
-- 最后写入：`2026-07-25 14:26:10`
-- 文件版本 / 产品版本：`0.4.4` / `0.4.4`
-- SHA-256：`865580C574DFB0EB166C831E21EC6BC815D14BB6C10F9E8559EF7B00ED232D24`
-
-更早版本：
-
-- 路径：`dist\TG_Content_Toolbox_v0.4.2.exe`
-- 文件大小：`400,082,495` 字节
-- 最后写入：`2026-07-25 13:05:21`
-- 文件版本 / 产品版本：`0.4.2` / `0.4.2`
-- SHA-256：`38A879443B46101336104E58A258C1C298C7C85C5444AB5D53242914028A1FA5`
-
-更早版本：
-
-- 路径：`dist\TG_Content_Toolbox_v0.4.1.exe`
-- 文件大小：`400,082,189` 字节
-- 最后写入：`2026-07-25 12:48:38`
-- 文件版本 / 产品版本：`0.4.1` / `0.4.1`
-- SHA-256：`C2E43EC9A9CA62901AC46339325F17FAC59A9BBDF2943236526D1E430645F6FC`
-
-- 路径：`dist\TG_Content_Toolbox_v0.4.0.exe`
-- 文件大小：`400,025,815` 字节
-- 最后写入：`2026-07-25 11:41:59`
-- 文件版本 / 产品版本：`0.4.0` / `0.4.0`
-- SHA-256：`80982A2C05DF369FDAB0CB9336F272E549B74E38C07197056C71108B49B9B9CE`
-
-- 路径：`dist\TG_Content_Toolbox_v0.3.4.exe`
-- 文件大小：`399,810,238` 字节
-- 最后写入：`2026-07-24 19:17:43`
-- 文件版本 / 产品版本：`0.3.4` / `0.3.4`
-- SHA-256：`0339E9F24951CF1E92C7CEA6B3E9EE359CF69A413B0FA585072B8A3402D6A5E7`
-
-更早版：
-
-- 路径：`dist\TG_Content_Toolbox_v0.3.1.exe`
-- 文件大小：`399,784,202` 字节
-- 最后写入：`2026-07-24 17:29:55`
-- 文件版本 / 产品版本：`0.3.1` / `0.3.1`
-- SHA-256：`35B9D0FAD17D63B61BCBA2295092FA3704E5928AF6A4CDCAA6C486E68F766A34`
-
-早期版本：
-
-- 路径：`dist\TG_Content_Toolbox_v0.3.0.exe`
-- 文件大小：`399,780,545` 字节
-- 最后写入：`2026-07-24 12:52:11`
-- 文件版本 / 产品版本：`0.3.0` / `0.3.0`
-- SHA-256：`94841863BEA9AFB9AADFB6992F92E41EAF014283DB4DAFE169ED6F4EF9530702`
-
-早期版本：
-
-- 路径：`dist\MissAV_Manager_v0.2.0.exe`
-- 文件大小：`418,817,176` 字节
-- 最后写入：`2026-07-24 11:41:02`
-- 文件版本 / 产品版本：`0.2.0` / `0.2.0`
-- SHA-256：`0827BFD3D8685CEDC5D945411D95603CB72FF3EA395682B3B635FA45624F2675`
-
-数据库归零和高级编辑自动测试只使用临时 SQLite；只有用户明确要求的正式归零可以写正式数据库，并且必须在所有 MissAV Manager 进程退出后执行。正式归零前后都要只读盘点表行数与 `PRAGMA integrity_check`。
-
-`0.1.32` 正式启用前归零已执行：原库先备份到 `data\backups\missav_data_20260724_001050_正式启用前完整备份.db`，随后 17 张现存用户表全部归零，总行数从 58,764 变为 0，压缩后正式库为 253,952 字节，完整性仍为 `ok`。打包 EXE 另用唯一临时用户目录完成隔离首启，成功写入 `0.1.32` 日志并创建 15 张当前版本业务表、0 行、完整性为 `ok`；测试进程和临时目录均已清理。
+本开发机的隔离窗口启动会在 Tauri 创建 Windows WebView 窗口前受到系统策略的“拒绝访问”阻拦，无法作为用户机 GUI 冒烟验证。该限制与业务数据库无关；构建、类型检查和所有自动测试已通过。Chrome 扩展桥已经降级为可选功能：若本机禁止监听本地端口，APP 仍可启动，其余模式照常可用。
