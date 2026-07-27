@@ -109,11 +109,24 @@ pub async fn telegram_bot_request(input: TelegramBotRequest) -> Result<HttpRespo
     let client = build_client(&input.proxy, 55_000)?;
     let url = format!("https://api.telegram.org/bot{}/{}", input.token.trim(), input.method);
     let started = std::time::Instant::now();
-    let response = client.post(url).json(&input.body).send().await.map_err(|error| format!("Telegram Bot 请求失败：{error}"))?;
+    let response = client
+        .post(url)
+        .json(&input.body)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                "Telegram Bot 请求超时：请确认 Clash 正在运行，并检查代理地址和端口".to_string()
+            } else if error.is_connect() {
+                "Telegram Bot 无法连接：请检查 Clash、代理地址、DNS 或防火墙".to_string()
+            } else {
+                "Telegram Bot 网络传输失败：请检查代理和网络设置".to_string()
+            }
+        })?;
     let status_code = response.status().as_u16();
     let final_url = "https://api.telegram.org/bot[REDACTED]".to_string();
     let headers = response.headers().iter().filter_map(|(key, value)| value.to_str().ok().map(|value| (key.to_string(), value.to_string()))).collect();
-    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    let bytes = response.bytes().await.map_err(|_| "读取 Telegram Bot 响应失败".to_string())?;
     let response_bytes = bytes.len();
     let body = String::from_utf8_lossy(&bytes).into_owned();
     Ok(HttpResponse { status_code, body, final_url, headers, duration_ms: started.elapsed().as_millis(), response_bytes })

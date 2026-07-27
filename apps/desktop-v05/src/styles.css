@@ -44,7 +44,7 @@ h1, h2, h3, p { margin-top: 0; }
   border-radius: 999px; padding: 4px 9px; background: var(--green-soft); color: var(--green-dark); font-size: 12px;
 }
 .eyebrow, .section-kicker { color: var(--green); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.workspace { min-height: 0; overflow: auto; padding: 24px 30px 32px; }
+.workspace { min-width: 0; min-height: 0; overflow: auto; padding: 24px 30px 32px; }
 .footer-bar { display: flex; gap: 16px; justify-content: space-between; padding: 8px 28px; border-top: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 12px; }
 .path-text { max-width: 55vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -223,7 +223,11 @@ textarea:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px
 .danger-button { border-color: #d4a29d; background: var(--danger-bg); color: var(--danger); }
 .small { padding: 7px 11px; font-size: 12px; }
 
-.notice { margin: 0 0 14px; border: 1px solid var(--line); border-radius: 11px; padding: 11px 14px; line-height: 1.55; }
+.notice {
+  min-width: 0; max-width: 100%; margin: 0 0 14px; border: 1px solid var(--line);
+  border-radius: 11px; padding: 11px 14px; overflow-wrap: anywhere;
+  word-break: break-word; white-space: pre-wrap; line-height: 1.55;
+}
 .notice.info { background: #edf7ef; color: #376847; }
 .notice.warning { border-color: #dfc47c; background: var(--warning-bg); color: var(--warning); }
 .notice.danger { border-color: #dfa59e; background: var(--danger-bg); color: var(--danger); }

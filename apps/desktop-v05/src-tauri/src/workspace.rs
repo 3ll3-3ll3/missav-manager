@@ -835,12 +835,28 @@ pub struct LogEntry {
 }
 
 fn redact(value: &str) -> String {
-    let mut output = value.to_string();
+    let mut output = redact_telegram_bot_url(value);
     for marker in ["token", "api_hash", "password", "authorization", "bearer"] {
         if output.to_ascii_lowercase().contains(marker) {
             output = "[已隐藏敏感详情]".to_string();
             break;
         }
+    }
+    output
+}
+
+fn redact_telegram_bot_url(value: &str) -> String {
+    const PREFIX: &str = "https://api.telegram.org/bot";
+    let mut output = value.to_string();
+    let mut search_from = 0;
+    while let Some(relative_start) = output[search_from..].find(PREFIX) {
+        let secret_start = search_from + relative_start + PREFIX.len();
+        let secret_end = output[secret_start..]
+            .find('/')
+            .map(|offset| secret_start + offset)
+            .unwrap_or(output.len());
+        output.replace_range(secret_start..secret_end, "[REDACTED]");
+        search_from = secret_start + "[REDACTED]".len();
     }
     output
 }
@@ -895,8 +911,8 @@ pub fn list_logs(path: &Path, limit: u32, level: &str, search: &str) -> Result<V
                 id: row.get(0)?,
                 level: row.get(1)?,
                 category: row.get(2)?,
-                message: row.get(3)?,
-                details: parse_json(details),
+                message: redact(&row.get::<_, String>(3)?),
+                details: redact_json(&parse_json(details)),
                 created_at: row.get(5)?,
             })
         })
@@ -1225,6 +1241,29 @@ mod tests {
         let target = relocate_database(&path, &target_dir).unwrap();
         assert_eq!(get_setting(&target, "marker").unwrap(), Some(serde_json::json!(42)));
         assert!(relocate_database(&path, &target_dir).is_err());
+    }
+
+    #[test]
+    fn telegram_bot_tokens_are_redacted_in_new_and_existing_logs() {
+        let (_directory, path) = setup();
+        let leaked = "error sending request for url (https://api.telegram.org/bot123456789:SECRET_VALUE/getUpdates)";
+        append_log(&path, "ERROR", "telegram", leaked, &serde_json::json!({"error": leaked})).unwrap();
+
+        let connection = open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO app_logs(level,category,message,details_json,created_at) VALUES ('ERROR','legacy',?1,?2,?3)",
+                params![leaked, serde_json::json!({"error": leaked}).to_string(), now()],
+            )
+            .unwrap();
+
+        let logs = list_logs(&path, 10, "", "").unwrap();
+        assert_eq!(logs.len(), 2);
+        for log in logs {
+            let rendered = format!("{} {}", log.message, log.details);
+            assert!(!rendered.contains("123456789:SECRET_VALUE"));
+            assert!(rendered.contains("[REDACTED]"));
+        }
     }
 
     #[test]

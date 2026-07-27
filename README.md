@@ -69,7 +69,9 @@ apps\desktop-v05\src-tauri\target\release\tg-content-toolbox-v05.exe
 3. 将 Bot 加入目标群或频道，发送一条普通识别消息。
 4. 在工具箱发现来源、勾选、绑定工具，再手动同步。
 
-Bot 不能补回加入前的历史，且 Telegram 更新不是永久保留的；历史请用官方导出或个人 API。Bot Token 只保留在当前会话和受保护存储中，不写日志。
+如果 Token 曾出现在截图、日志或聊天中，请在 `@BotFather` 输入 `/mybots`，选择对应机器人，再进入 `API Token` 并点 `Revoke current token`；BotFather 会作废旧 Token 并给出新 Token。把新 Token 重新粘贴到工具箱即可，不要把它发给任何人。
+
+Bot 不能补回加入前的历史，且 Telegram 更新不是永久保留的；历史请用官方导出或个人 API。Bot Token 只存在于当前打开的软件内存中，关闭软件后需要重新填写，也不会写入日志。
 
 ## 三个文本工具
 

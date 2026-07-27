@@ -1,7 +1,7 @@
 {
   "name": "tg-content-toolbox-v05",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "scripts": {
     "legacy:bundle": "node scripts/build-legacy.mjs",

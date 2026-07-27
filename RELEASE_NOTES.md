@@ -1,4 +1,11 @@
-# TG 内容工具箱 v0.5.0（Windows）
+# TG 内容工具箱 v0.5.1（Windows）
+
+## v0.5.1 修复
+
+- Telegram Bot 网络错误不再显示或写入包含 Token 的完整请求网址。
+- 读取旧日志时也会即时遮蔽 Telegram Bot Token；已经暴露过的 Token 仍应在 BotFather 中撤销。
+- 超长错误信息会在提示框内自动换行，不再横向撑破页面。
+- Telegram 连接失败改为简短中文分类提示，便于检查 Clash、代理、DNS 和防火墙。
 
 ## 主要变化
 
@@ -14,9 +21,9 @@
 ## 发布文件
 
 - 文件：[tg-content-toolbox-v05.exe](apps/desktop-v05/src-tauri/target/release/tg-content-toolbox-v05.exe)
-- SHA-256：`2CE74E6D77315C811D0789F886A2EE6C03D5F18D3BF22FAE90C8582181E259B2`
-- 文件大小：`19,280,384` 字节（约 18.4 MiB）
-- 构建日期：2026-07-26
+- SHA-256：`AF3D4E85AA6E229C0E569635E0854947BFD9A46CAFF722C0092A95B91A896618`
+- 文件大小：`19,196,416` 字节（约 18.3 MiB）
+- 构建日期：2026-07-27
 
 ## 运行要求
 

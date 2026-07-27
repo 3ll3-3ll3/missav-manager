@@ -60,6 +60,6 @@ cd E:\Desktop\codex项目\missav-manager
 npm test
 ```
 
-当前验收基线：根目录规则回归 139 项；v0.5 Rust 单测 9 项；`npm run check` 与 `npm run build:web` 均通过。最终文件为 `apps/desktop-v05/src-tauri/target/release/tg-content-toolbox-v05.exe`，大小 `19,280,384` 字节，SHA-256 为 `2CE74E6D77315C811D0789F886A2EE6C03D5F18D3BF22FAE90C8582181E259B2`。
+当前验收基线：根目录规则回归 139 项；v0.5.1 Rust 单测 10 项；`npm run check` 与 `npm run build:web` 均通过。最终文件为 `apps/desktop-v05/src-tauri/target/release/tg-content-toolbox-v05.exe`，大小 `19,196,416` 字节，SHA-256 为 `AF3D4E85AA6E229C0E569635E0854947BFD9A46CAFF722C0092A95B91A896618`。
 
-本开发机的隔离窗口启动会在 Tauri 创建 Windows WebView 窗口前受到系统策略的“拒绝访问”阻拦，无法作为用户机 GUI 冒烟验证。该限制与业务数据库无关；构建、类型检查和所有自动测试已通过。Chrome 扩展桥已经降级为可选功能：若本机禁止监听本地端口，APP 仍可启动，其余模式照常可用。
+v0.5.1 已使用独立 `TG_TOOLBOX_V05_DATA_DIR` 完成隔离首启：新建 126,976 字节正式空库，启动日志依次包含 `setup:start`、`setup:database_ready` 和 `setup:ready`，全过程未访问正式数据库。Chrome 扩展桥已经降级为可选功能：若本机禁止监听本地端口，APP 仍可启动，其余模式照常可用。
