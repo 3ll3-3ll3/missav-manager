@@ -1,4 +1,13 @@
-use std::{ffi::c_void, path::{Path, PathBuf}, ptr, sync::Arc};
+use std::{
+    ffi::c_void,
+    path::{Path, PathBuf},
+    ptr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+        Mutex as StdMutex,
+    },
+};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
@@ -10,6 +19,7 @@ use grammers_client::{
 };
 use grammers_mtsender::{ConnectionParams, SenderPool};
 use grammers_session::{storages::SqliteSession, updates::UpdatesLike, Session};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::{mpsc::UnboundedReceiver, Mutex}, task::JoinHandle};
 
@@ -89,12 +99,16 @@ pub struct TelegramUserRuntime {
     session_path: PathBuf,
     credentials_path: PathBuf,
     inner: Mutex<Inner>,
+    auth_view: RwLock<AuthState>,
+    auth_task: StdMutex<Option<JoinHandle<()>>>,
+    auth_generation: AtomicU64,
 }
 
 impl TelegramUserRuntime {
     pub fn new(data_dir: &Path) -> Self {
         let credentials_path = data_dir.join("telegram-user-credentials-v05.bin");
         let credentials = read_credentials(&credentials_path).ok().flatten();
+        let configured = credentials.is_some();
         Self {
             session_path: data_dir.join("telegram-user-session-v05.sqlite"),
             credentials_path,
@@ -111,6 +125,18 @@ impl TelegramUserRuntime {
                 account_key: String::new(),
                 account_label: String::new(),
             }),
+            auth_view: RwLock::new(AuthState {
+                status: "disconnected".to_string(),
+                configured,
+                connected: false,
+                account_key: String::new(),
+                account_label: String::new(),
+                hint: String::new(),
+                qr_url: String::new(),
+                qr_expires_at: 0,
+            }),
+            auth_task: StdMutex::new(None),
+            auth_generation: AtomicU64::new(0),
         }
     }
 
@@ -127,20 +153,49 @@ impl TelegramUserRuntime {
         }
     }
 
-    pub async fn status(&self) -> AuthState {
-        let inner = self.inner.lock().await;
-        let status = if inner.client.is_some() && !inner.account_key.is_empty() {
-            "ready"
-        } else if !inner.qr_url.is_empty() {
-            "waiting_qr"
-        } else if inner.password_token.is_some() {
-            "waiting_password"
-        } else if inner.phone_token.is_some() {
-            "waiting_code"
-        } else {
-            "disconnected"
+    fn publish(&self, state: AuthState) -> AuthState {
+        *self.auth_view.write() = state.clone();
+        state
+    }
+
+    fn view_with(&self, status: &str, hint: &str) -> AuthState {
+        let current = self.auth_view.read();
+        AuthState {
+            status: status.to_string(),
+            configured: current.configured,
+            connected: status == "ready",
+            account_key: current.account_key.clone(),
+            account_label: current.account_label.clone(),
+            hint: hint.to_string(),
+            qr_url: if status == "waiting_qr" { current.qr_url.clone() } else { String::new() },
+            qr_expires_at: if status == "waiting_qr" { current.qr_expires_at } else { 0 },
+        }
+    }
+
+    fn publish_status(&self, status: &str, hint: &str) -> AuthState {
+        let state = self.view_with(status, hint);
+        self.publish(state)
+    }
+
+    fn publish_error(&self, error: impl std::fmt::Display) -> AuthState {
+        let message = clean_error(error);
+        let current = self.auth_view.read();
+        let state = AuthState {
+            status: "error".to_string(),
+            configured: current.configured,
+            connected: false,
+            account_key: current.account_key.clone(),
+            account_label: current.account_label.clone(),
+            hint: message,
+            qr_url: String::new(),
+            qr_expires_at: 0,
         };
-        Self::state(&inner, status, "")
+        drop(current);
+        self.publish(state)
+    }
+
+    pub async fn status(&self) -> AuthState {
+        self.auth_view.read().clone()
     }
 
     async fn replace_client(&self, inner: &mut Inner, credentials: StoredCredentials) -> Result<(), String> {
@@ -155,9 +210,18 @@ impl TelegramUserRuntime {
         inner.account_key.clear();
         inner.account_label.clear();
 
-        let session = Arc::new(SqliteSession::open(&self.session_path).await.map_err(|error| format!("打开 Telegram 会话失败：{error}"))?);
+        self.publish_status("connecting", "正在初始化 Telegram 本机会话；此步骤超时后会自动解锁");
+        let session = Arc::new(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                SqliteSession::open(&self.session_path),
+            )
+            .await
+            .map_err(|_| "初始化 Telegram 本机会话超时".to_string())?
+            .map_err(|error| format!("打开 Telegram 会话失败：{error}"))?,
+        );
         let mut params = ConnectionParams {
-            app_version: "TG Content Toolbox 0.5.2".to_string(),
+            app_version: "TG Content Toolbox 0.5.3".to_string(),
             device_model: "Windows Desktop".to_string(),
             system_lang_code: "zh-CN".to_string(),
             lang_code: "zh-CN".to_string(),
@@ -172,6 +236,7 @@ impl TelegramUserRuntime {
         inner.client = Some(client);
         inner.runner = Some(runner_task);
         inner.updates = Some(updates);
+        self.publish_status("connecting", "本机会话已就绪，正在通过 Clash 连接 Telegram");
         Ok(())
     }
 
@@ -185,19 +250,128 @@ impl TelegramUserRuntime {
 
     async fn finish_login(&self, inner: &mut Inner) -> Result<AuthState, String> {
         let client = inner.client.clone().ok_or_else(|| "Telegram 客户端未初始化".to_string())?;
-        let me = client.get_me().await.map_err(clean_error)?;
+        let me = tokio::time::timeout(std::time::Duration::from_secs(20), client.get_me())
+            .await
+            .map_err(|_| "读取 Telegram 账号信息超时".to_string())?
+            .map_err(clean_error)?;
         inner.account_key = me.id().to_string();
         let full_name = [me.first_name().unwrap_or_default(), me.last_name().unwrap_or_default()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
         inner.account_label = if !full_name.is_empty() { full_name } else if let Some(username) = me.username() { format!("@{username}") } else { format!("Telegram {}", inner.account_key) };
         if let Some(credentials) = &inner.credentials { write_credentials(&self.credentials_path, credentials)?; }
-        Ok(Self::state(inner, "ready", "登录状态已保存在当前 Windows 用户的数据目录中"))
+        Ok(self.publish(Self::state(inner, "ready", "登录状态已保存在当前 Windows 用户的数据目录中")))
+    }
+
+    fn replace_auth_task(&self, task: JoinHandle<()>) {
+        let mut slot = self.auth_task.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(previous) = slot.take() { previous.abort(); }
+        *slot = Some(task);
+    }
+
+    fn begin_generation(&self) -> u64 {
+        let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut slot = self.auth_task.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(previous) = slot.take() { previous.abort(); }
+        generation
+    }
+
+    pub fn begin_connect_saved(self: &Arc<Self>) -> Result<AuthState, String> {
+        if !self.credentials_path.exists() {
+            return Err("当前没有已保存的个人 API 会话；首次登录请使用二维码或手机号".to_string());
+        }
+        let generation = self.begin_generation();
+        let state = self.publish(AuthState {
+            status: "connecting".to_string(),
+            configured: true,
+            connected: false,
+            account_key: String::new(),
+            account_label: String::new(),
+            hint: "正在恢复已保存的 Telegram 会话；可随时取消".to_string(),
+            qr_url: String::new(),
+            qr_expires_at: 0,
+        });
+        let runtime = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let result = runtime.connect_saved().await;
+            if runtime.auth_generation.load(Ordering::SeqCst) != generation { return; }
+            match result {
+                Ok(next) => { runtime.publish(next); }
+                Err(error) => { runtime.publish_error(error); }
+            }
+        });
+        self.replace_auth_task(task);
+        Ok(state)
+    }
+
+    pub fn begin_phone(self: &Arc<Self>, api_id: i32, api_hash: String, phone: String, proxy_url: String) -> Result<AuthState, String> {
+        validate_credentials(api_id, &api_hash)?;
+        normalize_socks_proxy(&proxy_url)?;
+        let cleaned_phone = phone.chars().filter(|character| !character.is_whitespace() && !['(', ')', '-'].contains(character)).collect::<String>();
+        if !cleaned_phone.starts_with('+') || cleaned_phone.len() < 8 || !cleaned_phone[1..].chars().all(|character| character.is_ascii_digit()) {
+            return Err("手机号必须使用国际格式，例如 +8613800000000".to_string());
+        }
+        let generation = self.begin_generation();
+        let state = self.publish(AuthState {
+            status: "connecting".to_string(),
+            configured: self.credentials_path.exists(),
+            connected: false,
+            account_key: String::new(),
+            account_label: String::new(),
+            hint: "正在连接 Telegram 并请求验证码；可随时取消".to_string(),
+            qr_url: String::new(),
+            qr_expires_at: 0,
+        });
+        let runtime = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let result = runtime.start_phone(api_id, api_hash, cleaned_phone, proxy_url).await;
+            if runtime.auth_generation.load(Ordering::SeqCst) != generation { return; }
+            match result {
+                Ok(next) => { runtime.publish(next); }
+                Err(error) => { runtime.publish_error(error); }
+            }
+        });
+        self.replace_auth_task(task);
+        Ok(state)
+    }
+
+    pub fn begin_qr(self: &Arc<Self>, api_id: i32, api_hash: String, proxy_url: String) -> Result<AuthState, String> {
+        validate_credentials(api_id, &api_hash)?;
+        normalize_socks_proxy(&proxy_url)?;
+        let generation = self.begin_generation();
+        let state = self.publish(AuthState {
+            status: "connecting".to_string(),
+            configured: self.credentials_path.exists(),
+            connected: false,
+            account_key: String::new(),
+            account_label: String::new(),
+            hint: "正在连接 Telegram 并生成二维码；可随时取消".to_string(),
+            qr_url: String::new(),
+            qr_expires_at: 0,
+        });
+        let runtime = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let result = runtime.start_qr(api_id, api_hash, proxy_url).await;
+            if runtime.auth_generation.load(Ordering::SeqCst) != generation { return; }
+            match result {
+                Ok(next) => { runtime.publish(next); }
+                Err(error) => { runtime.publish_error(error); }
+            }
+        });
+        self.replace_auth_task(task);
+        Ok(state)
     }
 
     pub async fn connect_saved(&self) -> Result<AuthState, String> {
         let mut inner = self.inner.lock().await;
         let credentials = inner.credentials.clone().or_else(|| read_credentials(&self.credentials_path).ok().flatten()).ok_or_else(|| "尚未保存 Telegram API 登录信息".to_string())?;
         let client = self.prepare(&mut inner, credentials.api_id, &credentials.api_hash, &credentials.proxy_url).await?;
-        if !client.is_authorized().await.map_err(clean_error)? { return Ok(Self::state(&inner, "expired", "会话已失效，请重新扫码或使用手机号登录")); }
+        self.publish_status("connecting", "正在验证已保存的 Telegram 会话");
+        let authorized = tokio::time::timeout(std::time::Duration::from_secs(20), client.is_authorized())
+            .await
+            .map_err(|_| "恢复 Telegram 会话超时；请检查 Clash 后重试".to_string())?
+            .map_err(clean_error)?;
+        if !authorized {
+            return Ok(self.publish(Self::state(&inner, "expired", "会话已失效，请重新扫码或使用手机号登录")));
+        }
         self.finish_login(&mut inner).await
     }
 
@@ -208,10 +382,12 @@ impl TelegramUserRuntime {
         let client = self.prepare(&mut inner, api_id, &api_hash, &proxy_url).await?;
         inner.qr_url.clear();
         inner.qr_expires_at = 0;
+        self.publish_status("connecting", "Telegram 网络已连接，正在检查账号状态");
         let authorized = tokio::time::timeout(std::time::Duration::from_secs(20), client.is_authorized())
             .await.map_err(|_| "Telegram 连接超时；请在设置中测试 Clash 代理后重试".to_string())?
             .map_err(clean_error)?;
         if authorized { return self.finish_login(&mut inner).await; }
+        self.publish_status("connecting", "正在向 Telegram 请求登录验证码");
         let token = tokio::time::timeout(
             std::time::Duration::from_secs(25),
             client.request_login_code(&phone, api_hash.trim()),
@@ -220,22 +396,37 @@ impl TelegramUserRuntime {
         .map_err(|_| "Telegram 发送验证码超时；请确认 Clash 代理可用".to_string())?
         .map_err(clean_error)?;
         inner.phone_token = Some(token);
-        Ok(Self::state(&inner, "waiting_code", "验证码通常发送到已登录的 Telegram 应用；请输入验证码"))
+        Ok(self.publish(Self::state(&inner, "waiting_code", "验证码通常发送到已登录的 Telegram 应用；请输入验证码")))
     }
 
     pub async fn submit_code(&self, code: String) -> Result<AuthState, String> {
         let mut inner = self.inner.lock().await;
         let client = inner.client.clone().ok_or_else(|| "请先开始手机号登录".to_string())?;
         let token = inner.phone_token.take().ok_or_else(|| "验证码登录步骤已过期，请重新发送验证码".to_string())?;
-        match client.sign_in(&token, code.trim()).await {
+        self.publish_status("authorizing", "正在核对 Telegram 验证码");
+        let sign_in = match tokio::time::timeout(std::time::Duration::from_secs(25), client.sign_in(&token, code.trim())).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.publish_error("提交 Telegram 验证码超时");
+                return Err("提交 Telegram 验证码超时".to_string());
+            }
+        };
+        match sign_in {
             Ok(_) => self.finish_login(&mut inner).await,
             Err(SignInError::PasswordRequired(token)) => {
                 let hint = token.hint().unwrap_or("请输入 Telegram 两步验证密码").to_string();
                 inner.password_token = Some(token);
-                Ok(Self::state(&inner, "waiting_password", &hint))
+                Ok(self.publish(Self::state(&inner, "waiting_password", &hint)))
             }
-            Err(SignInError::InvalidCode) => Err("验证码无效；请重新开始手机号登录后再试".to_string()),
-            Err(error) => Err(clean_error(error)),
+            Err(SignInError::InvalidCode) => {
+                self.publish_error("验证码无效；请重新开始手机号登录后再试");
+                Err("验证码无效；请重新开始手机号登录后再试".to_string())
+            }
+            Err(error) => {
+                let message = clean_error(error);
+                self.publish_error(&message);
+                Err(message)
+            }
         }
     }
 
@@ -243,13 +434,26 @@ impl TelegramUserRuntime {
         let mut inner = self.inner.lock().await;
         let client = inner.client.clone().ok_or_else(|| "请先开始 Telegram 登录".to_string())?;
         let token = inner.password_token.take().ok_or_else(|| "当前没有等待两步验证密码".to_string())?;
-        match client.check_password(token, password).await {
+        self.publish_status("authorizing", "正在核对 Telegram 两步验证密码");
+        let password_check = match tokio::time::timeout(std::time::Duration::from_secs(25), client.check_password(token, password)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.publish_error("提交 Telegram 两步验证密码超时");
+                return Err("提交 Telegram 两步验证密码超时".to_string());
+            }
+        };
+        match password_check {
             Ok(_) => self.finish_login(&mut inner).await,
             Err(SignInError::InvalidPassword(token)) => {
                 inner.password_token = Some(token);
+                self.publish(Self::state(&inner, "waiting_password", "两步验证密码不正确，请重试"));
                 Err("两步验证密码不正确".to_string())
             }
-            Err(error) => Err(clean_error(error)),
+            Err(error) => {
+                let message = clean_error(error);
+                self.publish_error(&message);
+                Err(message)
+            }
         }
     }
 
@@ -293,6 +497,7 @@ impl TelegramUserRuntime {
         let client = self.prepare(&mut inner, api_id, &api_hash, &proxy_url).await?;
         inner.phone_token = None;
         inner.password_token = None;
+        self.publish_status("connecting", "Telegram 网络已连接，正在请求二维码");
         let authorized = tokio::time::timeout(std::time::Duration::from_secs(20), client.is_authorized())
             .await.map_err(|_| "Telegram 连接超时；请在设置中测试 Clash 代理后重试".to_string())?
             .map_err(clean_error)?;
@@ -300,18 +505,14 @@ impl TelegramUserRuntime {
         if let Some(updates) = inner.updates.as_mut() {
             while updates.try_recv().is_ok() {}
         }
-        self.export_qr_token(&mut inner, api_id, &api_hash).await
+        let state = self.export_qr_token(&mut inner, api_id, &api_hash).await?;
+        Ok(self.publish(state))
     }
 
     pub async fn poll_qr(&self, confirm: bool) -> Result<AuthState, String> {
+        let generation = self.auth_generation.load(Ordering::SeqCst);
         let mut inner = self.inner.lock().await;
         if inner.qr_url.is_empty() { return Err("当前没有进行中的二维码登录，请先生成二维码".to_string()); }
-        let client = inner.client.clone().ok_or_else(|| "Telegram 客户端未初始化".to_string())?;
-        let authorized = tokio::time::timeout(std::time::Duration::from_secs(12), client.is_authorized())
-            .await.map_err(|_| "Telegram 扫码确认超时；请检查代理后重试".to_string())?
-            .map_err(clean_error)?;
-        if authorized { return self.finish_login(&mut inner).await; }
-
         let mut login_token_update = false;
         if let Some(updates) = inner.updates.as_mut() {
             while let Ok(update) = updates.try_recv() {
@@ -321,18 +522,48 @@ impl TelegramUserRuntime {
         let credentials = inner.credentials.clone().ok_or_else(|| "Telegram API 信息已丢失，请重新生成二维码".to_string())?;
         let expiring = Utc::now().timestamp_millis() >= inner.qr_expires_at.saturating_sub(4_000);
         if confirm || login_token_update || expiring {
-            return self.export_qr_token(&mut inner, credentials.api_id, &credentials.api_hash).await;
+            let state = self.export_qr_token(&mut inner, credentials.api_id, &credentials.api_hash).await?;
+            if self.auth_generation.load(Ordering::SeqCst) != generation {
+                return Ok(self.auth_view.read().clone());
+            }
+            return Ok(self.publish(state));
         }
-        Ok(Self::state(&inner, "waiting_qr", "等待手机扫码；软件会自动检测并完成登录"))
+        if self.auth_generation.load(Ordering::SeqCst) != generation {
+            return Ok(self.auth_view.read().clone());
+        }
+        Ok(self.publish(Self::state(&inner, "waiting_qr", "等待手机扫码；软件会自动检测并完成登录")))
     }
 
-    pub async fn cancel_auth(&self) -> AuthState {
-        let mut inner = self.inner.lock().await;
-        inner.phone_token = None;
-        inner.password_token = None;
-        inner.qr_url.clear();
-        inner.qr_expires_at = 0;
-        Self::state(&inner, "disconnected", "已取消当前登录流程")
+    pub fn cancel_auth(self: &Arc<Self>) -> AuthState {
+        self.auth_generation.fetch_add(1, Ordering::SeqCst);
+        let mut slot = self.auth_task.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(task) = slot.take() { task.abort(); }
+        drop(slot);
+        let state = self.publish(AuthState {
+            status: "disconnected".to_string(),
+            configured: self.credentials_path.exists(),
+            connected: false,
+            account_key: String::new(),
+            account_label: String::new(),
+            hint: "已取消当前登录流程，界面已解锁".to_string(),
+            qr_url: String::new(),
+            qr_expires_at: 0,
+        });
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut inner = runtime.inner.lock().await;
+            inner.phone_token = None;
+            inner.password_token = None;
+            inner.qr_url.clear();
+            inner.qr_expires_at = 0;
+            if inner.account_key.is_empty() {
+                if let Some(client) = inner.client.take() { client.disconnect(); }
+                if let Some(runner) = inner.runner.take() { runner.abort(); }
+                inner.session = None;
+                inner.updates = None;
+            }
+        });
+        state
     }
 
     async fn dialog_pairs(inner: &Inner, limit: usize) -> Result<Vec<(TelegramDialog, grammers_session::types::PeerRef)>, String> {
@@ -403,6 +634,11 @@ impl TelegramUserRuntime {
     }
 
     pub async fn logout(&self) -> Result<AuthState, String> {
+        self.auth_generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut slot = self.auth_task.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(task) = slot.take() { task.abort(); }
+        }
         let mut inner = self.inner.lock().await;
         if let Some(client) = inner.client.take() { let _ = client.sign_out().await; client.disconnect(); }
         if let Some(runner) = inner.runner.take() { runner.abort(); }
@@ -411,7 +647,7 @@ impl TelegramUserRuntime {
         inner.account_key.clear(); inner.account_label.clear();
         if self.credentials_path.exists() { std::fs::remove_file(&self.credentials_path).map_err(clean_error)?; }
         if self.session_path.exists() { std::fs::remove_file(&self.session_path).map_err(clean_error)?; }
-        Ok(Self::state(&inner, "disconnected", "已退出并删除本机 Telegram 会话"))
+        Ok(self.publish(Self::state(&inner, "disconnected", "已退出并删除本机 Telegram 会话")))
     }
 }
 
@@ -552,5 +788,44 @@ mod tests {
         assert!(!cleaned.contains("0123456789abcdef0123456789abcdef"));
         assert!(cleaned.contains("[手机号已隐藏]"));
         assert!(cleaned.contains("[凭据已隐藏]"));
+    }
+
+    #[tokio::test]
+    async fn public_auth_status_never_waits_for_the_telegram_inner_lock() {
+        let runtime = TelegramUserRuntime::new(Path::new("nonexistent-auth-status-test"));
+        let _inner = runtime.inner.lock().await;
+        let state = tokio::time::timeout(std::time::Duration::from_millis(50), runtime.status())
+            .await
+            .expect("public status must not wait on the network/session lock");
+        assert_eq!(state.status, "disconnected");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_stuck_background_login_unlocks_immediately() {
+        let runtime = Arc::new(TelegramUserRuntime::new(Path::new("nonexistent-cancel-test")));
+        let worker_runtime = Arc::clone(&runtime);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _inner = worker_runtime.inner.lock().await;
+            let _ = locked_tx.send(());
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+        runtime.replace_auth_task(task);
+        runtime.publish_status("connecting", "test");
+        locked_rx.await.expect("background test task should hold the inner lock");
+
+        let started = std::time::Instant::now();
+        let state = runtime.cancel_auth();
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(state.status, "disconnected");
+        assert_eq!(state.hint, "已取消当前登录流程，界面已解锁");
+    }
+
+    #[test]
+    fn first_login_does_not_offer_restore_without_saved_credentials() {
+        let runtime = Arc::new(TelegramUserRuntime::new(Path::new("nonexistent-first-login-test")));
+        let error = runtime.begin_connect_saved().unwrap_err();
+        assert!(error.contains("首次登录"));
+        assert_eq!(runtime.auth_view.read().status, "disconnected");
     }
 }

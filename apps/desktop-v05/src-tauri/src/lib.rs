@@ -343,14 +343,14 @@ async fn telegram_user_status(state: State<'_, AppState>) -> Result<telegram_use
 
 #[tauri::command]
 async fn telegram_user_connect(state: State<'_, AppState>) -> Result<telegram_user::AuthState, String> {
-    let result = state.telegram_user.connect_saved().await;
+    let result = state.telegram_user.begin_connect_saved();
     let _ = workspace::append_log(state.runtime.database_path.as_ref(), if result.is_ok() { "INFO" } else { "ERROR" }, "telegram_user", "Telegram 个人账号恢复连接", &serde_json::json!({"ok":result.is_ok()}));
     result
 }
 
 #[tauri::command]
 async fn telegram_user_start_phone(state: State<'_, AppState>, api_id: i32, api_hash: String, phone: String, proxy_url: String) -> Result<telegram_user::AuthState, String> {
-    let result = state.telegram_user.start_phone(api_id, api_hash, phone, proxy_url).await;
+    let result = state.telegram_user.begin_phone(api_id, api_hash, phone, proxy_url);
     let _ = workspace::append_log(state.runtime.database_path.as_ref(), if result.is_ok() { "INFO" } else { "ERROR" }, "telegram_user", "Telegram 手机号登录步骤", &serde_json::json!({"ok":result.is_ok(),"error":result.as_ref().err().cloned().unwrap_or_default()}));
     result
 }
@@ -367,7 +367,7 @@ async fn telegram_user_submit_password(state: State<'_, AppState>, password: Str
 
 #[tauri::command]
 async fn telegram_user_qr_step(state: State<'_, AppState>, api_id: i32, api_hash: String, proxy_url: String) -> Result<telegram_user::AuthState, String> {
-    let result = state.telegram_user.start_qr(api_id, api_hash, proxy_url).await;
+    let result = state.telegram_user.begin_qr(api_id, api_hash, proxy_url);
     let _ = workspace::append_log(state.runtime.database_path.as_ref(), if result.is_ok() { "INFO" } else { "ERROR" }, "telegram_user", "Telegram 扫码登录启动", &serde_json::json!({"ok":result.is_ok(),"error":result.as_ref().err().cloned().unwrap_or_default()}));
     result
 }
@@ -383,7 +383,7 @@ async fn telegram_user_qr_poll(state: State<'_, AppState>, confirm: bool) -> Res
 
 #[tauri::command]
 async fn telegram_user_cancel_auth(state: State<'_, AppState>) -> Result<telegram_user::AuthState, String> {
-    Ok(state.telegram_user.cancel_auth().await)
+    Ok(state.telegram_user.cancel_auth())
 }
 
 #[tauri::command]

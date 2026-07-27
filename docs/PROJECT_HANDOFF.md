@@ -1,6 +1,6 @@
 # TG 内容工具箱 v0.5 交接说明
 
-更新时间：2026-07-26
+更新时间：2026-07-27
 主线分支：`codex/v0.5-redesign`
 项目根目录：`E:\Desktop\codex项目\missav-manager`
 
@@ -60,8 +60,8 @@ cd E:\Desktop\codex项目\missav-manager
 npm test
 ```
 
-当前验收基线：根目录 v0.4.5 规则回归 139 项；v0.5.2 Rust 单测 12 项；`npm run check`、`npm run build:web` 与 release 构建均通过。最终文件为 `apps/desktop-v05/src-tauri/target/release/tg-content-toolbox-v05.exe`，大小 `19,313,152` 字节，SHA-256 为 `4636AD7EB4BBFED53B722FC15697B95DBF774B2D30C92709D8221D379205B35D`。
+当前验收基线：根目录 v0.4.5 规则回归 139 项；v0.5.3 Rust 单测 15 项；`npm run check`、`npm run build:web` 与 release 构建均通过。最终文件为 `dist/TG_Content_Toolbox_v0.5.3.exe`，大小 `19,487,232` 字节，SHA-256 为 `82A115A7623D56EB07282A69732661E158AD2B5E4938173CF9554D6484472E07`。
 
-v0.5.2 已使用独立 `TG_TOOLBOX_V05_DATA_DIR` 完成隔离首启和 Windows 界面验收：新建 126,976 字节正式空库，启动日志依次包含 `setup:start`、`setup:database_ready` 和 `setup:ready`，版本标识、Telegram 登录区域和 MissAV 工作区均可正常显示，全过程未访问正式数据库。Chrome 扩展桥已经降级为可选功能：若本机禁止监听本地端口，APP 仍可启动，其余模式照常可用。
+v0.5.3 已使用独立 `TG_TOOLBOX_V05_DATA_DIR` 完成隔离首启和 Windows 界面验收：新建 126,976 字节正式空库，启动日志依次包含 `setup:start`、`setup:database_ready` 和 `setup:ready`；版本标识、Telegram 登录区域和首次登录按钮状态均正常，全过程未访问正式数据库。Chrome 扩展桥已经降级为可选功能：若本机禁止监听本地端口，APP 仍可启动，其余模式照常可用。
 
-v0.5.2 将 v0.4.5 已验证的 Telegram 连续二维码授权、手机号/2FA 步骤、Clash Mixed Port 转 SOCKS5 与站点自适应请求门迁回新架构。MissAV/123AV 仍独立限速；最近 10 个响应至少 8 个为 HTTP 403 时，会判断为 Cloudflare 持续浏览器验证并停止尚未发送的请求，避免整批继续落为网络错误。更换节点后可在结果页直接“重跑全部异常”。
+v0.5.3 将 Telegram 二维码、手机号和恢复会话改为后台授权任务：启动命令立即返回，状态查询与 Telegram 网络锁分离，连接阶段持续显示真实进度，取消操作不等待卡住的网络锁。本地 session 初始化限时 8 秒；首次登录没有会话时不会错误提供“恢复已保存登录”。v0.5.2 已迁回的 Clash Mixed Port 转 SOCKS5 与站点自适应请求门继续保留。

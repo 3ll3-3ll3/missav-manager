@@ -2,14 +2,14 @@
 
 这是一个只面向 Windows 的本地桌面工具箱。它把 Telegram 消息、官方导出文件或手动文本送入五个彼此独立的工具：推特博主、Bad.news、海角、MissAV 和 123AV。所有业务数据保存在本机 SQLite；不需要服务器账户，也不会上传你的 Telegram 正文、浏览器 Cookie 或密码。
 
-当前主线：`codex/v0.5-redesign`，当前构建版本为 `v0.5.2`。稳定旧版 `v0.4.5` 已由独立 Git tag 保留，v0.5 不会读取、覆盖或删除它的数据库。v0.5.2 已把 v0.4.5 中验证正常的 Telegram 连续授权与网站自适应调度逻辑迁回新界面。
+当前主线：`codex/v0.5-redesign`，当前构建版本为 `v0.5.3`。稳定旧版 `v0.4.5` 已由独立 Git tag 保留，v0.5 不会读取、覆盖或删除它的数据库。v0.5.3 已把 v0.4.5 中验证正常的 Telegram 后台授权状态机与网站自适应调度逻辑迁回新界面。
 
 ## 发布包
 
 构建完成后使用以下单文件：
 
 ```text
-apps\desktop-v05\src-tauri\target\release\tg-content-toolbox-v05.exe
+dist\TG_Content_Toolbox_v0.5.3.exe
 ```
 
 它不需要 Node.js、Git 或 BAT 脚本。Windows 需要已安装 WebView2 Runtime（Windows 11 通常自带）；首次启动时会创建当前用户独立的数据目录。EXE 未做数字签名，SmartScreen 可能显示“未知发布者”；只应从本仓库的 Release 或已核对 SHA-256 的文件取得。
@@ -54,6 +54,8 @@ apps\desktop-v05\src-tauri\target\release\tg-content-toolbox-v05.exe
 
 1. 在 [my.telegram.org/apps](https://my.telegram.org/apps) 获取 `api_id` 和 `api_hash`。
 2. 在“个人账号 API”填写它们；优先点“生成二维码”。手机 Telegram 中打开“设置 → 设备 → 连接桌面设备”扫码；也可改用国际格式手机号和验证码，支持两步验证密码。
+   - 第一次登录没有本机会话，“恢复已保存登录”会保持禁用；只有成功登录过以后才使用它。
+   - 登录在后台运行，界面会显示“初始化本机会话、连接 Clash、检查账号、请求二维码/验证码”等当前阶段。任一阶段停滞时可点“立即取消并解锁”，无需强制关闭软件。
 3. 如果网络需要 Clash，在设置页填写 Clash 的 Mixed Port 或 SOCKS Port，例如 `127.0.0.1:7890`。工具会按 SOCKS5 连接 Telegram。
 4. 登录后点击“刷新群组/频道”。页面只显示群组、超级群和频道，不混入私聊。
 5. 勾选多个来源，并勾选它们要投递的工具。一个来源可同时投递给多个工具；最多 100 个个人 API 来源。
