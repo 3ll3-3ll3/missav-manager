@@ -2,14 +2,14 @@
 
 这是一个只面向 Windows 的本地桌面工具箱。它把 Telegram 消息、官方导出文件或手动文本送入五个彼此独立的工具：推特博主、Bad.news、海角、MissAV 和 123AV。所有业务数据保存在本机 SQLite；不需要服务器账户，也不会上传你的 Telegram 正文、浏览器 Cookie 或密码。
 
-当前主线：`codex/v0.5-redesign`，当前构建版本为 `v0.5.3`。稳定旧版 `v0.4.5` 已由独立 Git tag 保留，v0.5 不会读取、覆盖或删除它的数据库。v0.5.3 已把 v0.4.5 中验证正常的 Telegram 后台授权状态机与网站自适应调度逻辑迁回新界面。
+当前主线：`codex/v0.5-redesign`，当前构建版本为 `v0.5.4`。稳定旧版 `v0.4.5` 已由独立 Git tag 保留，v0.5 不会读取、覆盖或删除它的数据库。v0.5.4 已把 Telegram 会话从会在部分 Windows 机器阻塞的 `libsql` 存储改为 Windows 当前用户加密文件，并保留 v0.4.5 已验证的后台授权流程。
 
 ## 发布包
 
 构建完成后使用以下单文件：
 
 ```text
-dist\TG_Content_Toolbox_v0.5.3.exe
+dist\TG_Content_Toolbox_v0.5.4.exe
 ```
 
 它不需要 Node.js、Git 或 BAT 脚本。Windows 需要已安装 WebView2 Runtime（Windows 11 通常自带）；首次启动时会创建当前用户独立的数据目录。EXE 未做数字签名，SmartScreen 可能显示“未知发布者”；只应从本仓库的 Release 或已核对 SHA-256 的文件取得。

@@ -1,5 +1,6 @@
 use std::{
     ffi::c_void,
+    fmt,
     path::{Path, PathBuf},
     ptr,
     sync::{
@@ -18,7 +19,11 @@ use grammers_client::{
     Client, SignInError,
 };
 use grammers_mtsender::{ConnectionParams, SenderPool};
-use grammers_session::{storages::SqliteSession, updates::UpdatesLike, Session};
+use grammers_session::{
+    types::{DcOption, PeerId, PeerInfo, UpdateState, UpdatesState},
+    updates::UpdatesLike,
+    BoxFuture, Session, SessionData,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::{mpsc::UnboundedReceiver, Mutex}, task::JoinHandle};
@@ -29,6 +34,181 @@ struct StoredCredentials {
     api_id: i32,
     api_hash: String,
     proxy_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSessionData {
+    version: u8,
+    home_dc: i32,
+    dc_options: Vec<DcOption>,
+    peer_infos: Vec<PeerInfo>,
+    updates_state: UpdatesState,
+}
+
+impl PersistedSessionData {
+    fn from_session(data: &SessionData) -> Self {
+        Self {
+            version: 1,
+            home_dc: data.home_dc,
+            dc_options: data.dc_options.values().cloned().collect(),
+            peer_infos: data
+                .peer_infos
+                .values()
+                .filter(|peer| matches!(peer, PeerInfo::User { is_self: Some(true), .. }))
+                .cloned()
+                .collect(),
+            updates_state: data.updates_state.clone(),
+        }
+    }
+
+    fn into_session(self) -> Result<SessionData, FileSessionError> {
+        if self.version != 1 {
+            return Err(FileSessionError("不支持的 Telegram 会话文件版本".to_string()));
+        }
+        let mut data = SessionData::default();
+        data.home_dc = self.home_dc;
+        for option in self.dc_options {
+            data.dc_options.insert(option.id, option);
+        }
+        data.peer_infos = self
+            .peer_infos
+            .into_iter()
+            .map(|peer| (peer.id(), peer))
+            .collect();
+        data.updates_state = self.updates_state;
+        Ok(data)
+    }
+}
+
+#[derive(Debug)]
+struct FileSessionError(String);
+
+impl fmt::Display for FileSessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FileSessionError {}
+
+struct FileSession {
+    path: PathBuf,
+    data: StdMutex<SessionData>,
+}
+
+impl FileSession {
+    fn open(path: &Path) -> Result<Self, FileSessionError> {
+        let data = if path.is_file() {
+            let encrypted = std::fs::read(path)
+                .map_err(|error| FileSessionError(format!("读取 Telegram 会话失败：{error}")))?;
+            let plain = unprotect_data(&encrypted).map_err(FileSessionError)?;
+            serde_json::from_slice::<PersistedSessionData>(&plain)
+                .map_err(|error| FileSessionError(format!("解析 Telegram 会话失败：{error}")))?
+                .into_session()?
+        } else {
+            SessionData::default()
+        };
+        Ok(Self { path: path.to_path_buf(), data: StdMutex::new(data) })
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, SessionData>, FileSessionError> {
+        self.data.lock().map_err(|_| FileSessionError("Telegram 会话锁已损坏".to_string()))
+    }
+
+    fn persist(&self, data: &SessionData) -> Result<(), FileSessionError> {
+        let plain = serde_json::to_vec(&PersistedSessionData::from_session(data))
+            .map_err(|error| FileSessionError(format!("序列化 Telegram 会话失败：{error}")))?;
+        let encrypted = protect_data(&plain).map_err(FileSessionError)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| FileSessionError(format!("创建 Telegram 会话目录失败：{error}")))?;
+        }
+        std::fs::write(&self.path, encrypted)
+            .map_err(|error| FileSessionError(format!("保存 Telegram 会话失败：{error}")))
+    }
+}
+
+impl Session for FileSession {
+    type Error = FileSessionError;
+
+    fn home_dc_id(&self) -> Result<i32, Self::Error> {
+        Ok(self.lock()?.home_dc)
+    }
+
+    fn set_home_dc_id(&self, dc_id: i32) -> BoxFuture<'_, Result<(), Self::Error>> {
+        Box::pin(async move {
+            let mut data = self.lock()?;
+            data.home_dc = dc_id;
+            self.persist(&data)
+        })
+    }
+
+    fn dc_option(&self, dc_id: i32) -> Result<Option<DcOption>, Self::Error> {
+        Ok(self.lock()?.dc_options.get(&dc_id).cloned())
+    }
+
+    fn set_dc_option(&self, option: &DcOption) -> BoxFuture<'_, Result<(), Self::Error>> {
+        let option = option.clone();
+        Box::pin(async move {
+            let mut data = self.lock()?;
+            data.dc_options.insert(option.id, option);
+            self.persist(&data)
+        })
+    }
+
+    fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, Self::Error>> {
+        Box::pin(async move {
+            let data = self.lock()?;
+            if peer == PeerId::self_user() {
+                Ok(data
+                    .peer_infos
+                    .values()
+                    .find(|info| matches!(info, PeerInfo::User { is_self: Some(true), .. }))
+                    .cloned())
+            } else {
+                Ok(data.peer_infos.get(&peer).cloned())
+            }
+        })
+    }
+
+    fn cache_peer(&self, peer: &PeerInfo) -> BoxFuture<'_, Result<(), Self::Error>> {
+        let peer = peer.clone();
+        Box::pin(async move {
+            let mut data = self.lock()?;
+            data.peer_infos
+                .entry(peer.id())
+                .or_insert_with(|| peer.clone())
+                .extend_info(&peer);
+            if matches!(peer, PeerInfo::User { is_self: Some(true), .. }) {
+                self.persist(&data)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn updates_state(&self) -> BoxFuture<'_, Result<UpdatesState, Self::Error>> {
+        Box::pin(async move { Ok(self.lock()?.updates_state.clone()) })
+    }
+
+    fn set_update_state(&self, update: UpdateState) -> BoxFuture<'_, Result<(), Self::Error>> {
+        Box::pin(async move {
+            let mut data = self.lock()?;
+            match update {
+                UpdateState::All(state) => data.updates_state = state,
+                UpdateState::Primary { pts, date, seq } => {
+                    data.updates_state.pts = pts;
+                    data.updates_state.date = date;
+                    data.updates_state.seq = seq;
+                }
+                UpdateState::Secondary { qts } => data.updates_state.qts = qts,
+                UpdateState::Channel { id, pts } => {
+                    data.updates_state.channels.retain(|channel| channel.id != id);
+                    data.updates_state.channels.push(grammers_session::types::ChannelState { id, pts });
+                }
+            }
+            self.persist(&data)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,7 +263,7 @@ pub struct TelegramSyncResult {
 
 struct Inner {
     credentials: Option<StoredCredentials>,
-    session: Option<Arc<SqliteSession>>,
+    session: Option<Arc<FileSession>>,
     client: Option<Client>,
     runner: Option<JoinHandle<()>>,
     updates: Option<UnboundedReceiver<UpdatesLike>>,
@@ -110,7 +290,7 @@ impl TelegramUserRuntime {
         let credentials = read_credentials(&credentials_path).ok().flatten();
         let configured = credentials.is_some();
         Self {
-            session_path: data_dir.join("telegram-user-session-v05.sqlite"),
+            session_path: data_dir.join("telegram-user-session-v05.bin"),
             credentials_path,
             inner: Mutex::new(Inner {
                 credentials,
@@ -210,18 +390,13 @@ impl TelegramUserRuntime {
         inner.account_key.clear();
         inner.account_label.clear();
 
-        self.publish_status("connecting", "正在初始化 Telegram 本机会话；此步骤超时后会自动解锁");
+        self.publish_status("connecting", "正在读取本地加密 Telegram 会话");
         let session = Arc::new(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                SqliteSession::open(&self.session_path),
-            )
-            .await
-            .map_err(|_| "初始化 Telegram 本机会话超时".to_string())?
-            .map_err(|error| format!("打开 Telegram 会话失败：{error}"))?,
+            FileSession::open(&self.session_path)
+                .map_err(|error| format!("打开 Telegram 会话失败：{error}"))?,
         );
         let mut params = ConnectionParams {
-            app_version: "TG Content Toolbox 0.5.3".to_string(),
+            app_version: "TG Content Toolbox 0.5.4".to_string(),
             device_model: "Windows Desktop".to_string(),
             system_lang_code: "zh-CN".to_string(),
             lang_code: "zh-CN".to_string(),
@@ -827,5 +1002,20 @@ mod tests {
         let error = runtime.begin_connect_saved().unwrap_err();
         assert!(error.contains("首次登录"));
         assert_eq!(runtime.auth_view.read().status, "disconnected");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn encrypted_file_session_opens_immediately_and_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("telegram-session.bin");
+        let session = FileSession::open(&path).unwrap();
+        session.set_home_dc_id(4).await.unwrap();
+
+        let encrypted = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&encrypted).contains("home_dc"));
+
+        let reopened = FileSession::open(&path).unwrap();
+        assert_eq!(reopened.home_dc_id().unwrap(), 4);
     }
 }

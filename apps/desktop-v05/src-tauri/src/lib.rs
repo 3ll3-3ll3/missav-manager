@@ -495,7 +495,7 @@ pub fn run() {
                         let previous_database = previous_dir.join(name);
                         if previous_database.is_file() {
                             std::fs::copy(&previous_database, &formal_database_path).map_err(|error| std::io::Error::other(format!("复制早期 v0.5 数据库失败：{error}")))?;
-                            for companion in ["telegram-user-credentials-v05.bin", "telegram-user-session-v05.sqlite"] {
+                            for companion in ["telegram-user-credentials-v05.bin", "telegram-user-session-v05.bin"] {
                                 let old = previous_dir.join(companion); let new = data_dir.join(companion);
                                 if old.is_file() && !new.exists() { let _ = std::fs::copy(old, new); }
                             }

@@ -1,6 +1,6 @@
 [package]
 name = "tg-content-toolbox-v05"
-version = "0.5.3"
+version = "0.5.4"
 description = "TG Content Toolbox v0.5 for Windows"
 authors = ["WJL"]
 edition = "2021"
@@ -21,7 +21,7 @@ getrandom = "0.2"
 base64 = "0.22"
 grammers-client = { version = "0.10", features = ["proxy"] }
 grammers-mtsender = { version = "0.10", features = ["proxy"] }
-grammers-session = "0.10"
+grammers-session = { version = "0.10", default-features = false, features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }

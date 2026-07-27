@@ -60,8 +60,10 @@ cd E:\Desktop\codex项目\missav-manager
 npm test
 ```
 
-当前验收基线：根目录 v0.4.5 规则回归 139 项；v0.5.3 Rust 单测 15 项；`npm run check`、`npm run build:web` 与 release 构建均通过。最终文件为 `dist/TG_Content_Toolbox_v0.5.3.exe`，大小 `19,487,232` 字节，SHA-256 为 `82A115A7623D56EB07282A69732661E158AD2B5E4938173CF9554D6484472E07`。
+当前验收基线：根目录 v0.4.5 规则回归 139 项；v0.5.4 Rust 单测 16 项；`npm run check`、`npm run build:web` 与 release 构建均通过。最终文件为 `dist/TG_Content_Toolbox_v0.5.4.exe`，大小 `19,181,568` 字节，SHA-256 为 `24DECC556EBAA618FC55607BDE4919B914E080B9118519D180447C172C781268`。
 
 v0.5.3 已使用独立 `TG_TOOLBOX_V05_DATA_DIR` 完成隔离首启和 Windows 界面验收：新建 126,976 字节正式空库，启动日志依次包含 `setup:start`、`setup:database_ready` 和 `setup:ready`；版本标识、Telegram 登录区域和首次登录按钮状态均正常，全过程未访问正式数据库。Chrome 扩展桥已经降级为可选功能：若本机禁止监听本地端口，APP 仍可启动，其余模式照常可用。
 
 v0.5.3 将 Telegram 二维码、手机号和恢复会话改为后台授权任务：启动命令立即返回，状态查询与 Telegram 网络锁分离，连接阶段持续显示真实进度，取消操作不等待卡住的网络锁。本地 session 初始化限时 8 秒；首次登录没有会话时不会错误提供“恢复已保存登录”。v0.5.2 已迁回的 Clash Mixed Port 转 SOCKS5 与站点自适应请求门继续保留。
+
+v0.5.4 根据用户现场复现进一步确认：`libsql` 在 Windows 上可能阻塞于会话初始化，且阻塞式 poll 会使异步超时器无法执行。Telegram 会话现改为由当前 Windows 用户 DPAPI 加密的小型文件，完全移除登录路径上的 `libsql`；真实加密落盘和重开测试在约 0.03 秒内完成。业务 SQLite、API 凭据和 Telegram 会话仍彼此独立。
