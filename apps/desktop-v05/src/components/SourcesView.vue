@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import QRCode from "qrcode";
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   callTelegramBot, createContentRun, deleteInputSource, getAppSetting, listInputSources,
   saveInputSource, setAppSetting, telegramUserConnect, telegramUserListDialogs,
-  telegramUserLogout, telegramUserQrStep, telegramUserStartPhone, telegramUserStatus,
+  telegramUserCancelAuth, telegramUserLogout, telegramUserQrPoll, telegramUserQrStep, telegramUserStartPhone, telegramUserStatus,
   telegramUserSubmitCode, telegramUserSubmitPassword, telegramUserSyncMessages,
 } from "../api";
 import { processToolInput } from "../processing";
@@ -24,6 +24,7 @@ const editing = ref<SourceInput>({ kind: "manual", externalId: "", name: "", sou
 const apiId = ref(""); const apiHash = ref(""); const phone = ref(""); const code = ref(""); const password = ref("");
 const auth = ref<TelegramAuthState>({ status: "disconnected", configured: false, connected: false, accountKey: "", accountLabel: "", hint: "", qrUrl: "", qrExpiresAt: 0 });
 const qrDataUrl = ref(""); const personalBusy = ref(false); const dialogs = ref<TelegramDialog[]>([]); const dialogSearch = ref("");
+const qrPolling = ref(false); const qrClock = ref(Date.now()); let qrTimer: number | undefined; let renderedQrUrl = "";
 const selectedDialogs = ref(new Set<string>()); const personalBindings = ref<ToolKind[]>([]); const initialMode = ref<"from_now" | "recent">("from_now");
 const syncStart = ref(""); const syncEnd = ref("");
 
@@ -38,6 +39,8 @@ const visibleDialogs = computed(() => {
 });
 const selectedPersonalCount = computed(() => selectedDialogs.value.size);
 const selectedBotCount = computed(() => selectedBot.value.size);
+const authInProgress = computed(() => personalBusy.value || ["waiting_qr", "waiting_code", "waiting_password"].includes(auth.value.status));
+const qrSeconds = computed(() => Math.max(0, Math.ceil((auth.value.qrExpiresAt - qrClock.value) / 1000)));
 
 function toggle(set: Set<string>, key: string) { const next = new Set(set); next.has(key) ? next.delete(key) : next.add(key); return next; }
 function toggleTools(value: ToolKind[], tool: ToolKind) { const set = new Set(value); set.has(tool) ? set.delete(tool) : set.add(tool); return [...set]; }
@@ -50,7 +53,19 @@ async function saveManual() { error.value = ""; try { await saveInputSource(edit
 async function remove(item: SourceRecord) { if (!confirm(`删除来源“${item.name}”？已退出的群组、频道或无效绑定可在此彻底清理。`)) return; await deleteInputSource(item.id); await refreshSources(); }
 async function runtimeProxy() { const settings = await getAppSetting<{ proxyEnabled?: boolean; proxyUrl?: string }>("runtime"); return settings?.proxyEnabled ? String(settings.proxyUrl || "") : ""; }
 
-function applyAuth(next: TelegramAuthState) { auth.value = next; if (next.status === "ready") { qrDataUrl.value = ""; code.value = ""; password.value = ""; } }
+function applyAuth(next: TelegramAuthState) {
+  auth.value = next;
+  if (next.status === "ready" || next.status === "disconnected") {
+    qrDataUrl.value = ""; renderedQrUrl = ""; code.value = ""; password.value = "";
+  }
+}
+async function applyQrAuth(next: TelegramAuthState) {
+  applyAuth(next);
+  if (next.qrUrl && next.qrUrl !== renderedQrUrl) {
+    qrDataUrl.value = await QRCode.toDataURL(next.qrUrl, { width: 280, margin: 2, errorCorrectionLevel: "M" });
+    renderedQrUrl = next.qrUrl;
+  }
+}
 async function connectPersonal() { personalBusy.value = true; error.value = ""; try { applyAuth(await telegramUserConnect()); status.value = auth.value.connected ? `已连接 ${auth.value.accountLabel}` : auth.value.hint; } catch (reason) { error.value = String(reason); } finally { personalBusy.value = false; } }
 async function startPhone() { personalBusy.value = true; error.value = ""; try { applyAuth(await telegramUserStartPhone(Number(apiId.value), apiHash.value, phone.value, await runtimeProxy())); status.value = auth.value.hint; } catch (reason) { error.value = String(reason); } finally { personalBusy.value = false; } }
 async function submitCode() { personalBusy.value = true; error.value = ""; try { applyAuth(await telegramUserSubmitCode(code.value)); status.value = auth.value.hint || "Telegram 已登录"; } catch (reason) { error.value = String(reason); } finally { personalBusy.value = false; } }
@@ -58,10 +73,25 @@ async function submitPassword() { personalBusy.value = true; error.value = ""; t
 async function qrStep() {
   personalBusy.value = true; error.value = "";
   try {
-    const next = await telegramUserQrStep(Number(apiId.value), apiHash.value, await runtimeProxy()); applyAuth(next);
-    qrDataUrl.value = next.qrUrl ? await QRCode.toDataURL(next.qrUrl, { width: 208, margin: 1, errorCorrectionLevel: "M" }) : "";
+    const next = await telegramUserQrStep(Number(apiId.value), apiHash.value, await runtimeProxy()); await applyQrAuth(next);
     status.value = next.hint || "二维码已刷新";
   } catch (reason) { error.value = String(reason); } finally { personalBusy.value = false; }
+}
+async function pollQr(confirm = false) {
+  if (qrPolling.value || auth.value.status !== "waiting_qr") return;
+  qrPolling.value = true;
+  try {
+    const next = await telegramUserQrPoll(confirm); await applyQrAuth(next);
+    status.value = next.connected ? `已连接 ${next.accountLabel}` : next.hint;
+  } catch (reason) {
+    if (confirm) error.value = String(reason);
+  } finally { qrPolling.value = false; }
+}
+async function cancelAuth() {
+  personalBusy.value = true;
+  try { applyAuth(await telegramUserCancelAuth()); status.value = "已取消当前 Telegram 登录"; }
+  catch (reason) { error.value = String(reason); }
+  finally { personalBusy.value = false; }
 }
 async function logoutPersonal() { if (!confirm("退出 Telegram 个人账号并删除本机会话？已保存的来源和处理历史不会删除。")) return; personalBusy.value = true; try { applyAuth(await telegramUserLogout()); dialogs.value = []; selectedDialogs.value = new Set(); status.value = "已退出 Telegram 个人账号"; } catch (reason) { error.value = String(reason); } finally { personalBusy.value = false; } }
 async function refreshDialogs() { personalBusy.value = true; error.value = ""; try { dialogs.value = await telegramUserListDialogs(1000); status.value = `已读取 ${dialogs.value.length} 个群组、超级群和频道`; } catch (reason) { error.value = String(reason); } finally { personalBusy.value = false; } }
@@ -146,7 +176,15 @@ async function syncBot() {
   } catch (reason) { error.value = String(reason); } finally { botBusy.value = false; }
 }
 
-onMounted(async () => { await refreshSources(); try { applyAuth(await telegramUserStatus()); } catch { /* backend unavailable state is shown on first action */ } });
+onMounted(async () => {
+  await refreshSources();
+  try { await applyQrAuth(await telegramUserStatus()); } catch { /* backend unavailable state is shown on first action */ }
+  qrTimer = window.setInterval(() => {
+    qrClock.value = Date.now();
+    if (auth.value.status === "waiting_qr") void pollQr(false);
+  }, 1_200);
+});
+onBeforeUnmount(() => { if (qrTimer) window.clearInterval(qrTimer); });
 </script>
 
 <template>
@@ -157,7 +195,7 @@ onMounted(async () => { await refreshSources(); try { applyAuth(await telegramUs
     <div v-if="section === 'personal'" class="source-section">
       <div class="section-heading compact-heading"><div><h3>个人账号登录与群组/频道同步</h3><p>凭据由 Windows 当前用户加密保存；会话仅用于本软件。Clash 使用设置页的代理，混合端口会自动按 SOCKS5 连接 Telegram。</p></div><span class="state-chip" :class="auth.status">{{ auth.connected ? `已连接 · ${auth.accountLabel}` : auth.status }}</span></div>
       <div class="source-fields personal-login"><label>api_id<input v-model="apiId" inputmode="numeric" placeholder="my.telegram.org 的 api_id" /></label><label>api_hash<input v-model="apiHash" type="password" autocomplete="off" placeholder="my.telegram.org 的 api_hash" /></label><div class="action-row"><button class="quiet-button" :disabled="personalBusy" @click="connectPersonal">恢复已保存登录</button><button class="danger-button small" :disabled="personalBusy || !auth.configured" @click="logoutPersonal">退出本机登录</button></div></div>
-      <div class="auth-grid"><div class="auth-card"><strong>扫码登录</strong><small>更适合已经在手机 Telegram 登录的账号。</small><div class="action-row"><button class="primary-button" :disabled="personalBusy" @click="qrStep">生成 / 刷新二维码</button><button class="quiet-button" :disabled="personalBusy || !qrDataUrl" @click="qrStep">我已扫码，确认登录</button></div><img v-if="qrDataUrl" class="telegram-qr" :src="qrDataUrl" alt="Telegram 登录二维码" /><p v-if="auth.hint" class="field-hint">{{ auth.hint }}</p></div><div class="auth-card"><strong>手机号登录</strong><small>使用国际格式手机号；验证码通常会发到已登录 Telegram 客户端。</small><label>手机号<input v-model="phone" placeholder="+8613800000000" /></label><button class="primary-button" :disabled="personalBusy" @click="startPhone">发送验证码</button><label v-if="auth.status === 'waiting_code'">验证码<input v-model="code" inputmode="numeric" autocomplete="one-time-code" /><button class="quiet-button" :disabled="personalBusy" @click="submitCode">确认验证码</button></label><label v-if="auth.status === 'waiting_password'">两步验证密码<input v-model="password" type="password" autocomplete="current-password" /><button class="quiet-button" :disabled="personalBusy" @click="submitPassword">确认密码</button></label></div></div>
+      <div class="auth-grid"><div class="auth-card"><strong>扫码登录</strong><small>沿用 v0.4.5 的持续授权流程：二维码自动刷新，扫码后自动确认，无需反复点击。</small><div class="action-row"><button class="primary-button" :disabled="personalBusy || auth.status === 'waiting_code' || auth.status === 'waiting_password'" @click="qrStep">{{ auth.status === "waiting_qr" ? "立即刷新二维码" : "生成二维码" }}</button><button class="quiet-button" :disabled="personalBusy || !qrDataUrl" @click="pollQr(true)">我已扫码，立即确认</button><button v-if="auth.status === 'waiting_qr'" class="danger-button small" :disabled="personalBusy" @click="cancelAuth">取消</button></div><img v-if="qrDataUrl" class="telegram-qr" :src="qrDataUrl" alt="Telegram 登录二维码" /><p v-if="auth.status === 'waiting_qr'" class="field-hint">{{ qrPolling ? "正在检查扫码结果…" : `等待扫码 · 约 ${qrSeconds} 秒后自动刷新` }}</p><p v-if="auth.hint" class="field-hint">{{ auth.hint }}</p></div><div class="auth-card"><strong>手机号登录</strong><small>使用国际格式手机号；验证码通常会发到已登录 Telegram 客户端。</small><label>手机号<input v-model="phone" :disabled="auth.status === 'waiting_qr'" placeholder="+8613800000000" /></label><button class="primary-button" :disabled="authInProgress" @click="startPhone">发送验证码</button><label v-if="auth.status === 'waiting_code'">验证码<input v-model="code" inputmode="numeric" autocomplete="one-time-code" /><button class="quiet-button" :disabled="personalBusy" @click="submitCode">确认验证码</button></label><label v-if="auth.status === 'waiting_password'">两步验证密码<input v-model="password" type="password" autocomplete="current-password" /><button class="quiet-button" :disabled="personalBusy" @click="submitPassword">确认密码</button></label><button v-if="auth.status === 'waiting_code' || auth.status === 'waiting_password'" class="danger-button small" :disabled="personalBusy" @click="cancelAuth">取消当前登录</button></div></div>
       <div class="source-toolbar"><div><strong>群组与频道</strong><small>登录后刷新；仅显示群组、超级群和频道，不会把私聊混进来。</small></div><button class="primary-button" :disabled="personalBusy || !auth.connected" @click="refreshDialogs">刷新群组/频道</button><button class="quiet-button" :disabled="personalBusy || !sources.filter(item => item.kind === 'telegram_user' && item.enabled).length" @click="syncPersonal">同步已绑定个人来源</button></div>
       <div v-if="dialogs.length" class="source-picker"><div class="grid-toolbar"><label class="search-box">搜索<input v-model="dialogSearch" placeholder="名称、用户名或类型" /></label><span>已选 {{ selectedPersonalCount }} / {{ dialogs.length }}</span><button class="quiet-button small" @click="selectAllDialogs">全选可见</button><button class="quiet-button small" @click="clearDialogs">清空</button></div><div class="source-choice-list"><label v-for="item in visibleDialogs" :key="item.id" class="source-choice"><input type="checkbox" :checked="selectedDialogs.has(item.id)" @change="selectedDialogs = toggle(selectedDialogs, item.id)" /><span><strong>{{ item.name }}</strong><small>{{ item.sourceType }} · {{ item.username ? '@' + item.username : item.id }} · 最新消息 {{ item.latestMessageId || '-' }}</small></span></label></div><div class="binding-bar"><label>首次绑定<select v-model="initialMode"><option value="from_now">从现在开始（不回拉旧消息）</option><option value="recent">回拉最近消息</option></select></label><div class="tool-checks"><label v-for="tool in tools" :key="tool.id"><input type="checkbox" :checked="personalBindings.includes(tool.id)" @change="personalBindings = toggleTools(personalBindings, tool.id)" />{{ tool.label }}</label></div><button class="primary-button" :disabled="!selectedPersonalCount" @click="bindPersonal">绑定所选 {{ selectedPersonalCount }} 个来源</button></div></div>
       <div class="sync-range"><label>同步起始时间（可选）<input v-model="syncStart" type="datetime-local" /></label><label>同步结束时间（可选）<input v-model="syncEnd" type="datetime-local" /></label><small>留空为常规增量；选择范围时，仍以每个来源的已同步消息 ID 去重。</small></div>

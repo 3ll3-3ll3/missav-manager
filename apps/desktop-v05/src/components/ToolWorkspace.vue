@@ -3,10 +3,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { computed, onMounted, ref, watch } from "vue";
 import {
   createContentRun, deleteContentResults, deleteContentRun, getContentRun,
-  fetchSitePage, getAppSetting, listContentRuns, readInputFiles, renameContentRun, updateContentResult, writeTextFile,
+  fetchSitePage, getAppSetting, listContentRuns, readInputFiles, renameContentRun, setAppSetting, updateContentResult, writeTextFile,
 } from "../api";
 import { legacyAv123, legacyFetcher } from "../legacyCore";
 import { processToolInput, resultText, secondaryResultText } from "../processing";
+import { AdaptiveRateGate, type RateSnapshot } from "../rateControl";
 import type { ContentResult, ResultInput, RunSummary, ToolKind } from "../types";
 import RaindropSync from "./RaindropSync.vue";
 import Av123Account from "./Av123Account.vue";
@@ -42,6 +43,9 @@ const queryDone = ref(0);
 const queryTotal = ref(0);
 const queryStartedAt = ref(0);
 const queryNow = ref(0);
+const queryPhase = ref("");
+const queryStopRequested = ref(false);
+const queryRate = ref<RateSnapshot>({ targetRps: 0, currentRps: 0, cooldownMs: 0, rateLimitEvents: 0, congestionEvents: 0, lastSignal: "", blocked: false });
 
 const visibleResults = computed(() => {
   const needle = resultSearch.value.trim().toLowerCase();
@@ -157,16 +161,41 @@ async function removeSelected() {
 }
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-async function requestWithRetry(url: string, proxy: string) {
+function refreshRate(gate: AdaptiveRateGate) {
+  queryRate.value = gate.snapshot();
+  queryNow.value = performance.now();
+  if (queryRate.value.blocked && !queryStopRequested.value) {
+    queryStopRequested.value = true;
+    queryPhase.value = "Cloudflare 持续验证，已自动停止";
+    error.value = `${config.value.title} 当前被 Cloudflare 持续要求浏览器验证。软件已停止继续请求，避免把剩余番号全部变成错误；请更换 Clash 节点后重跑异常。`;
+  }
+}
+async function interruptibleSleep(ms: number, gate?: AdaptiveRateGate) {
+  const until = Date.now() + ms;
+  while (!queryStopRequested.value && Date.now() < until) {
+    await sleep(Math.min(250, until - Date.now()));
+    if (gate) refreshRate(gate);
+  }
+}
+async function requestWithRetry(url: string, proxy: string, gate: AdaptiveRateGate, retries = 0) {
   let last: Awaited<ReturnType<typeof fetchSitePage>> | null = null;
   let lastError = "";
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt <= retries && !queryStopRequested.value; attempt += 1) {
+    const acquired = await gate.acquire(() => queryStopRequested.value);
+    if (!acquired || queryStopRequested.value) break;
+    const started = performance.now();
     try {
       last = await fetchSitePage(url, proxy, 20_000);
-      if (![408, 425, 429].includes(last.statusCode) && last.statusCode < 500) return last;
+      gate.record(last.statusCode, last.durationMs || performance.now() - started);
+      refreshRate(gate);
+      if (![403, 408, 425, 429].includes(last.statusCode) && last.statusCode < 500) return last;
       lastError = `HTTP ${last.statusCode}`;
-    } catch (reason) { lastError = String(reason); }
-    await sleep(900 * (2 ** attempt));
+    } catch (reason) {
+      lastError = String(reason);
+      gate.record(0, performance.now() - started, lastError);
+      refreshRate(gate);
+    }
+    if (attempt < retries) await interruptibleSleep(900 * (2 ** attempt), gate);
   }
   if (last) return last;
   throw new Error(lastError || "网络请求失败");
@@ -181,32 +210,39 @@ async function persistQueryResult(item: ContentResult, patch: { status: string; 
   item.status = patch.status; item.secondaryValue = patch.url; item.tags = patch.tags || []; item.error = patch.error; item.metadata = patch.metadata || {};
 }
 
-async function queryOne(item: ContentResult, proxy: string) {
+async function queryOne(item: ContentResult, proxy: string, gate: AdaptiveRateGate) {
   const code = item.primaryValue;
   if (props.tool === "missav") {
     const url = item.secondaryValue && /missav\.(?:ai|ws)/i.test(item.secondaryValue) ? item.secondaryValue : `https://missav.ai/cn/${code.toLowerCase()}`;
     try {
-      const page = await requestWithRetry(url, proxy);
+      const page = await requestWithRetry(url, proxy, gate);
       const candidate = legacyFetcher.classifyCandidateResponse({ ...page, statusCode: page.statusCode }, code, url);
       const metadata = candidate.html ? legacyFetcher.extractMetadata(candidate.html, code, candidate.url || url) : { status: candidate.status, actresses: [], genres: [] };
       const tags = [...new Set([...metadata.actresses, ...metadata.genres])];
       await persistQueryResult(item, { status: candidate.status, url: candidate.url || url, tags, error: candidate.error || "", metadata: { actresses: metadata.actresses, genres: metadata.genres, statusCode: candidate.statusCode } });
-    } catch (reason) { await persistQueryResult(item, { status: "network_error", url, error: String(reason) }); }
-    return;
+      return { status: candidate.status, statusCode: Number(candidate.statusCode || page.statusCode) };
+    } catch (reason) {
+      await persistQueryResult(item, { status: "network_error", url, error: String(reason), metadata: { statusCode: 0 } });
+      return { status: "network_error", statusCode: 0 };
+    }
   }
   const attempts: Array<Record<string, unknown>> = [];
   const candidates = legacyAv123.buildDetailCandidateUrls(code, "cn");
   for (const url of candidates) {
+    if (queryStopRequested.value) break;
     try {
-      const page = await requestWithRetry(url, proxy);
+      const page = await requestWithRetry(url, proxy, gate);
       const classified = legacyAv123.classifyResponse({ ...page, statusCode: page.statusCode }, code, url) as { status: string; url: string; error: string; metadata?: Record<string, unknown> };
       attempts.push(classified as unknown as Record<string, unknown>);
-      if (classified.status === "succeeded") { await persistQueryResult(item, { status: "succeeded", url: classified.url || url, error: "", metadata: classified.metadata }); return; }
+      if (classified.status === "succeeded") { await persistQueryResult(item, { status: "succeeded", url: classified.url || url, error: "", metadata: classified.metadata }); return { status: "succeeded", statusCode: page.statusCode }; }
       if (classified.status === "network_error") break;
     } catch (reason) { attempts.push({ status: "network_error", url, error: String(reason) }); break; }
   }
   const network = attempts.find((attempt) => attempt.status === "network_error");
-  await persistQueryResult(item, { status: network ? "network_error" : "not_found", url: String(network?.url || ""), error: String(network?.error || ""), metadata: { attempts: attempts.length } });
+  const finalStatus = network ? "network_error" : "not_found";
+  const statusCode = Number(network?.statusCode || 0);
+  await persistQueryResult(item, { status: finalStatus, url: String(network?.url || ""), error: String(network?.error || ""), metadata: { attempts: attempts.length, statusCode } });
+  return { status: finalStatus, statusCode };
 }
 
 async function runWebsiteQuery(scope: "all" | "selected") {
@@ -214,25 +250,50 @@ async function runWebsiteQuery(scope: "all" | "selected") {
   const target = (scope === "selected" && selected.value.size ? results.value.filter((item) => selected.value.has(item.id)) : results.value)
     .filter((item) => ["pending", "network_error", "manual", "need_manual_check"].includes(item.status));
   if (!target.length) { notice.value = "当前范围没有待查询或可重试记录。"; return; }
-  const settings = await getAppSetting<{ proxyEnabled?: boolean; proxyUrl?: string; missavConcurrency?: number; missavRps?: number; av123Concurrency?: number; av123Rps?: number }>("runtime") || {};
+  const settings = await getAppSetting<{ proxyEnabled?: boolean; proxyUrl?: string; missavConcurrency?: number; missavRps?: number; missavLearnedRps?: number; av123Concurrency?: number; av123Rps?: number; av123LearnedRps?: number }>("runtime") || {};
   const concurrency = Math.max(1, Math.min(32, props.tool === "missav" ? settings.missavConcurrency || 16 : settings.av123Concurrency || 16));
   const rps = Math.max(.2, props.tool === "missav" ? settings.missavRps || 12 : settings.av123Rps || 4);
+  const site = props.tool === "missav" ? "missav" : "av123";
+  const learnedRps = site === "missav" ? settings.missavLearnedRps : settings.av123LearnedRps;
+  const gate = new AdaptiveRateGate(site, rps, learnedRps);
   const proxy = settings.proxyEnabled ? settings.proxyUrl || "" : "";
-  queryRunning.value = true; queryDone.value = 0; queryTotal.value = target.length; queryStartedAt.value = performance.now(); queryNow.value = queryStartedAt.value; error.value = "";
-  let cursor = 0; let nextStart = performance.now();
-  const take = async () => {
-    while (cursor < target.length) {
-      const index = cursor++;
-      const wait = Math.max(0, nextStart - performance.now());
-      nextStart = Math.max(nextStart, performance.now()) + 1000 / rps;
-      if (wait) await sleep(wait);
-      await queryOne(target[index], proxy);
-      queryDone.value += 1; queryNow.value = performance.now();
-    }
+  queryRunning.value = true; queryStopRequested.value = false; queryDone.value = 0; queryTotal.value = target.length; queryStartedAt.value = performance.now(); queryNow.value = queryStartedAt.value; queryPhase.value = "主轮"; error.value = "";
+  refreshRate(gate);
+  const processQueue = async (items: ContentResult[], workers: number, countProgress: boolean) => {
+    let cursor = 0;
+    const take = async () => {
+      while (!queryStopRequested.value && cursor < items.length) {
+        const index = cursor++;
+        await queryOne(items[index], proxy, gate);
+        if (countProgress) queryDone.value += 1;
+        queryNow.value = performance.now();
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(workers, items.length) }, take));
   };
-  try { await Promise.all(Array.from({ length: Math.min(concurrency, target.length) }, take)); notice.value = `${config.value.title} 查询完成：${queryDone.value}/${queryTotal.value}。网络异常可再次按当前选择重跑。`; }
+  try {
+    await processQueue(target, concurrency, true);
+    const firstPass403 = target.filter((item) => item.status === "network_error" && Number(item.metadata?.statusCode || 0) === 403);
+    if (!queryStopRequested.value && firstPass403.length) {
+      queryPhase.value = `403 冷却收尾 · ${firstPass403.length} 条`;
+      await interruptibleSleep(Math.max(5_000, gate.snapshot().cooldownMs), gate);
+      if (!queryStopRequested.value) await processQueue(firstPass403, Math.max(1, Math.ceil(concurrency / 2)), false);
+    }
+    const remaining = target.filter((item) => item.status === "network_error").length;
+    const recovered = firstPass403.filter((item) => item.status !== "network_error").length;
+    const learnedKey = site === "missav" ? "missavLearnedRps" : "av123LearnedRps";
+    await setAppSetting("runtime", { ...settings, [learnedKey]: gate.learnedRate() });
+    notice.value = queryStopRequested.value
+      ? `${config.value.title} 已安全停止：完成 ${queryDone.value}/${queryTotal.value}。`
+      : `${config.value.title} 查询完成：${queryDone.value}/${queryTotal.value}；403 收尾恢复 ${recovered} 条，仍有网络异常 ${remaining} 条。`;
+  }
   catch (reason) { error.value = String(reason); }
-  finally { queryRunning.value = false; }
+  finally { queryRunning.value = false; queryPhase.value = ""; }
+}
+
+function stopWebsiteQuery() {
+  queryStopRequested.value = true;
+  queryPhase.value = "正在安全停止";
 }
 
 function currentResultInputs(): ResultInput[] {
@@ -324,11 +385,17 @@ onMounted(refreshHistory);
       <button class="quiet-button small" @click="exportResults('csv')">CSV</button>
       <template v-if="tool === 'missav' || tool === 'av123'">
         <button class="primary-button small" :disabled="queryRunning" @click="runWebsiteQuery('all')">{{ queryRunning ? `${queryDone}/${queryTotal}` : `查询 ${config.title}` }}</button>
-        <button class="quiet-button small" :disabled="queryRunning || !selected.size" @click="runWebsiteQuery('selected')">重跑选中异常</button>
+        <button v-if="queryRunning" class="danger-button small" @click="stopWebsiteQuery">停止查询</button>
+        <button class="quiet-button small" :disabled="queryRunning" @click="runWebsiteQuery('selected')">{{ selected.size ? `重跑选中异常 (${selected.size})` : "重跑全部异常" }}</button>
       </template>
     </div>
     <div v-if="queryRunning" class="query-progress"><span :style="{ width: `${queryTotal ? queryDone / queryTotal * 100 : 0}%` }"></span></div>
-    <div v-if="queryRunning" class="status-line">真实完成速度 {{ queryMetrics.rate.toFixed(2) }} 条/秒 · 预计剩余 {{ queryMetrics.eta }} 秒 · {{ queryDone }}/{{ queryTotal }}</div>
+    <div v-if="queryRunning" class="status-line">
+      {{ queryPhase }} · 真实完成 {{ queryMetrics.rate.toFixed(2) }} 条/秒 · 调度 {{ queryRate.currentRps.toFixed(2) }}/{{ queryRate.targetRps.toFixed(2) }} 请求/秒
+      <template v-if="queryRate.cooldownMs > 0"> · 防护冷却 {{ Math.ceil(queryRate.cooldownMs / 1000) }} 秒</template>
+      <template v-if="queryRate.congestionEvents || queryRate.rateLimitEvents"> · 退速 {{ queryRate.congestionEvents + queryRate.rateLimitEvents }} 次（{{ queryRate.lastSignal }}）</template>
+      · 预计剩余 {{ queryMetrics.eta }} 秒 · {{ queryDone }}/{{ queryTotal }}
+    </div>
     <details class="plain-output"><summary>纯文本输出（一行一个，可直接全选复制）</summary><div :class="['plain-output-grid', { two: tool === 'twitter' }]"><label>{{ config.primary }}<textarea :value="primaryOutput" readonly rows="8"></textarea></label><label v-if="tool === 'twitter'">{{ config.secondary }}<textarea :value="secondaryOutput" readonly rows="8"></textarea></label></div></details>
     <div class="editable-table-wrap">
       <table class="editable-table">

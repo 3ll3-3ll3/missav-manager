@@ -146,6 +146,12 @@ export function telegramUserSubmitPassword(password: string): Promise<TelegramAu
 export function telegramUserQrStep(apiId: number, apiHash: string, proxyUrl = ""): Promise<TelegramAuthState> {
   return invoke("telegram_user_qr_step", { apiId, apiHash, proxyUrl });
 }
+export function telegramUserQrPoll(confirm = false): Promise<TelegramAuthState> {
+  return invoke("telegram_user_qr_poll", { confirm });
+}
+export function telegramUserCancelAuth(): Promise<TelegramAuthState> {
+  return invoke("telegram_user_cancel_auth");
+}
 export function telegramUserListDialogs(limit = 1000): Promise<TelegramDialog[]> { return invoke("telegram_user_list_dialogs", { limit }); }
 export function telegramUserSyncMessages(input: { externalId: string; checkpoint: number; limit: number; start: string; end: string }): Promise<TelegramSyncResult> {
   return invoke("telegram_user_sync_messages", { input });

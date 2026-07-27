@@ -1,6 +1,6 @@
 [package]
 name = "tg-content-toolbox-v05"
-version = "0.5.1"
+version = "0.5.2"
 description = "TG Content Toolbox v0.5 for Windows"
 authors = ["WJL"]
 edition = "2021"
