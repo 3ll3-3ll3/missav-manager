@@ -145,7 +145,8 @@ var require_parser = __commonJS({
       "RJ",
       "NO",
       "PRO",
-      "YOUPORN"
+      "YOUPORN",
+      "TV"
     ]);
     var DATE_WORD_PREFIXES = /* @__PURE__ */ new Set([
       "JAN",

@@ -55,8 +55,8 @@ test('accepts the MissAV ws mirror and ignores Telegram media dimensions and fil
   assert.deepEqual(parser.parseCodeList('真正的独立番号 KB-123'), ['KB-123']);
 });
 
-test('rejects common product, course and website version tokens', () => {
-  assert.deepEqual(parser.parseCodeList('PDF24 Office 365 Java 11 IEOR 6711 Fall 2013 RJ01393321 PRO-18 YOUPORN-51'), []);
+test('rejects common product, course, media and website version tokens', () => {
+  assert.deepEqual(parser.parseCodeList('PDF24 Office 365 Java 11 IEOR 6711 Fall 2013 RJ01393321 PRO-18 YOUPORN-51 TV-20 TV-1920'), []);
   assert.deepEqual(parser.parseCodeList('CHANNEL\n23:15\nABF\n369'), []);
 });
 

@@ -1,0 +1,1323 @@
+(async () => {
+  const CODE_TEXT = `
+
+`.trim();
+
+  const REFERENCE_ACTRESS_TAGS = [];
+  const RAINDROP_EXPORT_BLACKLIST_TAGS = [];
+
+  const DELAY_MS = 900;
+  const MAX_RETRY = 1;
+
+  const NEED_CHECK_TAG = '需要查找';
+  const UNKNOWN_ACTRESS_TAG = '#未知女优';
+  const REFERENCE_HIT_FOLDER_NAME = '参考女优Tag命中';
+  const NEED_CHECK_FOLDER_NAME = '需要查找';
+  const OTHER_FOLDER_NAME = '其他';
+  const REFERENCE_ACTRESS_TAG_SET = new Set(
+    REFERENCE_ACTRESS_TAGS.map(normalizeCollectionTag).filter(Boolean)
+  );
+  const RAINDROP_EXPORT_BLACKLIST_TAG_SET = new Set(
+    RAINDROP_EXPORT_BLACKLIST_TAGS.map(normalizeCollectionTag).filter(Boolean)
+  );
+
+  const SKIP_ALREADY_EXISTS = true;
+  const SKIP_DUPLICATE_IN_INPUT = true;
+
+  window.__STOP_MISSAV_TAG_FETCH = false;
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function extractFC2Number(s) {
+    const text = String(s || '').trim().toUpperCase();
+
+    const m1 = text.match(/^FC2[-_\s]*PPV[-_\s]*(\d+)$/i);
+    if (m1) return m1[1];
+
+    const m2 = text.match(/^FC2[-_\s]*(\d+)$/i);
+    if (m2) return m2[1];
+
+    const m3 = text.match(/FC2[-_\s]*PPV[-_\s]*(\d+)/i);
+    if (m3) return m3[1];
+
+    const m4 = text.match(/FC2[-_\s]*(\d+)/i);
+    if (m4) return m4[1];
+
+    return '';
+  }
+
+  function normalizeCode(s) {
+    s = String(s || '').trim().toUpperCase().replace(/\s+/g, '');
+
+    if (/^FC2/i.test(s)) {
+      const n = extractFC2Number(s);
+      if (n) return `FC2-PPV-${n}`;
+    }
+
+    const m = s.match(/^([A-Z]{2,12})[-_]?(\d{2,8})$/);
+    if (m) return `${m[1]}-${m[2]}`;
+
+    return s;
+  }
+
+  function codeComparableKey(code) {
+    const c = normalizeCode(code);
+
+    if (c.startsWith('FC2-PPV-')) {
+      const n = extractFC2Number(c);
+      return `FC2PPV${n}`;
+    }
+
+    return c.replace(/-/g, '');
+  }
+
+  function codeVariants(code) {
+    const c = normalizeCode(code);
+    const variants = new Set([c, c.replace(/-/g, '')]);
+
+    if (c.startsWith('FC2-PPV-')) {
+      const n = extractFC2Number(c);
+      variants.add(`FC2-${n}`);
+      variants.add(`FC2PPV${n}`);
+      variants.add(`FC2PPV-${n}`);
+      variants.add(`FC2-PPV-${n}`);
+    }
+
+    return [...variants].map(x => x.toUpperCase());
+  }
+
+  function candidateUrls(code) {
+    const c = normalizeCode(code);
+
+    if (c.startsWith('FC2-PPV-')) {
+      const n = extractFC2Number(c);
+
+      return [
+        `https://missav.ai/cn/fc2-ppv-${n}`,
+        `https://missav.ai/cn/fc2-ppv-${n}-chinese-subtitle`,
+        `https://missav.ai/cn/fc2-ppv-${n}-uncensored-leak`,
+        `https://missav.ai/dm96/cn/FC2-${n}`,
+        `https://missav.ai/dm96/cn/FC2-PPV-${n}`
+      ];
+    }
+
+    const slug = c.toLowerCase();
+
+    return [
+      `https://missav.ai/cn/${slug}`,
+      `https://missav.ai/cn/${slug}-chinese-subtitle`,
+      `https://missav.ai/cn/${slug}-uncensored-leak`,
+      `https://missav.ai/dm96/cn/${c}`
+    ];
+  }
+
+  function cleanText(s) {
+    return String(s ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function cleanTag(s) {
+    return cleanText(s)
+      .replace(/[#,;"'<>?:|\\/[\]{}]/g, '')
+      .replace(/\s+/g, '_')
+      .slice(0, 120);
+  }
+
+  function cleanRaindropTag(s) {
+    if (s === UNKNOWN_ACTRESS_TAG) return UNKNOWN_ACTRESS_TAG;
+    return cleanTag(s);
+  }
+
+  function normalizeCollectionTag(tag) {
+    const t = cleanText(tag);
+    if (t === '未知女优' || t === '#未知女优') return UNKNOWN_ACTRESS_TAG;
+    return t;
+  }
+
+  function isBadActressName(name) {
+    const s = cleanText(name);
+
+    return (
+      !s ||
+      /女优排行|女優排行|actress ranking|ranking/i.test(s) ||
+      /\bJAN\s*20\d{2}\b|\bFEB\s*20\d{2}\b|\bMAR\s*20\d{2}\b|\bAPR\s*20\d{2}\b|\bMAY\s*20\d{2}\b|\bJUN\s*20\d{2}\b|\bJUL\s*20\d{2}\b|\bAUG\s*20\d{2}\b|\bSEP\s*20\d{2}\b|\bOCT\s*20\d{2}\b|\bNOV\s*20\d{2}\b|\bDEC\s*20\d{2}\b/i.test(s) ||
+      /今日热门|本週热门|本周热门|本月热门|最近更新|新作上市|中文字幕|无码流出|更多|收藏|登录|注册/i.test(s) ||
+      /MissAV|DM\d+|^\d+$/.test(s)
+    );
+  }
+
+  function isBadTypeTag(name) {
+    const s = cleanText(name);
+    const tag = cleanRaindropTag(s);
+
+    return (
+      !s ||
+      !tag ||
+
+      /女优|女優|男优|男優|系列|发行商|發行商|导演|導演|标签|標籤|片商|收藏|登录|注册|更多|首页|首頁/i.test(s) ||
+
+      /官方.*电报|官方.*電報|电报群|電報群|Telegram|TG群|群/i.test(s) ||
+      /无广告|無廣告|免费漫画|免費漫畫|漫画|漫畫/i.test(s) ||
+      /AI[_\s-]*Jerk|Jerk[_\s-]*Off/i.test(s) ||
+      /亚博|亞博|赌场|賭場|世界杯|博彩|投注/i.test(s) ||
+      /VPN|性价王|性價王/i.test(s) ||
+      /色色主播|主播|直播|约炮|約炮|交友/i.test(s) ||
+
+      /下载|下載|磁力|种子|種子|网盘|網盤|云盘|雲盤|torrent|magnet/i.test(s) ||
+
+      /MissAV|DM\d+|^\d+$/.test(s) ||
+
+      /_/.test(tag) ||
+
+      /[a-z]{2,}\d{2,}/i.test(s) ||
+
+      /https?:\/\//i.test(s) ||
+      /\.[a-z]{2,}/i.test(s)
+    );
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function csvCell(s) {
+    return `"${String(s ?? '').replace(/"/g, '""')}"`;
+  }
+
+  function timePrefixToMinute() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+
+    return `${y}${m}${day}_${hh}${mm}`;
+  }
+
+  function uniqueCodesByComparable(codes) {
+    const seen = new Set();
+    const out = [];
+
+    for (const code of codes.map(normalizeCode).filter(Boolean)) {
+      const key = codeComparableKey(code);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(code);
+    }
+
+    return out;
+  }
+
+  function rowTags(row) {
+    return String(row?.tags || '')
+      .split(',')
+      .map(x => normalizeCollectionTag(x))
+      .filter(Boolean);
+  }
+
+  function referenceMatchesForRow(row) {
+    return [...new Set(rowTags(row).filter(tag => REFERENCE_ACTRESS_TAG_SET.has(tag)))];
+  }
+
+  function exportBlacklistMatchesForRow(row) {
+    return [...new Set(rowTags(row).filter(tag => RAINDROP_EXPORT_BLACKLIST_TAG_SET.has(tag)))];
+  }
+
+  function needsLookup(row) {
+    return row.include_in_import === true && rowTags(row).includes(NEED_CHECK_TAG);
+  }
+
+  function targetFolderForRow(row) {
+    if (!row.include_in_import) return '';
+    if (needsLookup(row)) return NEED_CHECK_FOLDER_NAME;
+    if (referenceMatchesForRow(row).length) return REFERENCE_HIT_FOLDER_NAME;
+    return OTHER_FOLDER_NAME;
+  }
+
+  function sortCollectionRowsForExport(rows) {
+    return [...rows].sort((a, b) => {
+      const at = String(a.tag || '');
+      const bt = String(b.tag || '');
+
+      const ak = at.startsWith('#') ? `000_${at}` : `100_${at}`;
+      const bk = bt.startsWith('#') ? `000_${bt}` : `100_${bt}`;
+
+      return ak.localeCompare(bk, 'zh-Hans-CN', {
+        numeric: true,
+        sensitivity: 'base'
+      });
+    });
+  }
+
+  function chooseFileText(label, accept = '*') {
+    return new Promise((resolve, reject) => {
+      console.log('请选择文件：' + label);
+
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = accept;
+
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) return reject(new Error('没有选择文件：' + label));
+
+        const reader = new FileReader();
+
+        reader.onload = () => resolve({
+          text: String(reader.result || ''),
+          name: file.name
+        });
+
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file, 'utf-8');
+      };
+
+      input.click();
+    });
+  }
+
+  async function chooseOutputDirectoryByClick() {
+    const runPrefix = timePrefixToMinute();
+
+    if (!window.showDirectoryPicker) {
+      console.warn('当前浏览器不支持选择文件夹保存，将改为普通下载。建议使用 Chrome。');
+
+      return {
+        runPrefix,
+        baseDirHandle: null,
+        runDirHandle: null,
+        folderName: ''
+      };
+    }
+
+    console.log('请选择基础输出文件夹：E:\\Desktop\\王家乐\\mis\\女优tag');
+
+    const baseDirHandle = await window.showDirectoryPicker({
+      mode: 'readwrite'
+    });
+
+    const folderName = `${runPrefix}_missav_import`;
+
+    const runDirHandle = await baseDirHandle.getDirectoryHandle(folderName, {
+      create: true
+    });
+
+    console.log('本次输出文件夹：', folderName);
+
+    return {
+      runPrefix,
+      baseDirHandle,
+      runDirHandle,
+      folderName
+    };
+  }
+
+  async function saveTextFile(filename, text, type = 'text/plain;charset=utf-8', outputDirInfo = null) {
+    const dirHandle = outputDirInfo?.runDirHandle || null;
+
+    if (dirHandle) {
+      const fileHandle = await dirHandle.getFileHandle(filename, {
+        create: true
+      });
+
+      const writable = await fileHandle.createWritable();
+      const blob = new Blob([text], { type });
+
+      await writable.write(blob);
+      await writable.close();
+
+      console.log('已保存到本次输出文件夹：', filename);
+      return;
+    }
+
+    const blob = new Blob([text], { type });
+    const a = document.createElement('a');
+
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    URL.revokeObjectURL(a.href);
+
+    console.log('已下载：', filename);
+  }
+
+  function prepareRunByUserClick() {
+    return new Promise(resolve => {
+      const state = {
+        oldCollectionFile: null,
+        outputDirInfo: null
+      };
+
+      const oldPanel = document.querySelector('#missav-import-panel');
+      if (oldPanel) oldPanel.remove();
+
+      const panel = document.createElement('div');
+      panel.id = 'missav-import-panel';
+      panel.style.cssText = `
+        position: fixed;
+        z-index: 999999;
+        top: 20px;
+        right: 20px;
+        width: 390px;
+        padding: 14px;
+        background: #111;
+        color: #fff;
+        border: 1px solid #555;
+        border-radius: 10px;
+        font-size: 14px;
+        line-height: 1.6;
+        box-shadow: 0 4px 20px rgba(0,0,0,.35);
+        font-family: Arial, "Microsoft YaHei", sans-serif;
+      `;
+
+      panel.innerHTML = `
+        <div style="font-weight:bold;margin-bottom:8px;font-size:16px;">MissAV 导入脚本启动面板</div>
+        <div id="missav-status" style="white-space:normal;color:#ddd;">请按顺序操作</div>
+        <button id="missav-pick-csv" style="margin-top:8px;width:100%;padding:8px;cursor:pointer;">1. 选择旧女优 tag 合集 CSV</button>
+        <button id="missav-pick-dir" style="margin-top:8px;width:100%;padding:8px;cursor:pointer;">2. 选择基础输出文件夹</button>
+        <button id="missav-start" style="margin-top:8px;width:100%;padding:8px;font-weight:bold;cursor:pointer;">3. 开始处理</button>
+        <button id="missav-close" style="margin-top:8px;width:100%;padding:6px;cursor:pointer;">关闭面板</button>
+      `;
+
+      document.body.appendChild(panel);
+
+      const status = panel.querySelector('#missav-status');
+
+      panel.querySelector('#missav-pick-csv').onclick = async () => {
+        try {
+          state.oldCollectionFile = await chooseFileText(
+            '完整女优 tag 番号统计 CSV',
+            '.csv,text/csv,text/plain'
+          );
+
+          status.innerHTML = `已选择 tag 合集：<br><b>${escapeHtml(state.oldCollectionFile.name)}</b>`;
+          console.log('已选择旧 tag 合集：', state.oldCollectionFile.name);
+        } catch (e) {
+          console.error(e);
+          status.textContent = '选择 tag 合集失败';
+        }
+      };
+
+      panel.querySelector('#missav-pick-dir').onclick = async () => {
+        try {
+          state.outputDirInfo = await chooseOutputDirectoryByClick();
+
+          status.innerHTML = `已选择输出文件夹：<br><b>${escapeHtml(state.outputDirInfo?.folderName || '普通下载模式')}</b>`;
+          console.log('已选择输出目录信息：', state.outputDirInfo);
+        } catch (e) {
+          console.error(e);
+          status.textContent = '选择输出文件夹失败';
+        }
+      };
+
+      panel.querySelector('#missav-start').onclick = () => {
+        if (!state.oldCollectionFile) {
+          alert('请先选择旧女优 tag 合集 CSV');
+          return;
+        }
+
+        if (!state.outputDirInfo) {
+          alert('请先选择输出文件夹');
+          return;
+        }
+
+        panel.remove();
+        resolve(state);
+      };
+
+      panel.querySelector('#missav-close').onclick = () => {
+        panel.remove();
+      };
+    });
+  }
+
+  function parseCSVLine(line) {
+    const result = [];
+    let cur = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      const next = line[i + 1];
+
+      if (ch === '"' && inQuotes && next === '"') {
+        cur += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        result.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+
+    result.push(cur);
+    return result;
+  }
+
+  function mergeCollectionRows(rows) {
+    const map = new Map();
+
+    for (const row of rows) {
+      const tag = normalizeCollectionTag(row.tag);
+      if (!tag || tag === NEED_CHECK_TAG) continue;
+
+      if (!map.has(tag)) {
+        map.set(tag, {
+          tag,
+          codes: []
+        });
+      }
+
+      const item = map.get(tag);
+      item.codes.push(...(row.codes || []));
+      item.codes = uniqueCodesByComparable(item.codes);
+    }
+
+    return [...map.values()].map(r => ({
+      tag: r.tag,
+      count: r.codes.length,
+      codes: r.codes
+    }));
+  }
+
+  function parseActressCollectionCSV(text) {
+    const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(x => x.trim());
+    if (!lines.length) throw new Error('tag 合集 CSV 是空的');
+
+    const header = parseCSVLine(lines[0]).map(x => x.trim());
+    const rows = [];
+
+    const isLegacyFormat =
+      header.includes('tag') &&
+      header.includes('count') &&
+      header.includes('sample_bookmarks');
+
+    if (isLegacyFormat) {
+      const tagIdx = header.indexOf('tag');
+      const countIdx = header.indexOf('count');
+      const sampleIdx = header.indexOf('sample_bookmarks');
+
+      for (const line of lines.slice(1)) {
+        const cols = parseCSVLine(line);
+        const tag = normalizeCollectionTag(cols[tagIdx] || '');
+        if (!tag || tag === NEED_CHECK_TAG) continue;
+
+        const sampleText = cols[sampleIdx] || '';
+        const codes = sampleText
+          .split(/\s*\|\s*/)
+          .map(normalizeCode)
+          .filter(Boolean);
+
+        rows.push({
+          tag,
+          count: Number(cols[countIdx] || 0) || codes.length,
+          codes: uniqueCodesByComparable(codes)
+        });
+      }
+
+      return mergeCollectionRows(rows);
+    }
+
+    for (const line of lines.slice(1)) {
+      const cols = parseCSVLine(line);
+      const tag = normalizeCollectionTag(cols[0] || '');
+      if (!tag || tag === NEED_CHECK_TAG) continue;
+
+      const codes = cols
+        .slice(2)
+        .flatMap(cell => String(cell || '').split(/\s*\|\s*/))
+        .map(normalizeCode)
+        .filter(Boolean);
+
+      rows.push({
+        tag,
+        count: Number(cols[1] || 0) || codes.length,
+        codes: uniqueCodesByComparable(codes)
+      });
+    }
+
+    return mergeCollectionRows(rows);
+  }
+
+  function buildExistingCodeMap(collectionRows) {
+    const map = new Map();
+
+    for (const row of collectionRows) {
+      for (const code of row.codes || []) {
+        const key = codeComparableKey(code);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(row.tag);
+      }
+    }
+
+    return map;
+  }
+
+  function normalizeForCompare(s) {
+    return cleanTag(s)
+      .replace(/[()（）]/g, '')
+      .replace(/_/g, '')
+      .toLowerCase();
+  }
+
+  function pickTagForName(name, collectionRows) {
+    const cleaned = cleanRaindropTag(name);
+    if (!cleaned) return '';
+
+    const n = normalizeForCompare(cleaned);
+
+    for (const row of collectionRows) {
+      const tag = row.tag || '';
+      const parts = tag.split('_').map(x => x.trim()).filter(Boolean);
+
+      if (tag === cleaned) return tag;
+      if (parts.includes(cleaned)) return tag;
+
+      const tagN = normalizeForCompare(tag);
+      if (tagN.includes(n)) return tag;
+    }
+
+    return cleaned;
+  }
+
+  function mergeNameVariants(names) {
+    let arr = [...new Set(names.map(cleanText).filter(x => x && !isBadActressName(x)))];
+
+    arr = arr.filter(name => {
+      const n = normalizeForCompare(name);
+
+      return !arr.some(other => {
+        if (other === name) return false;
+        const o = normalizeForCompare(other);
+
+        return other.length > name.length && o.includes(n);
+      });
+    });
+
+    return arr;
+  }
+
+  function extractActressesFromHTML(pageHtml) {
+    const doc = new DOMParser().parseFromString(pageHtml, 'text/html');
+    const candidates = [];
+
+    [...doc.querySelectorAll('a[href]')].forEach(a => {
+      const href = a.getAttribute('href') || '';
+      const text = cleanText(a.textContent || a.innerText || '');
+
+      if (!/\/actresses\//i.test(href)) return;
+      if (/\/actors\//i.test(href)) return;
+      if (isBadActressName(text)) return;
+
+      candidates.push({
+        raw: text,
+        tagName: cleanRaindropTag(text),
+        href
+      });
+    });
+
+    const seen = new Set();
+
+    return candidates.filter(x => {
+      const key = `${x.tagName}|${x.href}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function extractTypeTagsFromHTML(pageHtml) {
+    const doc = new DOMParser().parseFromString(pageHtml, 'text/html');
+    const result = [];
+
+    function addTypeTag(text) {
+      const raw = cleanText(text);
+      if (!raw || isBadTypeTag(raw)) return;
+
+      const tag = cleanRaindropTag(raw);
+      if (tag && !result.includes(tag)) {
+        result.push(tag);
+      }
+    }
+
+    function isTypeLabelText(text) {
+      const s = cleanText(text).replace(/\s/g, '');
+      return /^(类型|類型|类别|類別)[:：]?$/.test(s);
+    }
+
+    function collectGenreAnchorsFrom(container) {
+      if (!container) return [];
+
+      return [...container.querySelectorAll('a[href]')].filter(a => {
+        const href = a.getAttribute('href') || '';
+        const text = cleanText(a.textContent || a.innerText || '');
+
+        if (!text || isBadTypeTag(text)) return false;
+
+        return /\/genres?\//i.test(href);
+      });
+    }
+
+    const allNodes = [...doc.querySelectorAll('div, span, p, li, dt, dd')];
+
+    for (const node of allNodes) {
+      const ownText = cleanText(node.childNodes.length === 1 ? node.textContent : '');
+
+      if (!isTypeLabelText(ownText)) continue;
+
+      let cur = node;
+
+      for (let depth = 0; depth < 5 && cur; depth++) {
+        const anchors = collectGenreAnchorsFrom(cur.parentElement);
+
+        for (const a of anchors) {
+          addTypeTag(a.textContent || '');
+        }
+
+        if (result.length) break;
+        cur = cur.parentElement;
+      }
+
+      if (result.length) break;
+    }
+
+    if (!result.length) {
+      const blocks = [...doc.querySelectorAll('div, p, li, section')];
+
+      for (const block of blocks) {
+        const text = cleanText(block.textContent || '');
+
+        if (!text || text.length > 180) continue;
+        if (!/(类型|類型|类别|類別)\s*[：:]/i.test(text)) continue;
+
+        const anchors = collectGenreAnchorsFrom(block);
+
+        for (const a of anchors) {
+          addTypeTag(a.textContent || '');
+        }
+
+        if (result.length) break;
+      }
+    }
+
+    return [...new Set(result)];
+  }
+
+  function pageLooksPlayable(pageHtml) {
+    return /<video|m3u8|plyr|player|iframe|播放|play/i.test(pageHtml);
+  }
+
+  function pageContainsCode(pageHtml, code) {
+    const compact = pageHtml.toUpperCase().replace(/[_\s]/g, '-');
+    const compactLoose = compact.replace(/-/g, '');
+
+    return codeVariants(code).some(v => {
+      const vv = v.toUpperCase();
+      return compact.includes(vv) || compactLoose.includes(vv.replace(/-/g, ''));
+    });
+  }
+
+  async function fetchText(url) {
+    let lastErr;
+
+    for (let i = 0; i <= MAX_RETRY; i++) {
+      try {
+        const res = await fetch(url, { credentials: 'include' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.text();
+      } catch (e) {
+        lastErr = e;
+        await sleep(1000);
+      }
+    }
+
+    throw lastErr;
+  }
+
+  async function findWorkingPage(code) {
+    const urls = candidateUrls(code);
+
+    for (const url of urls) {
+      try {
+        const html = await fetchText(url);
+        const hasCode = pageContainsCode(html, code);
+        const playable = pageLooksPlayable(html);
+        const actresses = extractActressesFromHTML(html);
+        const typeTags = extractTypeTagsFromHTML(html);
+
+        if (hasCode && actresses.length) {
+          return {
+            url,
+            status: playable ? 'ok' : 'page_ok_play_unknown',
+            notes: playable ? 'page_and_player_structure_found' : 'page_found_but_player_uncertain',
+            actresses,
+            typeTags
+          };
+        }
+
+        if (hasCode) {
+          return {
+            url,
+            status: playable ? 'no_actress_found' : 'need_manual_check',
+            notes: playable ? 'page_found_but_no_actress_field' : 'page_found_but_no_actress_and_player_uncertain',
+            actresses,
+            typeTags
+          };
+        }
+      } catch (e) {}
+
+      await sleep(250);
+    }
+
+    return {
+      url: candidateUrls(code)[0],
+      status: 'not_found',
+      notes: 'all_candidate_urls_failed_or_not_matching_code',
+      actresses: [],
+      typeTags: []
+    };
+  }
+
+  function addProblemTags(row) {
+    const problemStatuses = new Set([
+      'not_found',
+      'need_manual_check'
+    ]);
+
+    const tags = row.tags
+      ? row.tags.split(',').map(x => x.trim()).filter(Boolean)
+      : [];
+
+    const actressTags = row.actress_tags
+      ? row.actress_tags.split(',').map(x => x.trim()).filter(Boolean)
+      : [];
+
+    const hasRealActress = actressTags.some(t => t && t !== UNKNOWN_ACTRESS_TAG);
+
+    const isProblem = problemStatuses.has(row.status);
+    const isUnknownActress = !hasRealActress;
+
+    if (isUnknownActress && !tags.includes(UNKNOWN_ACTRESS_TAG)) {
+      tags.unshift(UNKNOWN_ACTRESS_TAG);
+    }
+
+    if (isProblem && !tags.includes(NEED_CHECK_TAG)) {
+      tags.push(NEED_CHECK_TAG);
+    }
+
+    const finalActressTags = isUnknownActress
+      ? [UNKNOWN_ACTRESS_TAG]
+      : actressTags;
+
+    const classifiedRow = {
+      ...row,
+      tags: [...new Set(tags)].join(','),
+      actress_tags: finalActressTags.join(','),
+      include_in_import: true
+    };
+    const referenceMatches = referenceMatchesForRow(classifiedRow);
+    const exportBlacklistMatches = exportBlacklistMatchesForRow(classifiedRow);
+    const importableRow = {
+      ...classifiedRow,
+      include_in_import: exportBlacklistMatches.length === 0
+    };
+    const targetFolder = targetFolderForRow(importableRow);
+
+    const extraNotes = [];
+
+    if (isProblem) extraNotes.push(`added_${NEED_CHECK_TAG}_tag`);
+    if (isUnknownActress) extraNotes.push(`added_${UNKNOWN_ACTRESS_TAG}_tag`);
+    if (exportBlacklistMatches.length) extraNotes.push('excluded_by_raindrop_export_blacklist');
+    else extraNotes.push(`placed_in_${targetFolder}`);
+
+    return {
+      ...importableRow,
+      matched_tag: finalActressTags.join(','),
+      needs_lookup: needsLookup(classifiedRow),
+      reference_matches: referenceMatches.join(','),
+      export_blacklist_matches: exportBlacklistMatches.join(','),
+      excluded_from_raindrop: exportBlacklistMatches.length > 0,
+      target_folder: targetFolder,
+      notes: extraNotes.length
+        ? `${row.notes}; ${extraNotes.join('; ')}`
+        : row.notes
+    };
+  }
+
+  function updateActressCollectionWithRows(collectionRows, processedRows) {
+    const rows = collectionRows.map(r => ({
+      tag: normalizeCollectionTag(r.tag),
+      codes: uniqueCodesByComparable(r.codes || [])
+    })).filter(r => r.tag && r.tag !== NEED_CHECK_TAG);
+
+    const index = new Map(rows.map((r, i) => [r.tag, i]));
+
+    const addedNewActressRows = [];
+    const updatedActressRows = [];
+
+    for (const row of processedRows) {
+      if (!row.include_in_import) continue;
+
+      const code = normalizeCode(row.code);
+      const actressTags = row.actress_tags
+        ? row.actress_tags.split(',').map(x => normalizeCollectionTag(x.trim())).filter(Boolean)
+        : [];
+
+      for (const tag of actressTags) {
+        if (!tag || tag === NEED_CHECK_TAG) continue;
+
+        if (!index.has(tag)) {
+          rows.push({
+            tag,
+            codes: [code]
+          });
+          index.set(tag, rows.length - 1);
+          addedNewActressRows.push(tag);
+        } else {
+          const item = rows[index.get(tag)];
+          const keys = item.codes.map(codeComparableKey);
+
+          if (!keys.includes(codeComparableKey(code))) {
+            item.codes.push(code);
+            updatedActressRows.push(tag);
+          }
+        }
+      }
+    }
+
+    return {
+      rows: mergeCollectionRows(rows).map(r => {
+        const codes = uniqueCodesByComparable(r.codes || []);
+
+        return {
+          tag: r.tag,
+          count: codes.length,
+          codes
+        };
+      }),
+      addedNewActressRows: [...new Set(addedNewActressRows)],
+      updatedActressRows: [...new Set(updatedActressRows)]
+    };
+  }
+
+  async function exportFiles({
+    finalRows,
+    reportRows,
+    updatedCollectionRows,
+    outputDirInfo,
+    addedNewActressRows,
+    updatedActressRows,
+    duplicateInputRows,
+    alreadyExistsRows
+  }) {
+    const prefix = outputDirInfo?.runPrefix || timePrefixToMinute();
+
+    const htmlFileName = `${prefix}_missav_raindrop_import_threeway.html`;
+    const csvFileName = `${prefix}_missav_raindrop_import_threeway.csv`;
+    const reportFileName = `${prefix}_missav_import_report_threeway.csv`;
+    const collectionFileName = `${prefix}_女优tag合集.csv`;
+    const backupFileName = `${prefix}_missav_actress_fetch_backup_threeway.json`;
+
+    const importRows = finalRows.filter(r => r.include_in_import);
+    const referenceRows = importRows.filter(r => targetFolderForRow(r) === REFERENCE_HIT_FOLDER_NAME);
+    const needCheckRows = importRows.filter(r => targetFolderForRow(r) === NEED_CHECK_FOLDER_NAME);
+    const otherRows = importRows.filter(r => targetFolderForRow(r) === OTHER_FOLDER_NAME);
+
+    function bookmarkLines(rows) {
+      return rows.map(r =>
+        `    <DT><A HREF="${escapeHtml(r.url)}" TAGS="${escapeHtml(r.tags)}">${escapeHtml(r.code)}</A>`
+      ).join('\n');
+    }
+
+    function folderBlock(name, rows) {
+      return `
+  <DT><H3>${escapeHtml(name)}</H3>
+  <DL><p>
+${bookmarkLines(rows)}
+  </DL><p>
+`;
+    }
+
+    const htmlText = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>MissAV Three-Way Import</TITLE>
+<H1>MissAV Three-Way Import</H1>
+
+<DL><p>
+${folderBlock(REFERENCE_HIT_FOLDER_NAME, referenceRows)}
+${folderBlock(NEED_CHECK_FOLDER_NAME, needCheckRows)}
+${folderBlock(OTHER_FOLDER_NAME, otherRows)}
+</DL><p>
+`;
+
+    const csvText = [
+      [
+        'url',
+        'title',
+        'tags',
+        'actress_tags',
+        'type_tags',
+        'status',
+        'needs_lookup',
+        'reference_matches',
+        'excluded_from_raindrop',
+        'export_blacklist_matches',
+        'target_folder',
+        'actress_raw',
+        'matched_tag',
+        'notes'
+      ].join(','),
+      ...importRows.map(r => [
+        csvCell(r.url),
+        csvCell(r.code),
+        csvCell(r.tags),
+        csvCell(r.actress_tags),
+        csvCell(r.type_tags),
+        csvCell(r.status),
+        csvCell(needsLookup(r) ? 'yes' : 'no'),
+        csvCell(referenceMatchesForRow(r).join(',')),
+        csvCell(exportBlacklistMatchesForRow(r).length ? 'yes' : 'no'),
+        csvCell(exportBlacklistMatchesForRow(r).join(',')),
+        csvCell(targetFolderForRow(r)),
+        csvCell(r.actress_raw),
+        csvCell(r.matched_tag),
+        csvCell(r.notes)
+      ].join(','))
+    ].join('\n');
+
+    const reportText = [
+      [
+        'code',
+        'input_code',
+        'url',
+        'status',
+        'include_in_import',
+        'needs_lookup',
+        'reference_matches',
+        'excluded_from_raindrop',
+        'export_blacklist_matches',
+        'target_folder',
+        'issue',
+        'existing_tags',
+        'actress_raw',
+        'actress_tags',
+        'type_tags',
+        'final_tags'
+      ].join(','),
+      ...reportRows.map(r => {
+        return [
+          csvCell(r.code),
+          csvCell(r.input_code || r.code),
+          csvCell(r.url || ''),
+          csvCell(r.status),
+          csvCell(r.include_in_import ? 'yes' : 'no'),
+          csvCell(r.include_in_import && needsLookup(r) ? 'yes' : 'no'),
+          csvCell(r.include_in_import ? referenceMatchesForRow(r).join(',') : ''),
+          csvCell(exportBlacklistMatchesForRow(r).length ? 'yes' : 'no'),
+          csvCell(exportBlacklistMatchesForRow(r).join(',')),
+          csvCell(r.include_in_import ? targetFolderForRow(r) : ''),
+          csvCell(r.notes || ''),
+          csvCell(r.existing_tags || ''),
+          csvCell(r.actress_raw || ''),
+          csvCell(r.actress_tags || ''),
+          csvCell(r.type_tags || ''),
+          csvCell(r.tags || '')
+        ].join(',');
+      })
+    ].join('\n');
+
+    const sortedCollectionRows = sortCollectionRowsForExport(updatedCollectionRows);
+
+    const maxCodes = Math.max(0, ...sortedCollectionRows.map(r => r.codes.length));
+    const collectionHeader = [
+      '女优tag名字',
+      '收藏数',
+      ...Array.from({ length: maxCodes }, (_, i) => `番号${i + 1}`)
+    ];
+
+    const collectionText = [
+      collectionHeader.map(csvCell).join(','),
+      ...sortedCollectionRows.map(r => [
+        csvCell(r.tag),
+        csvCell(r.count),
+        ...r.codes.map(csvCell)
+      ].join(','))
+    ].join('\n');
+
+    const backup = {
+      finalRows,
+      reportRows,
+      updatedCollectionRows: sortedCollectionRows,
+      addedNewActressRows,
+      updatedActressRows,
+      duplicateInputRows,
+      alreadyExistsRows,
+      referenceHitImportCount: referenceRows.length,
+      needCheckImportCount: needCheckRows.length,
+      otherImportCount: otherRows.length,
+      referenceActressTagCount: REFERENCE_ACTRESS_TAG_SET.size,
+      raindropExportBlacklistTagCount: RAINDROP_EXPORT_BLACKLIST_TAG_SET.size,
+      excludedFromRaindropCount: finalRows.filter(r => exportBlacklistMatchesForRow(r).length).length,
+      needCheckTag: NEED_CHECK_TAG,
+      unknownActressTag: UNKNOWN_ACTRESS_TAG,
+      referenceHitFolderName: REFERENCE_HIT_FOLDER_NAME,
+      needCheckFolderName: NEED_CHECK_FOLDER_NAME,
+      otherFolderName: OTHER_FOLDER_NAME,
+      updatedCollectionFileName: collectionFileName,
+      outputFolderName: outputDirInfo?.folderName || '',
+      exportedAt: new Date().toISOString()
+    };
+
+    await saveTextFile(htmlFileName, htmlText, 'text/html;charset=utf-8', outputDirInfo);
+    await saveTextFile(csvFileName, '\ufeff' + csvText, 'text/csv;charset=utf-8', outputDirInfo);
+    await saveTextFile(reportFileName, '\ufeff' + reportText, 'text/csv;charset=utf-8', outputDirInfo);
+    await saveTextFile(collectionFileName, '\ufeff' + collectionText, 'text/csv;charset=utf-8', outputDirInfo);
+    await saveTextFile(backupFileName, JSON.stringify(backup, null, 2), 'application/json;charset=utf-8', outputDirInfo);
+
+    console.log('Raindrop 导入文件：', htmlFileName);
+    console.log('本次处理报告：', reportFileName);
+    console.log('更新后的完整女优 tag 合集：', collectionFileName);
+    console.log(`${REFERENCE_HIT_FOLDER_NAME} 数量：`, referenceRows.length);
+    console.log(`${NEED_CHECK_FOLDER_NAME} 数量：`, needCheckRows.length);
+    console.log(`${OTHER_FOLDER_NAME} 数量：`, otherRows.length);
+  }
+
+  const runState = await prepareRunByUserClick();
+
+  const oldCollectionFile = runState.oldCollectionFile;
+  const outputDirInfo = runState.outputDirInfo;
+
+  const collectionRows = parseActressCollectionCSV(oldCollectionFile.text);
+  const existingCodeMap = buildExistingCodeMap(collectionRows);
+
+  console.log('已选择旧 tag 合集：', oldCollectionFile.name);
+  console.log('旧 tag 合集女优行数：', collectionRows.length);
+  console.log('旧 tag 合集已收录唯一番号数：', existingCodeMap.size);
+
+  const rawInputCodes = CODE_TEXT
+    .split(/\r?\n/)
+    .map(x => x.trim())
+    .filter(Boolean);
+
+  const inputSeen = new Map();
+  const codesToProcess = [];
+  const reportRows = [];
+  const finalRows = [];
+  const duplicateInputRows = [];
+  const alreadyExistsRows = [];
+
+  for (const inputCode of rawInputCodes) {
+    const code = normalizeCode(inputCode);
+    const key = codeComparableKey(code);
+
+    if (inputSeen.has(key)) {
+      const row = {
+        input_code: inputCode,
+        code,
+        url: '',
+        status: 'duplicate_in_input',
+        include_in_import: false,
+        notes: `本次输入重复，第一次出现为：${inputSeen.get(key)}`,
+        existing_tags: '',
+        actress_raw: '',
+        actress_tags: '',
+        type_tags: '',
+        tags: '重复输入'
+      };
+
+      duplicateInputRows.push(row);
+      reportRows.push(row);
+
+      if (SKIP_DUPLICATE_IN_INPUT) continue;
+    }
+
+    inputSeen.set(key, code);
+
+    if (existingCodeMap.has(key)) {
+      const existingTags = [...new Set(existingCodeMap.get(key))].join(',');
+
+      const row = {
+        input_code: inputCode,
+        code,
+        url: candidateUrls(code)[0],
+        status: 'already_exists_in_tag_collection',
+        include_in_import: false,
+        notes: '已存在于旧 tag 合集，不重复导入',
+        existing_tags: existingTags,
+        actress_raw: '',
+        actress_tags: existingTags,
+        type_tags: '',
+        tags: '已存在'
+      };
+
+      alreadyExistsRows.push(row);
+      reportRows.push(row);
+
+      if (SKIP_ALREADY_EXISTS) continue;
+    }
+
+    codesToProcess.push({
+      input_code: inputCode,
+      code
+    });
+  }
+
+  console.log('本次输入番号数：', rawInputCodes.length);
+  console.log('本次输入内部重复数：', duplicateInputRows.length);
+  console.log('旧 tag 合集中已存在数：', alreadyExistsRows.length);
+  console.log('本次需要实际抓取数：', codesToProcess.length);
+  console.log('中途停止：window.__STOP_MISSAV_TAG_FETCH = true');
+
+  for (let i = 0; i < codesToProcess.length; i++) {
+    if (window.__STOP_MISSAV_TAG_FETCH) {
+      console.warn('已手动停止，导出当前进度。');
+      break;
+    }
+
+    const item = codesToProcess[i];
+    const code = item.code;
+
+    console.log(`[${i + 1}/${codesToProcess.length}] 正在处理：${code}`);
+
+    const result = await findWorkingPage(code);
+
+    const names = mergeNameVariants(result.actresses.map(x => x.raw));
+    let actressTags = [...new Set(names.map(name => pickTagForName(name, collectionRows)).filter(Boolean))];
+
+    if (!actressTags.length) {
+      actressTags = [UNKNOWN_ACTRESS_TAG];
+    }
+
+    const typeTags = [...new Set((result.typeTags || []).map(cleanRaindropTag).filter(Boolean))];
+
+    const allTags = [...new Set([
+      ...actressTags,
+      ...typeTags
+    ])];
+
+    let row = {
+      input_code: item.input_code,
+      code,
+      url: result.url,
+      tags: allTags.join(','),
+      actress_tags: actressTags.join(','),
+      type_tags: typeTags.join(','),
+      status: result.status,
+      actress_raw: names.join(','),
+      matched_tag: actressTags.join(','),
+      notes: result.notes,
+      existing_tags: '',
+      include_in_import: true
+    };
+
+    row = addProblemTags(row);
+
+    finalRows.push(row);
+    reportRows.push(row);
+
+    console.log(
+      `[${i + 1}/${codesToProcess.length}] ${code}`,
+      row.status,
+      '女优:',
+      row.actress_tags || '无',
+      '类型:',
+      row.type_tags || '无',
+      '文件夹:',
+      row.excluded_from_raindrop ? 'Raindrop导出已排除' : targetFolderForRow(row),
+      '最终 tags:',
+      row.tags || '空'
+    );
+
+    await sleep(DELAY_MS);
+  }
+
+  const updateResult = updateActressCollectionWithRows(collectionRows, finalRows);
+
+  await exportFiles({
+    finalRows,
+    reportRows,
+    updatedCollectionRows: updateResult.rows,
+    outputDirInfo,
+    addedNewActressRows: updateResult.addedNewActressRows,
+    updatedActressRows: updateResult.updatedActressRows,
+    duplicateInputRows,
+    alreadyExistsRows
+  });
+
+  console.log('完成。');
+  console.log('统计：');
+  console.table({
+    input_codes: rawInputCodes.length,
+    duplicate_in_input: duplicateInputRows.length,
+    already_exists_in_tag_collection: alreadyExistsRows.length,
+    actually_fetched: codesToProcess.length,
+    processed_new: finalRows.length,
+    import_rows: finalRows.filter(r => r.include_in_import).length,
+    reference_hit_rows: finalRows.filter(r => targetFolderForRow(r) === REFERENCE_HIT_FOLDER_NAME).length,
+    need_check_rows: finalRows.filter(r => targetFolderForRow(r) === NEED_CHECK_FOLDER_NAME).length,
+    other_rows: finalRows.filter(r => targetFolderForRow(r) === OTHER_FOLDER_NAME).length,
+    reference_actress_tags: REFERENCE_ACTRESS_TAG_SET.size,
+    raindrop_export_blacklist_tags: RAINDROP_EXPORT_BLACKLIST_TAG_SET.size,
+    excluded_from_raindrop_rows: finalRows.filter(r => exportBlacklistMatchesForRow(r).length).length,
+    ok: finalRows.filter(r => r.status === 'ok').length,
+    not_found: finalRows.filter(r => r.status === 'not_found').length,
+    no_actress_found: finalRows.filter(r => r.status === 'no_actress_found').length,
+    need_manual_check: finalRows.filter(r => r.status === 'need_manual_check').length,
+    page_ok_play_unknown: finalRows.filter(r => r.status === 'page_ok_play_unknown').length,
+    with_need_check_tag: finalRows.filter(r => r.tags.split(',').includes(NEED_CHECK_TAG)).length,
+    with_unknown_actress_tag: finalRows.filter(r => r.tags.split(',').includes(UNKNOWN_ACTRESS_TAG)).length,
+    with_type_tags: finalRows.filter(r => r.type_tags && r.type_tags.trim()).length,
+    added_new_actress_rows: updateResult.addedNewActressRows.length,
+    updated_existing_actress_rows: updateResult.updatedActressRows.length,
+    bad_ranking_tag_count: finalRows.filter(r => r.tags.includes('女优排行')).length,
+    bad_ad_type_tag_count: finalRows.filter(r =>
+      /官方_AV|电报|電報|无广告|免费漫画|AI_Jerk|亚博|赌场|VPN|色色主播|下载/i.test(r.tags)
+    ).length
+  });
+
+  if (duplicateInputRows.length) {
+    console.log('本次输入重复番号：');
+    console.table(duplicateInputRows.map(r => ({
+      code: r.code,
+      issue: r.notes
+    })));
+  }
+
+  if (alreadyExistsRows.length) {
+    console.log('旧 tag 合集中已经存在的番号：');
+    console.table(alreadyExistsRows.map(r => ({
+      code: r.code,
+      existing_tags: r.existing_tags
+    })));
+  }
+
+  const needCheckRows = finalRows.filter(r => targetFolderForRow(r) === NEED_CHECK_FOLDER_NAME);
+  if (needCheckRows.length) {
+    console.log(`进入「${NEED_CHECK_FOLDER_NAME}」文件夹的番号：`);
+    console.table(needCheckRows.map(r => ({
+      code: r.code,
+      status: r.status,
+      tags: r.tags,
+      issue: r.notes
+    })));
+  }
+
+  if (updateResult.addedNewActressRows.length) {
+    console.log('本次新增女优行：', updateResult.addedNewActressRows);
+  }
+
+  if (updateResult.updatedActressRows.length) {
+    console.log('本次增量更新已有女优行：', updateResult.updatedActressRows);
+  }
+})();

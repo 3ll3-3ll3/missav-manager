@@ -15,15 +15,10 @@ pub struct HttpResponse {
     pub response_bytes: usize,
 }
 
-fn allowed_url(url: &reqwest::Url, raindrop_only: bool) -> bool {
+fn allowed_url(url: &reqwest::Url) -> bool {
     if url.scheme() != "https" { return false; }
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    if raindrop_only {
-        host == "api.raindrop.io" && url.path().starts_with("/rest/v1/")
-    } else {
-        ["missav.ai", "missav.ws", "123av.com", "www.123av.com"].contains(&host.as_str())
-            || host.ends_with(".missav.ai") || host.ends_with(".missav.ws")
-    }
+    ["123av.com", "www.123av.com"].contains(&host.as_str())
 }
 
 fn build_client(proxy: &str, timeout_ms: u64) -> Result<Client, String> {
@@ -42,19 +37,13 @@ fn build_client(proxy: &str, timeout_ms: u64) -> Result<Client, String> {
 async fn execute(
     method: Method,
     url: reqwest::Url,
-    token: &str,
-    body: Option<serde_json::Value>,
     proxy: &str,
     timeout_ms: u64,
-    raindrop_only: bool,
 ) -> Result<HttpResponse, String> {
-    if !allowed_url(&url, raindrop_only) { return Err("出于安全限制，该网络地址不在允许列表中".to_string()); }
+    if !allowed_url(&url) { return Err("出于安全限制，该网络地址不在允许列表中".to_string()); }
     let client = build_client(proxy, timeout_ms)?;
     let started = std::time::Instant::now();
-    let mut request = client.request(method, url);
-    if !token.is_empty() { request = request.bearer_auth(token); }
-    if let Some(payload) = body { request = request.json(&payload); }
-    let response = request.send().await.map_err(|error| format!("网络请求失败：{error}"))?;
+    let response = client.request(method, url).send().await.map_err(|error| format!("网络请求失败：{error}"))?;
     let status_code = response.status().as_u16();
     let final_url = response.url().to_string();
     let headers = response.headers().iter().filter_map(|(key, value)| value.to_str().ok().map(|value| (key.to_string(), value.to_string()))).collect();
@@ -66,30 +55,7 @@ async fn execute(
 
 pub async fn fetch_page(url: &str, proxy: &str, timeout_ms: u64) -> Result<HttpResponse, String> {
     let url = reqwest::Url::parse(url).map_err(|error| format!("网址无效：{error}"))?;
-    execute(Method::GET, url, "", None, proxy, timeout_ms, false).await
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RaindropRequest {
-    pub method: String,
-    pub path: String,
-    pub token: String,
-    #[serde(default)]
-    pub body: Option<serde_json::Value>,
-    #[serde(default)]
-    pub proxy: String,
-}
-
-pub async fn raindrop_request(input: RaindropRequest) -> Result<HttpResponse, String> {
-    if input.token.trim().is_empty() { return Err("Raindrop Access Token 不能为空".to_string()); }
-    let method = match input.method.to_ascii_uppercase().as_str() {
-        "GET" => Method::GET, "POST" => Method::POST, "PUT" => Method::PUT, "DELETE" => Method::DELETE,
-        _ => return Err("不允许的 Raindrop 请求方法".to_string()),
-    };
-    let path = if input.path.starts_with('/') { input.path } else { format!("/{}", input.path) };
-    let url = reqwest::Url::parse(&format!("https://api.raindrop.io{path}")).map_err(|error| error.to_string())?;
-    execute(method, url, input.token.trim(), input.body, &input.proxy, 45_000, true).await
+    execute(Method::GET, url, proxy, timeout_ms).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,11 +103,10 @@ mod tests {
     use super::*;
     #[test]
     fn network_allowlist_rejects_untrusted_hosts_and_http() {
-        assert!(allowed_url(&reqwest::Url::parse("https://missav.ai/cn/abp-001").unwrap(), false));
-        assert!(allowed_url(&reqwest::Url::parse("https://123av.com/cn/v/abp-001").unwrap(), false));
-        assert!(!allowed_url(&reqwest::Url::parse("http://123av.com/cn/v/abp-001").unwrap(), false));
-        assert!(!allowed_url(&reqwest::Url::parse("https://evil.example/?next=missav.ai").unwrap(), false));
-        assert!(allowed_url(&reqwest::Url::parse("https://api.raindrop.io/rest/v1/user").unwrap(), true));
-        assert!(!allowed_url(&reqwest::Url::parse("https://api.raindrop.io/other").unwrap(), true));
+        assert!(!allowed_url(&reqwest::Url::parse("https://missav.ai/cn/abp-001").unwrap()));
+        assert!(allowed_url(&reqwest::Url::parse("https://123av.com/cn/v/abp-001").unwrap()));
+        assert!(!allowed_url(&reqwest::Url::parse("http://123av.com/cn/v/abp-001").unwrap()));
+        assert!(!allowed_url(&reqwest::Url::parse("https://evil.example/?next=missav.ai").unwrap()));
+        assert!(!allowed_url(&reqwest::Url::parse("https://api.raindrop.io/rest/v1/user").unwrap()));
     }
 }

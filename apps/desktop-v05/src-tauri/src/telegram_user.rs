@@ -20,7 +20,7 @@ use grammers_client::{
 };
 use grammers_mtsender::{ConnectionParams, SenderPool};
 use grammers_session::{
-    types::{DcOption, PeerId, PeerInfo, UpdateState, UpdatesState},
+    types::{DcOption, PeerId, PeerInfo, PeerKind, UpdateState, UpdatesState},
     updates::UpdatesLike,
     BoxFuture, Session, SessionData,
 };
@@ -261,6 +261,31 @@ pub struct TelegramSyncResult {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramHistoryRequest {
+    pub external_id: String,
+    pub limit: usize,
+    #[serde(default)]
+    pub start: String,
+    #[serde(default)]
+    pub end: String,
+    #[serde(default)]
+    pub before_id: i32,
+    #[serde(default)]
+    pub after_id: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramHistoryResult {
+    pub messages: Vec<TelegramMessage>,
+    pub scanned_count: usize,
+    pub next_before_id: i32,
+    pub next_after_id: i32,
+    pub has_more: bool,
+}
+
 struct Inner {
     credentials: Option<StoredCredentials>,
     session: Option<Arc<FileSession>>,
@@ -396,7 +421,7 @@ impl TelegramUserRuntime {
                 .map_err(|error| format!("打开 Telegram 会话失败：{error}"))?,
         );
         let mut params = ConnectionParams {
-            app_version: "TG Content Toolbox 0.5.4".to_string(),
+            app_version: "TG Content Toolbox 0.5.13".to_string(),
             device_model: "Windows Desktop".to_string(),
             system_lang_code: "zh-CN".to_string(),
             lang_code: "zh-CN".to_string(),
@@ -782,17 +807,51 @@ impl TelegramUserRuntime {
         let limit = request.limit.clamp(1, 20_000);
         let start = parse_time(&request.start)?;
         let end = parse_time(&request.end)?;
-        let mut iterator = client.iter_messages(peer).limit(limit + 1);
+        let starting_checkpoint = request.checkpoint.max(0);
+        let history_pull = starting_checkpoint == 0;
+        let mut iterator = if history_pull {
+            client.iter_messages(peer).limit(limit + 1)
+        } else {
+            // Telegram normally returns newest-first. Incremental pages must be
+            // consumed oldest-first so a limited page advances only through a
+            // contiguous, fully processed range and never jumps over a gap.
+            client
+                .iter_messages(peer)
+                .offset_id(starting_checkpoint)
+                .reverse(true)
+                .limit(limit + 1)
+        };
         let mut messages = Vec::new();
-        let mut checkpoint = request.checkpoint.max(0);
+        let mut checkpoint = starting_checkpoint;
         let mut has_more = false;
+        let mut scanned = 0usize;
         while let Some(message) = iterator.next().await.map_err(clean_error)? {
+            if scanned >= limit {
+                has_more = true;
+                break;
+            }
+            scanned += 1;
             let id = message.id();
-            if request.checkpoint > 0 && id <= request.checkpoint { break; }
             let date = message.date();
-            if let Some(end) = end { if date > end { continue; } }
-            if let Some(start) = start { if date < start { break; } }
-            if messages.len() >= limit { has_more = true; break; }
+            if let Some(end) = end {
+                if date > end {
+                    if history_pull {
+                        checkpoint = checkpoint.max(id);
+                        continue;
+                    }
+                    has_more = true;
+                    break;
+                }
+            }
+            if let Some(start) = start {
+                if date < start {
+                    if history_pull {
+                        break;
+                    }
+                    checkpoint = checkpoint.max(id);
+                    continue;
+                }
+            }
             checkpoint = checkpoint.max(id);
             let mut text = message.text().to_string();
             if let Some(entities) = message.fmt_entities() {
@@ -806,6 +865,93 @@ impl TelegramUserRuntime {
         }
         messages.sort_by_key(|message| message.id);
         Ok(TelegramSyncResult { messages, checkpoint, has_more })
+    }
+
+    pub async fn load_history(&self, request: TelegramHistoryRequest) -> Result<TelegramHistoryResult, String> {
+        if request.before_id > 0 && request.after_id > 0 {
+            return Err("历史加载不能同时指定向前和向后游标".to_string());
+        }
+        let inner = self.inner.lock().await;
+        let client = inner.client.clone().ok_or_else(|| "Telegram 个人账号尚未连接".to_string())?;
+        let peer = Self::dialog_pairs(&inner, 1000).await?
+            .into_iter()
+            .find(|item| item.0.id == request.external_id)
+            .map(|item| item.1)
+            .ok_or_else(|| "该群组/频道已退出或不可用；请在来源页刷新后删除旧绑定".to_string())?;
+        let limit = request.limit.clamp(1, 5_000);
+        let start = parse_time(&request.start)?;
+        let end = parse_time(&request.end)?;
+        if let (Some(start), Some(end)) = (start, end) {
+            if start > end { return Err("开始时间不能晚于结束时间".to_string()); }
+        }
+        let forward = request.after_id > 0;
+        let mut iterator = if forward {
+            client.iter_messages(peer).offset_id(request.after_id).reverse(true).limit(limit + 1)
+        } else {
+            let mut builder = client.iter_messages(peer);
+            if request.before_id > 0 {
+                builder = builder.offset_id(request.before_id);
+            } else if let Some(end) = end {
+                builder = builder.offset_date(end.timestamp().clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+            }
+            builder.limit(limit + 1)
+        };
+        let mut messages = Vec::new();
+        let mut scanned_count = 0usize;
+        let mut next_before_id = if request.before_id > 0 { request.before_id } else { 0 };
+        let mut next_after_id = if request.after_id > 0 { request.after_id } else { 0 };
+        let mut has_more = false;
+        while let Some(message) = iterator.next().await.map_err(clean_error)? {
+            if scanned_count >= limit {
+                has_more = true;
+                break;
+            }
+            scanned_count += 1;
+            let id = message.id();
+            next_before_id = if next_before_id == 0 { id } else { next_before_id.min(id) };
+            next_after_id = next_after_id.max(id);
+            let date = message.date();
+            if forward {
+                if let Some(start) = start {
+                    if date < start { continue; }
+                }
+                if let Some(end) = end {
+                    if date > end { has_more = false; break; }
+                }
+            } else {
+                if let Some(end) = end {
+                    if date > end { continue; }
+                }
+                if let Some(start) = start {
+                    if date < start { has_more = false; break; }
+                }
+            }
+            let mut text = message.text().to_string();
+            if let Some(entities) = message.fmt_entities() {
+                for entity in entities {
+                    if let tl::enums::MessageEntity::TextUrl(url) = entity {
+                        if !text.contains(&url.url) { text.push('\n'); text.push_str(&url.url); }
+                    }
+                }
+            }
+            if !text.trim().is_empty() {
+                messages.push(TelegramMessage { id, date: date.to_rfc3339(), text });
+            }
+        }
+        messages.sort_by_key(|message| message.id);
+        Ok(TelegramHistoryResult { messages, scanned_count, next_before_id, next_after_id, has_more })
+    }
+
+    pub async fn mark_read_through(&self, external_id: &str, message_id: i32) -> Result<(), String> {
+        if message_id <= 0 { return Ok(()); }
+        let inner = self.inner.lock().await;
+        let client = inner.client.clone().ok_or_else(|| "Telegram 个人账号尚未连接".to_string())?;
+        let peer = Self::dialog_pairs(&inner, 1000).await?.into_iter().find(|item| item.0.id == external_id).map(|item| item.1).ok_or_else(|| "该群组/频道已退出或不可用，无法标记已读".to_string())?;
+        if peer.id.kind() == PeerKind::Channel {
+            client.invoke(&tl::functions::channels::ReadHistory { channel: peer.into(), max_id: message_id }).await.map(drop).map_err(clean_error)
+        } else {
+            client.invoke(&tl::functions::messages::ReadHistory { peer: peer.into(), max_id: message_id }).await.map(drop).map_err(clean_error)
+        }
     }
 
     pub async fn logout(&self) -> Result<AuthState, String> {

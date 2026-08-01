@@ -821,3 +821,24 @@ npm run build:portable PASS
 - Telegram 个人 API 增加默认关闭的“完整同步成功后标记已读”；只有来源完整写入本地且无剩余分页时执行，Bot 不实现。
 - 单元测试增至 127 项；静态检查、完整桌面/416px UI、Telegram 桌面/移动 UI 冒烟均使用隔离临时 SQLite 和模拟账号通过。
 - 最终便携版：`dist\TG_Content_Toolbox_v0.4.0.exe`；最后写入 `2026-07-25 11:41:59`；大小 `400,025,815` 字节；文件版本/产品版本 `0.4.0`；SHA-256 `80982A2C05DF369FDAB0CB9336F272E549B74E38C07197056C71108B49B9B9CE`。包核验通过，隔离首启退出码 0，创建 270,336 字节 Schema 302 空库，日志包含版本与两个 package-smoke 就绪标记。
+
+## 2026-07-28 v0.5.8：两层 MissAV 黑名单 TXT 数据源
+
+- 项目根目录新增 `missav-blacklists` 文件夹，分别存放 `1-参考女优Tag库黑名单.txt` 和 `2-Raindrop导出黑名单.txt`。开发环境使用项目目录，独立 EXE 使用自身同目录；文件缺失时自动创建。
+- 设置页支持重新读取、打开文件夹和分别保存两个 TXT；外部修改在下一次生成脚本时自动读取。旧数据库设置只迁移一次，初始化后的空 TXT 不会被旧值复活。
+- 第一层黑名单改为完整参考库上的可逆运行时筛选；第二层继续执行 Raindrop HTML/CSV 硬排除并保留报告与 JSON 审计。
+- 139 项 Node 测试、19 项 Rust 测试、TypeScript/Vite 与 Tauri Release 构建，以及隔离 Windows UI 的外部重读和 APP 回写验证通过。最终文件：`dist\TG_Content_Toolbox_v0.5.8.exe`，大小 `19,717,120` 字节，SHA-256 `49F7ED0FEED82C8B0FEE944EBF4FD3127149411B6F8CC875284A94AA99941F1F`。
+
+## 2026-07-28 v0.5.9：Telegram 已读策略与连续增量
+
+- 个人 API 来源增加 `safe_auto` / `never` / `manual` 三档已读策略；历史回拉无论哪档都不会自动标已读。
+- 来源元数据独立记录安全可标位置、远程已标位置和历史基线，支持失败重试和手动确认。
+- 增量迭代改为从检查点后按旧到新连续分页，修复单次上限下跳过积压消息。
+- 139 项 Node 测试、20 项 Rust 测试、TypeScript/Vite 与 Tauri Release 构建、来源页隔离 UI 检查和隔离 EXE 首启通过。最终文件：`dist\TG_Content_Toolbox_v0.5.9.exe`，大小 `19,727,872` 字节，SHA-256 `A5C74A9354E5D18ACEE714270035FD0C28306B1443E4BFD23700452CC8CB8504`。
+
+## 2026-07-28 v0.5.10：每个工具独立的 Telegram 消息工作页
+
+- 五个工具统一新增 Telegram 消息页：绑定来源多选、四种历史加载模式、任意条数、时间范围、安全停止、分页消息表格、跨页选择、处理/忽略/恢复与 TXT/CSV 导出。
+- 新增共享正文缓存、独立工具队列和加载会话审计。同一消息只保存一份正文，各工具状态和结果互不覆盖。
+- 历史加载与稀疏选择不会推进日常增量检查点或自动标记已读；来源页继续负责账号、绑定、自动分发与三种已读策略。
+- 139 项 Node 测试、22 项 Rust 测试、TypeScript/Vite 与 Tauri Release 构建、隔离 Windows UI 和空库完整性检查通过。最终文件：`dist\TG_Content_Toolbox_v0.5.10.exe`，大小 `19,957,760` 字节，SHA-256 `2AEA3373DFA7024F0B73FE5136829C67C72A3DD1FA8E6DD7528EDA132E3A296E`，Schema 506。

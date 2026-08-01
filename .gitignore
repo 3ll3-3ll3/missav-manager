@@ -3,6 +3,7 @@ node_modules/
 dist/
 release/
 target/
+apps/desktop-v05/src-tauri/target-*/
 apps/desktop-v05/src-tauri/gen/
 
 # Local application data and backups
@@ -10,6 +11,8 @@ data/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 
 # User-provided source material and generated exports
 附件存放/
@@ -19,6 +22,7 @@ output/
 # Electron and operating-system local files
 .electron/
 .tmp-userdata/
+.smoke/
 artifacts/
 .DS_Store
 Thumbs.db
@@ -29,3 +33,6 @@ Thumbs.db
 *.log
 .env
 .env.*
+
+# User-maintained local preferences; the app creates these files when absent
+missav-blacklists/*.txt

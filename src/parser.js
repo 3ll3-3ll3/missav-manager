@@ -152,6 +152,7 @@ const NOISE_CODE_PREFIXES = new Set([
   'STATISTICS', 'PYTHON', 'OFFICE', 'GITHUB', 'SERIES', 'WEIXIN',
   'RESULT', 'RELATED', 'THREAD', 'XIUREN', 'WXSYNC', 'JAVA', 'LARGE',
   'RJ', 'NO', 'PRO', 'YOUPORN',
+  'TV',
 ]);
 
 const DATE_WORD_PREFIXES = new Set([

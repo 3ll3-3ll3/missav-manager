@@ -30,7 +30,7 @@ const tools = [
     id: "missav",
     name: "MissAV",
     state: "独立工作区",
-    description: "番号提取、永久历史、查询标签与 Raindrop 同步互不混杂。",
+    description: "提取并规范番号，保存永久历史，生成可直接粘贴到浏览器运行的完整脚本。",
     tone: "active",
   },
   {
@@ -83,28 +83,33 @@ const tools = [
       </div>
     </div>
     <div class="management-grid">
-      <button class="management-card" @click="emit('navigate', 'data')">
+      <button class="management-card" @click="emit('navigate', 'tasks')">
         <span class="management-index">01</span>
+        <strong>统一处理中心</strong>
+        <small>新收到、已过滤、待网站操作、待复查、异常和已完成任务分组处理</small>
+      </button>
+      <button class="management-card" @click="emit('navigate', 'data')">
+        <span class="management-index">02</span>
         <strong>10 万行统一数据中心</strong>
         <small>真实业务数据的全文搜索、分页、选择、编辑与 CSV 导出</small>
       </button>
       <button class="management-card" @click="emit('navigate', 'sources')">
-        <span class="management-index">04</span>
+        <span class="management-index">03</span>
         <strong>Telegram 来源</strong>
         <small>群组与频道可多选绑定多个工具，退出后的旧来源可删除</small>
       </button>
       <button class="management-card" @click="emit('navigate', 'logs')">
-        <span class="management-index">05</span>
+        <span class="management-index">04</span>
         <strong>运行日志</strong>
         <small>集中查看网络、同步和数据库问题，敏感凭据不会写入日志</small>
       </button>
       <button class="management-card" @click="emit('navigate', 'settings')">
-        <span class="management-index">06</span>
+        <span class="management-index">05</span>
         <strong>设置与备份</strong>
         <small>独立管理代理、网站速度、数据库自动备份与恢复</small>
       </button>
       <button class="management-card" @click="emit('navigate', 'migration')">
-        <span class="management-index">02</span>
+        <span class="management-index">06</span>
         <strong>v0.4.5 数据迁移</strong>
         <small>旧库始终只读；迁移前自动备份，完整归档后映射进新数据中心</small>
       </button>

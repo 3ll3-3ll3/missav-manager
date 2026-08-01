@@ -30,7 +30,8 @@ async function chooseDatabase() {
 
 async function migrate() {
   if (!selectedPath.value || !report.value || report.value.integrityCheck.toLowerCase() !== "ok") return;
-  if (!confirm("正式迁移会先备份 v0.5 数据库，再完整归档旧库所有业务表并映射核心数据。旧库始终只读。继续吗？")) return;
+  const action = replace.value ? "先完整备份并清空当前 v0.5 业务数据，再" : "先备份当前 v0.5 数据库，再";
+  if (!confirm(`正式迁移会${action}完整归档旧库所有业务表并映射核心数据。旧库始终只读。继续吗？`)) return;
   busy.value = true; error.value = "";
   try { migration.value = await migrateLegacyDatabase(selectedPath.value, replace.value); }
   catch (reason) { error.value = String(reason); }
@@ -120,11 +121,11 @@ async function analyze() {
     <section class="panel migration-action">
       <h3>正式执行</h3>
       <p class="muted">完整归档保证尚未映射的旧字段也不会丢失；可识别核心数据会立即出现在新数据中心。此操作不修改源数据库。</p>
-      <label class="check-label"><input v-model="replace" type="checkbox" /> 已迁移过时，重新归档并覆盖核心映射</label>
+      <label class="check-label"><input v-model="replace" type="checkbox" /> 以 v0.4.5 为唯一来源：备份并清空当前 v0.5 业务数据后重新迁移</label>
       <button class="primary-button" :disabled="busy || report.integrityCheck.toLowerCase() !== 'ok'" @click="migrate">{{ busy ? "迁移中…" : "备份并正式迁移" }}</button>
     </section>
     <section v-if="migration" class="report-summary migration-result">
-      <div><strong>{{ migration.archivedTables }}</strong><span>完整归档表</span></div><div><strong>{{ migration.archivedRows.toLocaleString() }}</strong><span>完整归档行</span></div><div><strong>{{ migration.missavRecords }}</strong><span>MissAV 记录</span></div><div><strong>{{ migration.av123Records }}</strong><span>123AV 记录</span></div><div><strong>{{ migration.telegramSources }}</strong><span>Telegram 来源</span></div>
+      <div><strong>{{ migration.archivedTables }}</strong><span>完整归档表</span></div><div><strong>{{ migration.archivedRows.toLocaleString() }}</strong><span>完整归档行</span></div><div><strong>{{ migration.missavRecords }}</strong><span>MissAV 记录</span></div><div><strong>{{ migration.av123Records }}</strong><span>123AV 记录</span></div><div><strong>{{ migration.telegramSources }}</strong><span>Telegram 来源</span></div><div><strong>{{ migration.telegramFingerprints }}</strong><span>已处理消息指纹</span></div>
     </section>
   </template>
 </template>

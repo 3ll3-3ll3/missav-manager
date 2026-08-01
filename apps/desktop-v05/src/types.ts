@@ -1,5 +1,5 @@
 export type ToolKind = "twitter" | "badnews" | "haijiao" | "missav" | "av123";
-export type ViewName = "home" | "migration" | "sources" | "data" | "logs" | "settings" | `tool:${ToolKind}`;
+export type ViewName = "home" | "tasks" | "migration" | "sources" | "data" | "logs" | "settings" | `tool:${ToolKind}`;
 
 export interface AppInfo {
   version: string;
@@ -149,7 +149,7 @@ export interface PermanentRecord {
 }
 export interface PermanentPage { data: PermanentRecord[]; page: number; pageSize: number; lastPage: number; total: number }
 export interface ChromeBridgeInfo { pairingCode: string; extensionPath: string; available: boolean; error: string }
-export interface LegacyMigrationResult { sourcePath: string; archivedTables: number; archivedRows: number; missavRecords: number; av123Records: number; historyRuns: number; telegramSources: number; backupPath: string }
+export interface LegacyMigrationResult { sourcePath: string; archivedTables: number; archivedRows: number; missavRecords: number; av123Records: number; historyRuns: number; telegramSources: number; telegramFingerprints: number; backupPath: string }
 
 export interface TelegramAuthState {
   status: "disconnected" | "expired" | "waiting_code" | "waiting_password" | "waiting_qr" | "ready" | string;
@@ -173,3 +173,38 @@ export interface TelegramDialog {
 
 export interface TelegramApiMessage { id: number; date: string; text: string }
 export interface TelegramSyncResult { messages: TelegramApiMessage[]; checkpoint: number; hasMore: boolean }
+export interface TelegramHistoryResult {
+  messages: TelegramApiMessage[];
+  scannedCount: number;
+  nextBeforeId: number;
+  nextAfterId: number;
+  hasMore: boolean;
+}
+export interface TelegramMessageKey { sourceId: number; messageId: number }
+export interface TelegramToolMessage {
+  key: string;
+  sourceId: number;
+  sourceName: string;
+  messageId: number;
+  messageDate: string;
+  text: string;
+  status: "pending" | "processed" | "processed_empty" | "ignored" | "error" | string;
+  candidateCount: number;
+  candidatePreview: string;
+  runId: number | null;
+  error: string;
+  processedAt: string;
+  updatedAt: string;
+}
+export interface TelegramToolMessagePage {
+  data: TelegramToolMessage[];
+  page: number;
+  pageSize: number;
+  lastPage: number;
+  total: number;
+  statusCounts: Record<string, number>;
+}
+export interface TelegramToolCursor { oldestMessageId: number; newestMessageId: number; sourceCheckpoint: number }
+export interface TelegramStoreResult { storedMessages: number; queuedItems: number }
+export interface TelegramCommitResult { runIds: number[]; savedMessages: number; checkpoint: string }
+export interface InboxTask { id: number; runId: number; sourceId: number | null; sourceName: string; tool: ToolKind; stage: string; title: string; summary: string; error: string; createdAt: string; updatedAt: string }

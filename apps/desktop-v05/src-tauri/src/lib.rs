@@ -1,5 +1,6 @@
 mod database;
 mod chrome_bridge;
+mod missav_blacklists;
 mod models;
 mod network;
 mod telegram_user;
@@ -25,6 +26,7 @@ struct AppState {
     chrome_bridge_error: String,
     extension_path: PathBuf,
     database_location_config: PathBuf,
+    missav_blacklist_directory: PathBuf,
     telegram_user: Arc<telegram_user::TelegramUserRuntime>,
 }
 
@@ -121,8 +123,18 @@ fn query_permanent_records(state: State<'_, AppState>, tool: String, page: u32, 
 }
 
 #[tauri::command]
+fn query_permanent_record_ids(state: State<'_, AppState>, tool: String, search: String) -> Result<Vec<i64>, String> {
+    workspace::query_permanent_ids(state.runtime.database_path.as_ref(), &tool, &search)
+}
+
+#[tauri::command]
 fn update_permanent_record(state: State<'_, AppState>, update: workspace::PermanentUpdate) -> Result<(), String> {
     workspace::update_permanent(state.runtime.database_path.as_ref(), update)
+}
+
+#[tauri::command]
+fn update_permanent_records(state: State<'_, AppState>, ids: Vec<i64>, field: String, value: serde_json::Value) -> Result<usize, String> {
+    workspace::update_permanent_many(state.runtime.database_path.as_ref(), &ids, &field, &value)
 }
 
 #[tauri::command]
@@ -141,8 +153,42 @@ fn save_input_source(state: State<'_, AppState>, input: SourceInput) -> Result<i
 }
 
 #[tauri::command]
+fn update_tool_source_bindings(
+    state: State<'_, AppState>,
+    tool: String,
+    updates: Vec<workspace::ToolSourceBindingUpdate>,
+) -> Result<usize, String> {
+    workspace::update_tool_source_bindings(state.runtime.database_path.as_ref(), &tool, updates)
+}
+
+#[tauri::command]
 fn delete_input_source(state: State<'_, AppState>, source_id: i64) -> Result<(), String> {
     workspace::delete_source(state.runtime.database_path.as_ref(), source_id)
+}
+
+#[tauri::command]
+fn known_telegram_message_ids(state: State<'_, AppState>, source_id: i64, ids: Vec<i64>) -> Result<Vec<i64>, String> {
+    workspace::known_telegram_message_ids(state.runtime.database_path.as_ref(), source_id, &ids)
+}
+
+#[tauri::command]
+fn commit_telegram_sync(state: State<'_, AppState>, input: workspace::TelegramCommitInput) -> Result<workspace::TelegramCommitResult, String> {
+    workspace::commit_telegram_sync(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn list_inbox_tasks(state: State<'_, AppState>, stage: String, search: String, limit: u32) -> Result<Vec<workspace::InboxTask>, String> {
+    workspace::list_inbox(state.runtime.database_path.as_ref(), &stage, &search, limit)
+}
+
+#[tauri::command]
+fn update_inbox_task_stage(state: State<'_, AppState>, id: i64, stage: String) -> Result<(), String> {
+    workspace::update_inbox_stage(state.runtime.database_path.as_ref(), id, &stage)
+}
+
+#[tauri::command]
+fn record_script_generation(state: State<'_, AppState>, run_id: Option<i64>, template_version: String, code_count: u32) -> Result<(), String> {
+    workspace::record_script_generation(state.runtime.database_path.as_ref(), run_id, &template_version, code_count)
 }
 
 #[tauri::command]
@@ -160,6 +206,31 @@ fn set_app_setting(
     value: serde_json::Value,
 ) -> Result<(), String> {
     workspace::set_setting(state.runtime.database_path.as_ref(), &key, &value)
+}
+
+#[tauri::command]
+fn read_missav_blacklist_files(state: State<'_, AppState>) -> Result<missav_blacklists::BlacklistFilesSnapshot, String> {
+    missav_blacklists::read_files(&state.missav_blacklist_directory)
+}
+
+#[tauri::command]
+fn write_missav_blacklist_file(
+    state: State<'_, AppState>,
+    kind: String,
+    content: String,
+) -> Result<missav_blacklists::BlacklistFilesSnapshot, String> {
+    let kind = missav_blacklists::BlacklistKind::parse(&kind)?;
+    missav_blacklists::write_file(&state.missav_blacklist_directory, kind, &content)
+}
+
+#[tauri::command]
+fn open_missav_blacklist_folder(state: State<'_, AppState>) -> Result<(), String> {
+    missav_blacklists::ensure_files(&state.missav_blacklist_directory)?;
+    std::process::Command::new("explorer.exe")
+        .arg(&state.missav_blacklist_directory)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -223,7 +294,7 @@ fn read_input_files(paths: Vec<String>) -> Result<Vec<ReadInputFile>, String> {
     if paths.len() > 200 {
         return Err("一次最多读取 200 个文件".to_string());
     }
-    let allowed = ["txt", "html", "htm", "md", "json", "csv", "log"];
+    let allowed = ["txt", "html", "htm", "md", "json", "csv", "log", "js"];
     let mut total_bytes = 0_u64;
     let mut output = Vec::with_capacity(paths.len());
     for value in paths {
@@ -315,17 +386,6 @@ async fn fetch_site_page(state: State<'_, AppState>, url: String, proxy: String,
 }
 
 #[tauri::command]
-async fn call_raindrop(state: State<'_, AppState>, input: network::RaindropRequest) -> Result<network::HttpResponse, String> {
-    let path = input.path.clone(); let method = input.method.clone();
-    let result = network::raindrop_request(input).await;
-    match &result {
-        Ok(response) => { let _ = workspace::append_log(state.runtime.database_path.as_ref(), "INFO", "raindrop", "Raindrop 请求完成", &serde_json::json!({"method":method,"path":path,"status":response.status_code,"durationMs":response.duration_ms})); },
-        Err(error) => { let _ = workspace::append_log(state.runtime.database_path.as_ref(), "ERROR", "raindrop", "Raindrop 请求失败", &serde_json::json!({"method":method,"path":path,"error":error})); },
-    }
-    result
-}
-
-#[tauri::command]
 async fn call_telegram_bot(state: State<'_, AppState>, input: network::TelegramBotRequest) -> Result<network::HttpResponse, String> {
     let method = input.method.clone();
     let result = network::telegram_bot_request(input).await;
@@ -399,6 +459,126 @@ async fn telegram_user_sync_messages(state: State<'_, AppState>, input: telegram
     let result = state.telegram_user.sync_messages(input).await;
     let _ = workspace::append_log(state.runtime.database_path.as_ref(), if result.is_ok() { "INFO" } else { "ERROR" }, "telegram_user", "Telegram 个人账号增量同步", &serde_json::json!({"sourceId":source_id,"count":result.as_ref().map(|row|row.messages.len()).unwrap_or(0),"ok":result.is_ok()}));
     result
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TelegramToolHistoryInput {
+    source_id: i64,
+    tool: String,
+    limit: usize,
+    #[serde(default)]
+    start: String,
+    #[serde(default)]
+    end: String,
+    #[serde(default)]
+    before_id: i32,
+    #[serde(default)]
+    after_id: i32,
+}
+
+#[tauri::command]
+async fn telegram_user_load_history(state: State<'_, AppState>, input: TelegramToolHistoryInput) -> Result<telegram_user::TelegramHistoryResult, String> {
+    let (external_id, source_name) = workspace::telegram_user_source_for_tool(
+        state.runtime.database_path.as_ref(), input.source_id, &input.tool,
+    )?;
+    let source_id = input.source_id;
+    let tool = input.tool.clone();
+    let request = telegram_user::TelegramHistoryRequest {
+        external_id, limit: input.limit, start: input.start, end: input.end,
+        before_id: input.before_id, after_id: input.after_id,
+    };
+    let result = state.telegram_user.load_history(request).await;
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if result.is_ok() { "INFO" } else { "ERROR" },
+        "telegram_user",
+        "Telegram 工具工作页加载历史",
+        &serde_json::json!({
+            "sourceId":source_id,"sourceName":source_name,"tool":tool,
+            "count":result.as_ref().map(|row|row.messages.len()).unwrap_or(0),
+            "scanned":result.as_ref().map(|row|row.scanned_count).unwrap_or(0),
+            "ok":result.is_ok(),"error":result.as_ref().err().cloned().unwrap_or_default()
+        }),
+    );
+    result
+}
+
+#[tauri::command]
+fn store_telegram_tool_messages(state: State<'_, AppState>, input: workspace::TelegramStoreInput) -> Result<workspace::TelegramStoreResult, String> {
+    workspace::store_telegram_tool_messages(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn query_telegram_tool_messages(state: State<'_, AppState>, input: workspace::TelegramQueueQuery) -> Result<workspace::TelegramToolMessagePage, String> {
+    workspace::query_telegram_tool_messages(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn telegram_tool_message_keys(state: State<'_, AppState>, input: workspace::TelegramQueueQuery) -> Result<Vec<String>, String> {
+    workspace::telegram_tool_message_keys(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn get_telegram_tool_messages(state: State<'_, AppState>, tool: String, keys: Vec<workspace::TelegramMessageKey>) -> Result<Vec<workspace::TelegramToolMessage>, String> {
+    workspace::get_telegram_tool_messages(state.runtime.database_path.as_ref(), &tool, &keys)
+}
+
+#[tauri::command]
+fn create_telegram_tool_message(state: State<'_, AppState>, input: workspace::TelegramMessageCreateInput) -> Result<workspace::TelegramToolMessage, String> {
+    workspace::create_telegram_tool_message(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn update_telegram_tool_message(state: State<'_, AppState>, input: workspace::TelegramMessageUpdateInput) -> Result<(), String> {
+    workspace::update_telegram_tool_message(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn delete_telegram_tool_messages(state: State<'_, AppState>, tool: String, keys: Vec<workspace::TelegramMessageKey>) -> Result<usize, String> {
+    workspace::delete_telegram_tool_messages(state.runtime.database_path.as_ref(), &tool, &keys)
+}
+
+#[tauri::command]
+fn resolve_telegram_tool_messages(state: State<'_, AppState>, input: workspace::TelegramQueueResolveInput) -> Result<usize, String> {
+    workspace::resolve_telegram_tool_messages(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn create_telegram_message_run(state: State<'_, AppState>, input: workspace::TelegramMessageRunInput) -> Result<i64, String> {
+    workspace::create_telegram_message_run(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+fn telegram_tool_cursor(state: State<'_, AppState>, tool: String, source_id: i64) -> Result<workspace::TelegramToolCursor, String> {
+    workspace::telegram_tool_cursor(state.runtime.database_path.as_ref(), &tool, source_id)
+}
+
+#[tauri::command]
+fn record_telegram_load_session(state: State<'_, AppState>, input: workspace::TelegramLoadSessionInput) -> Result<i64, String> {
+    workspace::record_telegram_load_session(state.runtime.database_path.as_ref(), input)
+}
+
+#[tauri::command]
+async fn telegram_user_mark_read(state: State<'_, AppState>, source_id: i64, message_id: i32) -> Result<(), String> {
+    let external_id = workspace::telegram_user_source_external_id(state.runtime.database_path.as_ref(), source_id)?;
+    let remote_result = state.telegram_user.mark_read_through(&external_id, message_id).await;
+    let remote_error = remote_result.as_ref().err().cloned().unwrap_or_default();
+    let local_result = workspace::update_telegram_read_result(
+        state.runtime.database_path.as_ref(),
+        source_id,
+        message_id as i64,
+        &remote_error,
+    );
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if remote_result.is_ok() && local_result.is_ok() { "INFO" } else { "WARN" },
+        "telegram_user",
+        "Telegram 来源标记已读",
+        &serde_json::json!({"sourceId":source_id,"messageId":message_id,"ok":remote_result.is_ok() && local_result.is_ok(),"error":if !remote_error.is_empty() { remote_error.clone() } else { local_result.as_ref().err().cloned().unwrap_or_default() }}),
+    );
+    remote_result?;
+    local_result.map_err(|error| format!("Telegram 已标记已读，但本地状态保存失败：{error}"))
 }
 
 #[tauri::command]
@@ -514,6 +694,10 @@ pub fn run() {
                 .and_then(|value| value.get("databasePath").and_then(|path| path.as_str()).map(PathBuf::from))
                 .filter(|path| path.is_file())
                 .unwrap_or(formal_database_path);
+            let missav_blacklist_directory = missav_blacklists::resolve_default_directory()
+                .map_err(std::io::Error::other)?;
+            missav_blacklists::ensure_files(&missav_blacklist_directory)
+                .map_err(std::io::Error::other)?;
             trace("setup:initializing_database");
             database::initialize(&database_path).map_err(|error| std::io::Error::other(format!("初始化正式数据库失败：{error}")))?;
             trace("setup:database_ready");
@@ -536,6 +720,7 @@ pub fn run() {
                 chrome_bridge_error,
                 extension_path,
                 database_location_config,
+                missav_blacklist_directory,
                 telegram_user: Arc::new(telegram_user::TelegramUserRuntime::new(&data_dir)),
             });
             trace("setup:ready");
@@ -552,13 +737,24 @@ pub fn run() {
             update_content_result,
             delete_content_results,
             query_permanent_records,
+            query_permanent_record_ids,
             update_permanent_record,
+            update_permanent_records,
             delete_permanent_records,
             list_input_sources,
             save_input_source,
+            update_tool_source_bindings,
             delete_input_source,
+            known_telegram_message_ids,
+            commit_telegram_sync,
+            list_inbox_tasks,
+            update_inbox_task_stage,
+            record_script_generation,
             get_app_setting,
             set_app_setting,
+            read_missav_blacklist_files,
+            write_missav_blacklist_file,
+            open_missav_blacklist_folder,
             append_app_log,
             list_app_logs,
             create_database_backup,
@@ -567,8 +763,7 @@ pub fn run() {
             read_input_files,
             write_text_file,
             fetch_site_page,
-            call_raindrop
-            ,call_telegram_bot,
+            call_telegram_bot,
             telegram_user_status,
             telegram_user_connect,
             telegram_user_start_phone,
@@ -579,6 +774,19 @@ pub fn run() {
             telegram_user_cancel_auth,
             telegram_user_list_dialogs,
             telegram_user_sync_messages,
+            telegram_user_load_history,
+            store_telegram_tool_messages,
+            query_telegram_tool_messages,
+            telegram_tool_message_keys,
+            get_telegram_tool_messages,
+            create_telegram_tool_message,
+            update_telegram_tool_message,
+            delete_telegram_tool_messages,
+            resolve_telegram_tool_messages,
+            create_telegram_message_run,
+            telegram_tool_cursor,
+            record_telegram_load_session,
+            telegram_user_mark_read,
             telegram_user_logout,
             chrome_bridge_info,
             enqueue_chrome_favorites,
