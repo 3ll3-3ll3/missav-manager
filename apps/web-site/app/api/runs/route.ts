@@ -1,0 +1,37 @@
+import { apiError, bodyJson } from "../../../lib/api-response";
+import { getRun, listRuns, mutateRun, saveRun } from "../../../lib/server-store";
+
+export async function GET(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const id = url.searchParams.get("id");
+    if (id) return Response.json(await getRun(id));
+    return Response.json(await listRuns(
+      Number(url.searchParams.get("page") || 1), Number(url.searchParams.get("pageSize") || 30),
+      url.searchParams.get("tool") || "", url.searchParams.get("search") || "",
+    ));
+  } catch (error) { return apiError(error); }
+}
+
+export async function POST(request: Request) {
+  try {
+    const input = await bodyJson(request);
+    return Response.json(await saveRun(input as Parameters<typeof saveRun>[0]), { status: 201 });
+  } catch (error) { return apiError(error); }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const input = await bodyJson(request);
+    await mutateRun(String(input.id || ""), "rename", String(input.name || ""));
+    return Response.json({ ok: true });
+  } catch (error) { return apiError(error); }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const id = new URL(request.url).searchParams.get("id") || "";
+    await mutateRun(id, "delete");
+    return Response.json({ ok: true });
+  } catch (error) { return apiError(error); }
+}
