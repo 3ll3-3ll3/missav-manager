@@ -2,6 +2,8 @@
 
 更新日期：2026-08-01
 
+> 2026-08-01 更正：第 5、7、17 项中任何“Telegram 个人 API 仅留在 Windows”的旧选择均已撤销。正确范围是 Windows 保留，同时网站实现 Bot API 与个人账号 MTProto；两端 Session 和检查点彼此独立。Telegram 网站功能在真实登录、来源发现、历史、增量、已读和安全测试完成前保持“未完成”。
+
 ## 填写说明
 
 - 把选项前的 `[ ]` 改为 `[x]`；不确定就保留“按推荐”。
@@ -70,9 +72,9 @@ GitHub 用户名（可选）：
 
 ### 5. 采用哪条迁移路线？
 
-- [ ] 混合版：网站负责文本工具、MissAV 脚本、数据中心；本地 EXE 保留 Telegram 个人 API 和 123AV（推荐）
-- [x] 纯网站：允许暂时放弃无法在 Sites 稳定运行的本地能力
-- [ ] 只先做三个文本过滤器，验证 Sites 是否好用
+- [x] 双端并行：网站实现 Telegram Bot API 与个人账号 MTProto；Windows v0.5.13 同时保留独立回退（更正后范围）
+- [ ] 只实现 Bot / 导入，不实现网站个人账号 API（已撤销）
+- [ ] 只先做三个文本过滤器
 
 回答：
 
@@ -92,11 +94,10 @@ GitHub 用户名（可选）：
 
 回答：复刻当前最新版的所有功能（如出现本地功能不方便设计到网站里的你可以找我手动确认）
 
-### 7. 以下功能是否同意继续留在 Windows 本地端？
+### 7. Windows 回退与网站能力如何并存？
 
-- [x] 同意：Telegram 个人账号 API、扫码/手机号登录和远端标已读留在本地（推荐）
+- [x] Telegram 个人账号 API 在 Windows 保留，同时网站完整实现；两端彼此独立
 - [x] 同意：123AV 查询、Chrome 扩展和账号收藏留在本地（推荐）
-- [ ] 不同意，请说明必须搬到网站的功能：
 
 回答：
 
@@ -198,7 +199,12 @@ GitHub 用户名（可选）：
 
 可能需要的密钥名称只列名称、不填写值：
 
-- `TELEGRAM_BOT_TOKEN`（仅当迁移 Bot 时）
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_API_ID`
+- `TELEGRAM_API_HASH`
+- `TELEGRAM_SESSION_ENCRYPTION_KEY`
+- `MTPROTO_BACKEND_URL`（仅在实测需要私有后端时）
+- `MTPROTO_BACKEND_TOKEN`（仅在实测需要私有后端时）
 - 其他：
 
 ### 18. 是否同意以下账号安全边界？

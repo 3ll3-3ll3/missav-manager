@@ -21,3 +21,21 @@ test("Secret 变量只在服务端读取，客户端与默认配置不含 Token 
   const server=await readFile(projectFile("lib/server-telegram.ts"),"utf8");const client=await readFile(projectFile("app/components/telegram-panel.tsx"),"utf8");
   assert.match(server,/TELEGRAM_BOT_TOKEN/);assert.doesNotMatch(client,/TELEGRAM_BOT_TOKEN/);assert.doesNotMatch(server,/\d{8,12}:[A-Za-z0-9_-]{20,}/);
 });
+
+test("产品状态不再把 Telegram 个人 API 宣称为 Windows 独占",async()=>{
+  const workbench=await readFile(projectFile("app/workbench.tsx"),"utf8");
+  const telegramPanel=await readFile(projectFile("app/components/telegram-panel.tsx"),"utf8");
+  assert.doesNotMatch(workbench,/Telegram 个人账号 API、扫码\/手机号登录、远端标已读。/);
+  assert.match(workbench,/WEB \+ WINDOWS/);
+  assert.match(telegramPanel,/网站正式目标/);
+  assert.match(telegramPanel,/尚未完成/);
+});
+
+test("MTProto 平台探针不读取凭据且只使用固定 Telegram 端点",async()=>{
+  const probe=await readFile(projectFile("lib/server-mtproto-probe.ts"),"utf8");
+  assert.match(probe,/149\.154\.167\.51/);
+  assert.match(probe,/wss:\/\/venus\.web\.telegram\.org\/apiws/);
+  assert.match(probe,/"binary"/);
+  assert.match(probe,/network_only/);
+  for(const forbidden of ["TELEGRAM_API_HASH","TELEGRAM_API_ID","TELEGRAM_BOT_TOKEN","process.env","env."])assert.doesNotMatch(probe,new RegExp(forbidden.replace(".","\\."),"i"));
+});

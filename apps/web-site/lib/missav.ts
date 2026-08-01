@@ -1,5 +1,5 @@
-import scriptTemplateRaw from "../../desktop-v05/src/assets/missav-browser-script.txt?raw";
-import typeBoundaryTagsRaw from "../../desktop-v05/src/assets/missav-type-boundary-tags.txt?raw";
+import scriptTemplateRaw from "../assets/missav-browser-script.txt?raw";
+import typeBoundaryTagsRaw from "../assets/missav-type-boundary-tags.txt?raw";
 import { csvSafe, escapeHtml, safeHttpUrl, sha256Hex } from "./security";
 import type { RecordRow } from "./types";
 
@@ -113,4 +113,3 @@ export function buildRaindropExport(records: RecordRow[], exportBlacklistValues:
   });
   return { content: `\uFEFF${[header.map(csvSafe).join(","), ...rows].join("\r\n")}`, included: included.length, excluded: records.length - included.length, audits };
 }
-

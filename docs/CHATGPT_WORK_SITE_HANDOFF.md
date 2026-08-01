@@ -2,6 +2,21 @@
 
 更新日期：2026-08-01
 
+## 0. 2026-08-01 Telegram 需求更正（最高优先级）
+
+此前把“继续留在 Windows 本地端”解释成“网站不实现 Telegram 个人账号 API”是错误的。本节撤销本文及其他旧交接材料中的以下旧结论：
+
+- “Telegram 个人账号 API 仅限 Windows”。
+- “网站不得执行个人账号历史回拉或标记已读”。
+- “网站只需要 Bot API，不需要 `api_id` / `api_hash`”。
+
+正确产品边界是：
+
+- Windows v0.5.13 保留个人账号 API，作为独立可运行的稳定回退。
+- 网站同时实现 Telegram Bot API 与个人账号 MTProto；二者与 Windows 会话彼此独立。
+- 在网站完成真实登录、来源发现、历史读取、连续增量、三种已读策略、加密 Session、注销删除和安全测试前，Telegram 网站能力必须标为“未完成”，不得因 Bot、导入、构建或模拟测试通过而宣布完成。
+- 若当前 Sites / Cloudflare Worker 不能稳定承载 MTProto，必须先部署并运行不含凭据的 TCP/WebSocket/生命周期探针，记录实际结果；确认限制后，才可使用仅所有者可访问的独立私有 MTProto 后端。不得以推测的平台限制删除个人 API。
+
 目标仓库：`3ll3-3ll3/missav-manager`
 
 网站工作分支：`codex/sites-private-web`
@@ -62,7 +77,7 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 - Site 归 B 账号所有，第一版仅 B 账号本人可访问。
 - 暂不使用自定义域名，先使用 Sites 生成的地址。
 - 第一版尽可能复刻当前最新版全部功能。
-- Telegram 个人账号 API、扫码/手机号登录和远端标已读留在 Windows 本地端。
+- Telegram 个人账号 API 在 Windows 保留，同时必须在网站实现；两端凭据、Session、来源、检查点和已读状态彼此独立。
 - 123AV 查询、Chrome 扩展、APP 内助手和账号收藏留在 Windows 本地端。
 - 网站恢复 Raindrop 兼容导出文件，但不直接连接 Raindrop API。
 - 网站需要永久数据库、历史、Tag、两层黑名单和完整表格 CRUD。
@@ -105,25 +120,34 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 | Windows 剪贴板 | 用户触发的浏览器剪贴板操作 |
 | 本地旧库迁移 | 脱敏迁移包预览、计数核对、确认导入和回滚 |
 
-### 5.3 必须继续留在 Windows 本地端
+### 5.3 Windows 独立回退能力
 
-- Telegram 个人账号 MTProto 登录。
-- Telegram 二维码、手机号、验证码、两步验证密码。
-- Windows DPAPI 加密会话。
-- 个人账号群组/频道历史回拉与远端标已读。
+- Windows 端继续使用 DPAPI 加密自己的 Telegram 凭据与 Session；网站不得读取、迁移或复用该 Session。
+- Windows 端继续提供个人账号 MTProto 登录、二维码/手机号/验证码/两步验证、来源发现、历史、增量和已读能力，作为网站故障时的独立回退。
 - 复用本地 Chrome 登录状态。
 - Chrome 扩展桥、配对码和本地串行收藏。
 - 123AV APP 内账号窗口和账号收藏。
 - 本机任意目录直接读写。
 
-网站可以为这些能力提供说明、导出任务或下载文件，但不能声称在服务器端已经完成账号操作。
+Windows 回退不缩减网站 Telegram 范围。只有 123AV 账号操作、本机浏览器与任意目录读写仍是明确的 Windows-only 能力。
 
-### 5.4 Telegram Bot 的网站策略
+### 5.4 Telegram 双 API 网站策略
 
 - 可以实现用户手动触发的 Bot API 增量接收，但 Token 只能放在 Site Secret。
 - 不做永久后台轮询，不承诺补回 Bot 加入前的历史。
 - 一个 Bot 的 `getUpdates` 是全局队列；消息必须一次安全分发到所有已绑定工具，不能为每个工具伪造独立远端游标。
-- 若 Sites 第一版无法稳定提供该能力，必须保留导入 Telegram 官方 HTML/JSON 和本地端同步方案，同时把 Bot 功能标记为未启用，而不是静默失败。
+- 网站个人账号 API 必须尽可能复刻 Windows v0.5.13：
+  - `api_id`、`api_hash` 的所有者私密配置。
+  - 二维码登录，以及国际格式手机号、验证码和两步验证密码登录。
+  - 明确的登录阶段、超时、取消、解锁、恢复已保存登录、注销并删除网站 Session。
+  - 发现普通群、超级群和广播频道；最多保存 100 个来源。
+  - 每个工具分别绑定多个来源；同一来源可绑定多个工具。
+  - 最近消息、指定时间、历史回拉和日常增量；数据库端分页与连续检查点。
+  - 来源 ID + 消息 ID 去重、正文共享、工具独立队列。
+  - `safe_auto`、`never`、`manual` 三种已读策略；历史回拉永不自动标已读；手动确认后按 `max_id` 标记已读。
+- 网站端 Session 必须服务端加密后保存。手机号、验证码、两步验证密码和二维码内容只存在于仅所有者可访问的登录流程短时内存，不得落入 D1、浏览器持久存储、日志或错误堆栈。
+- 网站与 Windows 端不得共享或覆盖 Telegram Session、检查点或已读状态。
+- 若 Sites 运行时实测不稳定，网站通过仅所有者可访问、双向鉴权的私有 MTProto 后端实现上述能力；Site 仍是唯一用户界面和业务数据库边界。
 
 ## 6. 五个工具的关键业务规则
 
@@ -195,6 +219,9 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 - `telegram_tool_queue`：每个工具独立的消息状态。
 - `telegram_message_fingerprints`：来源 ID + 消息 ID 去重。
 - `sync_transactions`：同步审计。
+- `telegram_accounts`：网站个人账号连接状态；不得保存明文凭据或 Session。
+- `telegram_auth_flows`：登录阶段、过期时间、取消状态和一次性挑战标识；不得保存手机号、验证码、密码或二维码内容。
+- `telegram_source_checkpoints`：每个个人来源的连续增量、历史基线、安全可标位置和最近远端已读位置。
 - `task_inbox`：统一处理中心。
 - `script_generations`：脚本版本、哈希、任务和番号数，不重复保存大脚本。
 - `app_logs`：脱敏日志。
@@ -236,7 +263,7 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 - 用户只处理所选消息；空结果记录为 `processed_empty`，不能与未处理混淆。
 - 可复制或导出所选原文。
 - 处理成功后按用户决定删除正文，只保留结果、消息 ID、时间和必要审计字段。
-- 网站不得代表个人账号执行 Telegram 标已读；该能力明确跳转或提示使用 Windows v0.5.13。
+- 网站个人 API 实现三种来源级已读策略。历史回拉永不自动标已读；`safe_auto` 只能在连续范围完整落库后执行；`manual` 必须由所有者确认并按本地记录的安全 `max_id` 提交；`never` 永不提交远端已读。
 
 ## 10. Raindrop 文件导出
 
@@ -254,6 +281,9 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 - Site 必须限制为 B 账号本人。
 - 未登录或非所有者请求不能读取任何业务数据。
 - Secret 只通过 Sites 设置注入服务器端。
+- `TELEGRAM_API_ID`、`TELEGRAM_API_HASH`、`TELEGRAM_BOT_TOKEN` 只能通过 Site Secrets 或网站所有者私密配置提供。不得写入 Git、前端代码、构建产物、数据库或日志。
+- 网站加密 Session 的密钥必须使用独立 Site Secret。若启用私有 MTProto 后端，其 URL 与站点到后端的鉴权密钥也必须使用 Site Secrets。
+- 手机号、验证码、两步验证密码和二维码内容只允许在仅所有者可访问的登录界面短时使用；请求完成、取消或超时后立即从内存清除。
 - 前端代码、构建产物、日志、错误堆栈和数据库不得泄露 Secret。
 - 上传文件默认只用于本次解析；除非用户明确保存，不长期保留原文件。
 - Telegram 正文按“处理成功后删除”策略执行。
@@ -285,6 +315,8 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 - 复用规则源码或移植为共享纯函数，并保留对应测试夹具。
 - 不要通过复制 `generated/legacyBundle.js` 作为最终网站架构；应把权威规则整理为可测试模块。
 - 不要依赖 Windows 路径、Tauri API、Node 原生 SQLite、DPAPI 或本机 Chrome。
+- 在决定 MTProto 运行位置前，必须在当前部署运行不含真实凭据的网络与生命周期探针，并记录：原始 TCP、Telegram WebSocket、连接可持续时间、请求结束后的连接状态、Worker 重启/驱逐后的恢复能力，以及 Session 加密往返。
+- 若探针证明当前 Site Worker 无法稳定维持登录流程或跨请求会话，则在 `apps/web-site/` 保留 Site 适配器，并部署仅所有者可访问的独立私有 MTProto 服务。后端不得开放浏览器直连；所有请求必须由 Site 服务端签名转发。
 - 页面刷新后正式数据、历史和设置不得丢失。
 - 所有错误需要给出可操作说明，不能只显示 `Error` 或原始堆栈。
 - 完成实现后运行构建、规则回归、数据库测试、权限测试和移动端/桌面验收。
@@ -300,7 +332,8 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 - 刷新或重新登录后永久数据与历史不丢失。
 - B 账号退出后，其他账号不能访问数据。
 - Secrets 不出现在前端、Git、日志和错误消息中。
-- Telegram 个人 API 和 123AV 本地能力没有被错误宣称为网站能力。
+- Telegram Bot API 与个人账号 API 均完成真实网站验收；Windows 同类能力仍可独立运行。
+- Telegram 的“完成”必须同时有真实账号登录、群组/频道发现、历史读取、连续增量、三种已读策略、Session 恢复/注销和敏感信息泄漏测试证据。
 - Raindrop 只生成导出文件，不发起 API 请求。
 - Windows v0.5.13 分支、标签、Release 和 EXE 保持不变。
 
@@ -309,7 +342,7 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 1. 私人 Site 预览地址。
 2. 网站分支的最新提交。
 3. 已实现功能清单。
-4. 留在 Windows 本地端的功能清单。
+4. Windows 独立回退功能清单，以及网站 Telegram 双 API 的独立状态。
 5. 自动测试和人工验收结果。
 6. 数据库结构和迁移格式说明。
 7. Site Secrets 只列变量名，不列值。
@@ -319,4 +352,4 @@ Windows 基线提交：`4e2aad032716882db707df2ebea2affee63beebc`
 
 如果 Work 已经能读取仓库，可直接发送：
 
-> 请在 `3ll3-3ll3/missav-manager` 的 `codex/sites-private-web` 分支工作。完整阅读 `AGENTS.md` 和 `docs/CHATGPT_WORK_SITE_HANDOFF.md`，以 `codex/v0.5.13-desktop-stable` / `v0.5.13-desktop-baseline` 的 v0.5.13 为行为基线。只在 `apps/web-site/` 建立 Sites 私人网站，不修改稳定分支、标签或 Windows Release。按交接文档直接完成实现、测试和私人预览，不要只返回计划；真正遇到会改变产品范围的本地能力限制时再询问我。
+> 请在 `3ll3-3ll3/missav-manager` 的 `codex/sites-private-web` 分支工作。完整阅读 `AGENTS.md` 和 `docs/CHATGPT_WORK_SITE_HANDOFF.md`，以 `codex/v0.5.13-desktop-stable` / `v0.5.13-desktop-baseline` 的 v0.5.13 为行为基线。只在 `apps/web-site/` 建立 Sites 私人网站，不修改稳定分支、标签或 Windows Release。Telegram 必须同时支持 Bot API 与个人账号 MTProto；Windows 端只作为独立回退，不构成网站删减理由。按交接文档直接完成实现、真实外部测试和私人部署；未完成真实登录、来源发现、历史、连续增量、三种已读策略、Session 恢复/注销与安全测试前，不得宣布 Telegram 完成。

@@ -37,7 +37,7 @@ const nav: Array<{ id: ViewId; label: string; icon: string }> = [
   { id: "migration", label: "数据迁移", icon: "⇄" },
   { id: "snapshots", label: "恢复点", icon: "↶" },
   { id: "logs", label: "运行日志", icon: "≡" },
-  { id: "desktop", label: "桌面端能力", icon: "▣" },
+  { id: "desktop", label: "Windows 回退", icon: "▣" },
 ];
 
 function download(
@@ -237,17 +237,16 @@ function Overview({
         </div>
         <div className="card">
           <span className="eyebrow">边界清晰</span>
-          <h3>仍在 Windows 桌面端</h3>
+          <h3>Telegram 双端状态</h3>
           <ul className="boundary-list">
             <li>
-              <span>本地</span>Telegram 个人账号
-              API、扫码/手机号登录、远端标已读
+              <span>未完成</span>网站个人账号 MTProto：真实登录、历史、增量与已读待验收
             </li>
             <li>
-              <span>本地</span>123AV 真实查询、Chrome 扩展与账号收藏
+              <span>保留</span>Windows v0.5.13 个人 API 独立运行，不与网站共享 Session
             </li>
             <li>
-              <span>网站</span>Bot 增量、任务文件与 Raindrop 文件导出
+              <span>网站</span>Bot 增量、官方 JSON、工具队列与 Raindrop 文件导出
             </li>
           </ul>
           <button onClick={() => open("desktop")}>查看交接与导出入口 →</button>
@@ -274,23 +273,24 @@ function Metric({
   );
 }
 
-const desktopHandoff = `MissAV Manager Windows v0.5.13 本地功能交接\n\n稳定参考：codex/v0.5.13-desktop-stable / v0.5.13-desktop-baseline / 4e2aad0\n\n继续由 Windows 桌面端完成：\n1. Telegram 个人账号 API、扫码/手机号登录、远端标已读。\n2. 123AV 查询、Chrome 扩展和账号收藏。\n\n私人网站不持有这些本地凭据，也不会伪装为在线实现。网站可导出 TXT/CSV/JSON 与 Raindrop 导入文件，再交给本地流程继续处理。\n`;
+const desktopHandoff = `MissAV Manager Windows v0.5.13 回退能力交接\n\n稳定参考：codex/v0.5.13-desktop-stable / v0.5.13-desktop-baseline / 4e2aad0\n\nWindows 继续独立保留：\n1. Telegram 个人账号 API、扫码/手机号登录、历史、增量和远端标已读。\n2. 123AV 查询、Chrome 扩展和账号收藏。\n\n需求更正：Windows 保留不表示网站取消个人 API。网站必须另行实现 Telegram Bot API 与个人账号 MTProto，且不得复用 Windows Session。网站个人 API 在真实登录、来源发现、历史、连续增量、三种已读策略、Session 恢复/注销和安全测试完成前保持“未完成”。\n`;
 function DesktopBoundary({ onExport }: { onExport: () => void }) {
   return (
     <div className="stack-lg">
       <section className="callout warning">
-        <strong>这些功能没有迁移到网站</strong>
+        <strong>Windows 是独立回退，不是网站删减清单</strong>
         <p>
-          它们依赖个人账号会话、本机浏览器或远端已读操作，继续由 Windows v0.5.13
-          承担。网站不会要求或记录这些密钥。
+          Telegram 个人 API 将在网站和 Windows 同时保留，二者使用独立 Session。
+          当前网站 MTProto 尚未完成真实验收，因此不会把 Telegram 标为完成。
         </p>
       </section>
       <section className="boundary-cards">
         <article className="card">
-          <span className="local-badge">WINDOWS ONLY</span>
+          <span className="online-badge">WEB + WINDOWS</span>
           <h3>Telegram 个人账号</h3>
           <p>
-            API ID/Hash、扫码或手机号登录、会话文件与远端标已读均留在桌面端。
+            网站目标包含 API ID/Hash 私密配置、二维码/手机号登录、历史、增量、
+            Session 与三种已读策略；Windows v0.5.13 同时独立保留。
           </p>
         </article>
         <article className="card">

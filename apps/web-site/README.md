@@ -19,13 +19,20 @@
 - D1 持久化与服务端分页；浏览器不会一次加载全部正式记录，也不使用 Local Storage 保存正式数据。
 - Raindrop CSV 与 Netscape 书签 HTML 生成；第二层黑名单会从 Raindrop 文件中排除匹配记录。
 - 脱敏 JSON/CSV 的预览、计数、SHA-256 核对、分批写入和批次回滚。
+- Telegram Bot API 增量、官方 JSON 导入、来源多对多绑定和工具独立队列。
 
-## 仍由 Windows 桌面端完成
+## Telegram 个人账号 API 状态
 
-- Telegram 个人账号 API、扫码/手机号登录、会话与远端标已读。
+网站必须实现个人账号 MTProto，并尽可能复刻 Windows v0.5.13 的二维码/手机号登录、验证码、两步验证、Session、来源发现、历史、连续增量和三种已读策略。Windows 端同时保留，二者 Session、来源和检查点彼此独立。
+
+当前提交只完成 Bot、官方 JSON、绑定和工具队列；个人账号 MTProto 尚未完成真实登录与远端验收，因此 Telegram 整体状态是“未完成”。不得把构建或模拟测试通过表述为 Telegram 完成。
+
+当前 Sites 运行时先通过不含凭据的受限探针验证 Telegram TCP 可达性。若实测证明 Worker 无法稳定承载跨请求登录会话，则 Site 改为服务端调用仅所有者可访问的私有 MTProto 后端；不会删除个人 API。
+
+## 仍由 Windows 桌面端独占
+
 - 123AV 查询、Chrome 扩展和账号收藏。
-
-网站会明确标示这些边界并提供数据/交接导出，不伪装成已经在线实现。
+- 本机浏览器会话、任意目录读写与 Windows DPAPI 存储实现。
 
 ## 数据迁移
 
@@ -37,7 +44,7 @@
 4. 确认后才会按 100 条一批写入 D1。
 5. 如数量或内容不符，在迁移批次中执行回滚；新增记录会删除，被覆盖记录会恢复原值。
 
-不要把 Telegram 会话、API 密钥、正式 SQLite 或未脱敏原始归档上传到网站。所有密钥仅能配置在 Sites Secrets 中。
+不要把 Windows Telegram 会话、正式 SQLite 或未脱敏原始归档上传到网站。`TELEGRAM_API_ID`、`TELEGRAM_API_HASH`、`TELEGRAM_BOT_TOKEN` 和 Session 加密密钥只能配置在 Sites Secrets 或所有者私密配置中；手机号、验证码、两步验证密码和二维码内容只允许在所有者登录流程中短时使用。
 
 ## 开发与验证
 

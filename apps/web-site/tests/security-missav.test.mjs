@@ -29,6 +29,12 @@ test("默认参考库与交接包一致，并生成未改写核心流程的完�
   assert.equal(injected.includes(blocked), false);
 });
 
+test("网站使用 apps/web-site 内的固定桌面脚本副本", async () => {
+  const webScript = await readFile(projectFile("assets/missav-browser-script.txt"), "utf8");
+  const desktopScript = await readFile(new URL("../../desktop-v05/src/assets/missav-browser-script.txt", import.meta.url), "utf8");
+  assert.equal(webScript, desktopScript);
+});
+
 test("Raindrop 预览和导出共用第二层黑名单，排除项仍保留审计", () => {
   const base = {tool:"missav",recordKey:"abf-354",primaryValue:"ABF-354",secondaryValue:"",status:"ready",actressTags:[],genreTags:[],sourceUrl:"",missavUrl:"",av123Url:"",metadata:{},createdAt:"2026-07-20T00:00:00Z",updatedAt:"2026-07-20T00:00:00Z"};
   const rows = [{...base,id:"1",tags:["允许"]},{...base,id:"2",recordKey:"sone-314",primaryValue:"SONE-314",tags:["测试排除"]},{...base,id:"3",recordKey:"ipx-607",primaryValue:"IPX-607",tags:["<img onerror=alert(1)>"]}];

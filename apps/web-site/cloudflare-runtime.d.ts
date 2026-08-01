@@ -32,6 +32,11 @@ declare module "cloudflare:workers" {
   export const env: {
     DB: D1Database;
     TELEGRAM_BOT_TOKEN?: string;
+    TELEGRAM_API_ID?: string;
+    TELEGRAM_API_HASH?: string;
+    TELEGRAM_SESSION_ENCRYPTION_KEY?: string;
+    MTPROTO_BACKEND_URL?: string;
+    MTPROTO_BACKEND_TOKEN?: string;
     [key: string]: unknown;
   };
 }

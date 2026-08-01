@@ -31,6 +31,7 @@ Thumbs.db
 # Editor and environment files
 .vscode/
 .idea/
+/.openai/
 *.log
 .env
 .env.*

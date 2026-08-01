@@ -68,6 +68,13 @@ export default function TelegramPanel({
   });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [probe, setProbe] = useState<null | {
+    tcpReachable: boolean;
+    websocketReachable: boolean;
+    tcpElapsedMs: number;
+    websocketElapsedMs: number;
+    conclusion: string;
+  }>(null);
   const bound = useMemo(
     () =>
       new Set(
@@ -128,6 +135,20 @@ export default function TelegramPanel({
       loadQueue();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "拉取失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function runMtprotoProbe() {
+    setBusy(true);
+    try {
+      const result = await api("/api/telegram/mtproto/probe", {
+        method: "POST",
+      });
+      setProbe(result);
+      setNotice(result.conclusion);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "MTProto 平台探针失败");
     } finally {
       setBusy(false);
     }
@@ -279,16 +300,43 @@ export default function TelegramPanel({
       <section className="callout">
         <strong>当前工具：{tool}</strong>
         <p>
-          一个 Bot 只有一条全局 updates
-          队列；每次拉取后会一次写入所有已绑定工具。个人账号历史回拉和标已读仍在
-          Windows。
+          一个 Bot 只有一条全局 updates 队列；每次拉取后会一次写入所有已绑定工具。
+          个人账号 MTProto 是网站正式目标，Windows 仅作为独立回退。当前网站尚未完成
+          真实登录、历史、增量和已读验收，因此 Telegram 整体仍是未完成状态。
         </p>
       </section>
       <section className="card">
         <div className="section-heading">
           <div>
+            <span className="eyebrow">个人账号 MTProto</span>
+            <h3>网站实现中 · 尚未完成</h3>
+          </div>
+          <span className="batch-status">未验收</span>
+        </div>
+        <p>
+          目标包含二维码/手机号登录、验证码、两步验证、加密 Session、100 个来源、
+          历史与连续增量，以及 safe_auto / never / manual 三种已读策略。
+        </p>
+        <div className="button-row">
+          <button disabled={busy} onClick={runMtprotoProbe}>
+            验证网站到 Telegram 的 TCP / WebSocket 通道
+          </button>
+          {probe && (
+            <span className={`batch-status ${probe.tcpReachable && probe.websocketReachable ? "applied" : ""}`}>
+              TCP {probe.tcpReachable ? `可达 ${probe.tcpElapsedMs}ms` : "失败"} · WS {probe.websocketReachable ? `可达 ${probe.websocketElapsedMs}ms` : "失败"}
+            </span>
+          )}
+        </div>
+        <small>
+          此探针不使用 api_id、api_hash、手机号或 Session，只验证当前生产运行时的网络能力；
+          它不能代替真实登录和持久会话验收。
+        </small>
+      </section>
+      <section className="card">
+        <div className="section-heading">
+          <div>
             <span className="eyebrow">来源与绑定</span>
-            <h3>Bot / Telegram 官方 JSON</h3>
+            <h3>Bot API / Telegram 官方 JSON</h3>
           </div>
           <span className={`batch-status ${configured ? "applied" : ""}`}>
             {configured ? "Secret 已配置" : "Secret 未配置"}
