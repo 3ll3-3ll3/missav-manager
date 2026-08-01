@@ -1,11 +1,12 @@
-import { apiError, bodyJson } from "../../../lib/api-response";
+import { apiError, bodyJson, requireAuthenticated } from "../../../lib/api-response";
 import { getRun, listRuns, mutateRun, saveRun } from "../../../lib/server-store";
 
 export async function GET(request: Request) {
   try {
+    requireAuthenticated(request);
     const url = new URL(request.url);
     const id = url.searchParams.get("id");
-    if (id) return Response.json(await getRun(id));
+    if (id) return Response.json(await getRun(id,Number(url.searchParams.get("resultPage")||1),Number(url.searchParams.get("resultPageSize")||100)));
     return Response.json(await listRuns(
       Number(url.searchParams.get("page") || 1), Number(url.searchParams.get("pageSize") || 30),
       url.searchParams.get("tool") || "", url.searchParams.get("search") || "",
@@ -15,6 +16,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    requireAuthenticated(request);
     const input = await bodyJson(request);
     return Response.json(await saveRun(input as Parameters<typeof saveRun>[0]), { status: 201 });
   } catch (error) { return apiError(error); }
@@ -22,6 +24,7 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    requireAuthenticated(request);
     const input = await bodyJson(request);
     await mutateRun(String(input.id || ""), "rename", String(input.name || ""));
     return Response.json({ ok: true });
@@ -30,8 +33,9 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    requireAuthenticated(request);
     const id = new URL(request.url).searchParams.get("id") || "";
-    await mutateRun(id, "delete");
-    return Response.json({ ok: true });
+    const result=await mutateRun(id, "delete");
+    return Response.json({ ok: true,...result });
   } catch (error) { return apiError(error); }
 }

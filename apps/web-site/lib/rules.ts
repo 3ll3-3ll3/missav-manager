@@ -196,8 +196,15 @@ function linkResults(messages: InputMessage[], kind: "badnews"|"haijiao") {
   return output;
 }
 
-function trustedMissavUrl(value: string) {
-  try { const url = new URL(value.replace(/[.,;!?，。；！？]+$/, "")); const host = url.hostname.toLowerCase().replace(/^www\./,""); if (!["missav.ai","missav.ws"].some((domain)=>host===domain || host.endsWith(`.${domain}`))) return ""; url.hash=""; return url.href; } catch { return ""; }
+function trustedSiteUrl(value: string, tool: ToolId) {
+  try {
+    const url = new URL(value.replace(/[.,;!?，。；！？]+$/, ""));
+    const host = url.hostname.toLowerCase().replace(/^www\./,"");
+    const domains = tool === "av123" ? ["123av.com"] : ["missav.ai","missav.ws"];
+    if (!domains.some((domain)=>host===domain || host.endsWith(`.${domain}`))) return "";
+    url.hash="";
+    return url.href;
+  } catch { return ""; }
 }
 
 export function processDocuments(tool: ToolId, documents: InputDocument[], start = "", end = "") {
@@ -206,10 +213,10 @@ export function processDocuments(tool: ToolId, documents: InputDocument[], start
   if (tool === "twitter") results = twitterResults(messages).map((item)=>({resultKey:item.name.toLowerCase(),primaryValue:item.name,secondaryValue:item.url,source:sourceFor(item.name,messages),metadata:{profileUrl:item.url}}));
   else if (tool === "badnews" || tool === "haijiao") results = linkResults(messages,tool).map((url)=>({resultKey:url,primaryValue:url,source:sourceFor(url,messages),metadata:{url}}));
   else {
-    const combined = messages.map(messageText).join("\n"); const codes = parseCodeList(combined); const sources = [...combined.matchAll(/https?:\/\/[^\s"'<>)]*/gi)].map((m)=>trustedMissavUrl(m[0])).filter(Boolean);
+    const combined = messages.map(messageText).join("\n"); const codes = parseCodeList(combined); const sources = [...combined.matchAll(/https?:\/\/[^\s"'<>)]*/gi)].map((m)=>trustedSiteUrl(m[0], tool)).filter(Boolean);
     results = codes.map((code)=>{
       const sourceUrl = sources.find((url)=>codesFromTrustedUrl(url).some((candidate)=>codeKey(candidate)===codeKey(code))) || "";
-      return { resultKey:code.toLowerCase(),primaryValue:code,secondaryValue:sourceUrl,status:"pending",source:sourceUrl || documents.map((item)=>item.name).join(", "),metadata:{querySite:"MissAV"} };
+      return { resultKey:code.toLowerCase(),primaryValue:code,secondaryValue:sourceUrl,status:tool === "av123" ? "task_ready" : "pending",source:sourceUrl || documents.map((item)=>item.name).join(", "),metadata:{querySite:tool === "av123" ? "123AV local task" : "MissAV"} };
     });
   }
   return { messages, results };

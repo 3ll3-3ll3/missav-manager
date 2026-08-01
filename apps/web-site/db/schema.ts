@@ -87,3 +87,132 @@ export const importChanges = sqliteTable("import_changes", {
   uniqueIndex("import_changes_batch_record_uq").on(table.batchId, table.tool, table.recordKey),
   index("import_changes_batch_idx").on(table.batchId, table.id),
 ]);
+
+export const importBatchChunks = sqliteTable("import_batch_chunks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  batchId: text("batch_id").notNull().references(() => importBatches.id, { onDelete: "cascade" }),
+  chunkIndex: integer("chunk_index").notNull(),
+  checksum: text("checksum").notNull(),
+  rowCount: integer("row_count").notNull(),
+  appliedCount: integer("applied_count").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("import_batch_chunks_batch_index_uq").on(table.batchId, table.chunkIndex),
+  index("import_batch_chunks_batch_idx").on(table.batchId, table.id),
+]);
+
+export const inputSources = sqliteTable("input_sources", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  externalKey: text("external_key").notNull(),
+  name: text("name").notNull(),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("input_sources_kind_external_uq").on(table.kind, table.externalKey)]);
+
+export const toolSourceBindings = sqliteTable("tool_source_bindings", {
+  id: text("id").primaryKey(),
+  sourceId: text("source_id").notNull().references(() => inputSources.id, { onDelete: "cascade" }),
+  tool: text("tool").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("tool_source_bindings_source_tool_uq").on(table.sourceId, table.tool)]);
+
+export const telegramMessages = sqliteTable("telegram_messages", {
+  id: text("id").primaryKey(),
+  sourceId: text("source_id").notNull().references(() => inputSources.id, { onDelete: "cascade" }),
+  messageId: text("message_id").notNull(),
+  messageDate: text("message_date").notNull().default(""),
+  body: text("body").notNull().default(""),
+  bodyDeletedAt: text("body_deleted_at").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("telegram_messages_source_message_uq").on(table.sourceId, table.messageId),
+  index("telegram_messages_date_idx").on(table.messageDate, table.id),
+]);
+
+export const telegramToolQueue = sqliteTable("telegram_tool_queue", {
+  id: text("id").primaryKey(),
+  telegramMessageId: text("telegram_message_id").notNull().references(() => telegramMessages.id, { onDelete: "cascade" }),
+  tool: text("tool").notNull(),
+  status: text("status").notNull().default("pending"),
+  candidateCount: integer("candidate_count").notNull().default(0),
+  runId: text("run_id").notNull().default(""),
+  processedAt: text("processed_at").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("telegram_tool_queue_message_tool_uq").on(table.telegramMessageId, table.tool),
+  index("telegram_tool_queue_tool_status_idx").on(table.tool, table.status, table.updatedAt),
+]);
+
+export const telegramMessageFingerprints = sqliteTable("telegram_message_fingerprints", {
+  id: text("id").primaryKey(),
+  sourceId: text("source_id").notNull().references(() => inputSources.id, { onDelete: "cascade" }),
+  messageId: text("message_id").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("telegram_message_fingerprints_source_message_uq").on(table.sourceId, table.messageId)]);
+
+export const syncTransactions = sqliteTable("sync_transactions", {
+  id: text("id").primaryKey(),
+  sourceKind: text("source_kind").notNull(),
+  status: text("status").notNull(),
+  receivedCount: integer("received_count").notNull().default(0),
+  insertedCount: integer("inserted_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  queueCount: integer("queue_count").notNull().default(0),
+  detailJson: text("detail_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [index("sync_transactions_created_idx").on(table.createdAt)]);
+
+export const taskInbox = sqliteTable("task_inbox", {
+  id: text("id").primaryKey(),
+  tool: text("tool").notNull(),
+  stage: text("stage").notNull(),
+  title: text("title").notNull(),
+  runId: text("run_id").notNull().default(""),
+  recordId: text("record_id").notNull().default(""),
+  sourceId: text("source_id").notNull().default(""),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [index("task_inbox_stage_updated_idx").on(table.stage, table.updatedAt)]);
+
+export const scriptGenerations = sqliteTable("script_generations", {
+  id: text("id").primaryKey(),
+  runId: text("run_id").notNull().default(""),
+  templateHash: text("template_hash").notNull(),
+  codeCount: integer("code_count").notNull(),
+  referenceTagCount: integer("reference_tag_count").notNull(),
+  referenceBlacklistCount: integer("reference_blacklist_count").notNull(),
+  exportBlacklistCount: integer("export_blacklist_count").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("script_generations_created_idx").on(table.createdAt)]);
+
+export const appLogs = sqliteTable("app_logs", {
+  id: text("id").primaryKey(),
+  level: text("level").notNull(),
+  category: text("category").notNull(),
+  message: text("message").notNull(),
+  detailJson: text("detail_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("app_logs_level_created_idx").on(table.level, table.createdAt)]);
+
+export const dataSnapshots = sqliteTable("data_snapshots", {
+  id: text("id").primaryKey(),
+  reason: text("reason").notNull(),
+  entity: text("entity").notNull(),
+  itemCount: integer("item_count").notNull().default(0),
+  status: text("status").notNull().default("ready"),
+  createdAt: text("created_at").notNull(),
+  restoredAt: text("restored_at").notNull().default(""),
+}, (table) => [index("data_snapshots_created_idx").on(table.createdAt)]);
+
+export const dataSnapshotItems = sqliteTable("data_snapshot_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  snapshotId: text("snapshot_id").notNull().references(() => dataSnapshots.id, { onDelete: "cascade" }),
+  entityKey: text("entity_key").notNull(),
+  previousJson: text("previous_json").notNull(),
+}, (table) => [index("data_snapshot_items_snapshot_idx").on(table.snapshotId, table.id)]);

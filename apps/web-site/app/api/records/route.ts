@@ -1,9 +1,10 @@
-import { apiError, bodyJson } from "../../../lib/api-response";
-import { bulkRecords, createRecord, listRecords, updateRecord } from "../../../lib/server-store";
+import { apiError, bodyJson, requireAuthenticated } from "../../../lib/api-response";
+import { bulkRecords, createRecord, exportSelectedRecords, listRecords, replaceRecords, updateRecord, updateRecordFields } from "../../../lib/server-store";
 import type { RecordFilters, SanitizedImportRecord } from "../../../lib/types";
 
 export async function GET(request: Request) {
   try {
+    requireAuthenticated(request);
     const params = new URL(request.url).searchParams;
     return Response.json(await listRecords({
       page: Number(params.get("page") || 1), pageSize: Number(params.get("pageSize") || 50),
@@ -14,13 +15,16 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  try { return Response.json(await createRecord(await bodyJson(request) as SanitizedImportRecord), { status: 201 }); }
+  try { requireAuthenticated(request); const input=await bodyJson(request); if(input.action==="selection-export")return Response.json({content:await exportSelectedRecords(input as Parameters<typeof exportSelectedRecords>[0])}); return Response.json(await createRecord(input as SanitizedImportRecord), { status: 201 }); }
   catch (error) { return apiError(error); }
 }
 
 export async function PATCH(request: Request) {
   try {
+    requireAuthenticated(request);
     const input = await bodyJson(request);
+    if(input.action==="paste")return Response.json(await updateRecordFields(String(input.id||""),(input.values as Record<string,unknown>)||{}));
+    if(input.action==="replace")return Response.json(await replaceRecords(input as Parameters<typeof replaceRecords>[0]));
     if (input.action === "bulk-update") return Response.json(await bulkRecords({
       action: "update", mode: input.mode === "all" ? "all" : "ids", ids: input.ids as string[],
       excludeIds: input.excludeIds as string[], filters: input.filters as RecordFilters, field: String(input.field), value: input.value,
@@ -32,6 +36,7 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    requireAuthenticated(request);
     const input = await bodyJson(request);
     return Response.json(await bulkRecords({
       action: "delete", mode: input.mode === "all" ? "all" : "ids", ids: input.ids as string[],

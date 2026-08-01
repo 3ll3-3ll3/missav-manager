@@ -1,4 +1,4 @@
-export const TOOL_IDS = ["twitter", "badnews", "haijiao", "missav"] as const;
+export const TOOL_IDS = ["twitter", "badnews", "haijiao", "missav", "av123"] as const;
 export type ToolId = (typeof TOOL_IDS)[number];
 
 export type ToolResult = {
@@ -7,9 +7,14 @@ export type ToolResult = {
   secondaryValue?: string;
   status?: string;
   tags?: string[];
+  actressTags?: string[];
+  genreTags?: string[];
   source?: string;
   metadata?: Record<string, unknown>;
 };
+
+export const TASK_STAGES = ["new", "filtered", "website", "review", "error", "completed"] as const;
+export type TaskStage = (typeof TASK_STAGES)[number];
 
 export type RecordRow = {
   id: string;
