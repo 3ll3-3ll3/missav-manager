@@ -1,4 +1,4 @@
-const { existsSync } = require("node:fs");
+const { cpSync, existsSync, rmSync } = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
@@ -18,4 +18,11 @@ const args = isSiteBuild ? ["--prefix", "apps/web-site", "run", "build"] : ["--w
 
 const result = spawnSync(command, args, { stdio: "inherit" });
 if (result.error) throw result.error;
-process.exit(result.status ?? 1);
+if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1);
+
+if (isSiteBuild) {
+  const siteDist = path.resolve("apps/web-site/dist");
+  const rootDist = path.resolve("dist");
+  rmSync(rootDist, { recursive: true, force: true });
+  cpSync(siteDist, rootDist, { recursive: true });
+}
