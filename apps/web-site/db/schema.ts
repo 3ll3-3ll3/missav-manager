@@ -105,16 +105,34 @@ export const inputSources = sqliteTable("input_sources", {
   id: text("id").primaryKey(),
   kind: text("kind").notNull(),
   externalKey: text("external_key").notNull(),
+  connectionId: text("connection_id").notNull().default(""),
+  externalChatId: text("external_chat_id").notNull().default(""),
+  chatType: text("chat_type").notNull().default(""),
+  username: text("username").notNull().default(""),
+  accessStatus: text("access_status").notNull().default("unknown"),
+  archived: integer("archived").notNull().default(0),
+  lastSyncAt: text("last_sync_at").notNull().default(""),
+  latestRemoteMessageId: text("latest_remote_message_id").notNull().default(""),
+  incrementalCheckpointId: text("incremental_checkpoint_id").notNull().default(""),
+  lastError: text("last_error").notNull().default(""),
   name: text("name").notNull(),
   metadataJson: text("metadata_json").notNull().default("{}"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-}, (table) => [uniqueIndex("input_sources_kind_external_uq").on(table.kind, table.externalKey)]);
+}, (table) => [
+  uniqueIndex("input_sources_kind_external_uq").on(table.kind, table.externalKey),
+  uniqueIndex("input_sources_connection_chat_uq").on(table.connectionId, table.externalChatId),
+  index("input_sources_connection_status_idx").on(table.connectionId, table.accessStatus, table.updatedAt),
+]);
 
 export const toolSourceBindings = sqliteTable("tool_source_bindings", {
   id: text("id").primaryKey(),
   sourceId: text("source_id").notNull().references(() => inputSources.id, { onDelete: "cascade" }),
   tool: text("tool").notNull(),
+  historyMode: text("history_mode").notNull().default("since_now"),
+  historyLimit: integer("history_limit").notNull().default(0),
+  historyFrom: text("history_from").notNull().default(""),
+  boundAtMessageId: text("bound_at_message_id").notNull().default(""),
   createdAt: text("created_at").notNull(),
 }, (table) => [uniqueIndex("tool_source_bindings_source_tool_uq").on(table.sourceId, table.tool)]);
 
@@ -122,6 +140,9 @@ export const telegramMessages = sqliteTable("telegram_messages", {
   id: text("id").primaryKey(),
   sourceId: text("source_id").notNull().references(() => inputSources.id, { onDelete: "cascade" }),
   messageId: text("message_id").notNull(),
+  connectionId: text("connection_id").notNull().default(""),
+  externalMessageId: text("external_message_id").notNull().default(""),
+  remoteUpdateId: text("remote_update_id").notNull().default(""),
   messageDate: text("message_date").notNull().default(""),
   body: text("body").notNull().default(""),
   bodyDeletedAt: text("body_deleted_at").notNull().default(""),
@@ -139,6 +160,9 @@ export const telegramToolQueue = sqliteTable("telegram_tool_queue", {
   status: text("status").notNull().default("pending"),
   candidateCount: integer("candidate_count").notNull().default(0),
   runId: text("run_id").notNull().default(""),
+  errorMessage: text("error_message").notNull().default(""),
+  selectedAt: text("selected_at").notNull().default(""),
+  processingAt: text("processing_at").notNull().default(""),
   processedAt: text("processed_at").notNull().default(""),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
@@ -153,6 +177,92 @@ export const telegramMessageFingerprints = sqliteTable("telegram_message_fingerp
   messageId: text("message_id").notNull(),
   createdAt: text("created_at").notNull(),
 }, (table) => [uniqueIndex("telegram_message_fingerprints_source_message_uq").on(table.sourceId, table.messageId)]);
+
+export const telegramAccounts = sqliteTable("telegram_accounts", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("authorized"),
+  encryptedSession: text("encrypted_session").notNull(),
+  accountKey: text("account_key").notNull().default(""),
+  accountLabel: text("account_label").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const telegramConnections = sqliteTable("telegram_connections", {
+  connectionId: text("connection_id").primaryKey(),
+  kind: text("kind").notNull(),
+  label: text("label").notNull().default(""),
+  status: text("status").notNull().default("disconnected"),
+  accountKey: text("account_key").notNull().default(""),
+  accountLabel: text("account_label").notNull().default(""),
+  username: text("username").notNull().default(""),
+  sessionEncrypted: text("session_encrypted").notNull().default(""),
+  networkStatus: text("network_status").notNull().default("unknown"),
+  lastConnectedAt: text("last_connected_at").notNull().default(""),
+  lastSuccessAt: text("last_success_at").notNull().default(""),
+  lastError: text("last_error").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [index("telegram_connections_kind_idx").on(table.kind, table.status)]);
+
+export const telegramBotState = sqliteTable("telegram_bot_state", {
+  connectionId: text("connection_id").primaryKey().references(() => telegramConnections.connectionId, { onDelete: "cascade" }),
+  nextUpdateOffset: integer("next_update_offset").notNull().default(0),
+  lastUpdateId: integer("last_update_id").notNull().default(0),
+  lockUntil: text("lock_until").notNull().default(""),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const telegramReadStates = sqliteTable("telegram_read_states", {
+  sourceId: text("source_id").primaryKey().references(() => inputSources.id, { onDelete: "cascade" }),
+  policy: text("policy").notNull().default("never"),
+  safeReadMessageId: text("safe_read_message_id").notNull().default(""),
+  lastMarkedReadMessageId: text("last_marked_read_message_id").notNull().default(""),
+  readBaselineMessageId: text("read_baseline_message_id").notNull().default(""),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const telegramSyncRuns = sqliteTable("telegram_sync_runs", {
+  id: text("id").primaryKey(),
+  connectionId: text("connection_id").notNull(),
+  sourceId: text("source_id").notNull().default(""),
+  transport: text("transport").notNull(),
+  mode: text("mode").notNull().default("incremental"),
+  status: text("status").notNull().default("running"),
+  startedAt: text("started_at").notNull(),
+  endedAt: text("ended_at").notNull().default(""),
+  scannedCount: integer("scanned_count").notNull().default(0),
+  insertedCount: integer("inserted_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  queueCount: integer("queue_count").notNull().default(0),
+  emptyCandidateCount: integer("empty_candidate_count").notNull().default(0),
+  checkpointBefore: text("checkpoint_before").notNull().default(""),
+  checkpointAfter: text("checkpoint_after").notNull().default(""),
+  readResult: text("read_result").notNull().default("not_attempted"),
+  errorMessage: text("error_message").notNull().default(""),
+  detailJson: text("detail_json").notNull().default("{}"),
+}, (table) => [index("telegram_sync_runs_created_idx").on(table.startedAt, table.connectionId)]);
+
+export const telegramMigrationRuns = sqliteTable("telegram_migration_runs", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("preview"),
+  snapshotId: text("snapshot_id").notNull().default(""),
+  countsJson: text("counts_json").notNull().default("{}"),
+  warningsJson: text("warnings_json").notNull().default("[]"),
+  createdAt: text("created_at").notNull(),
+  appliedAt: text("applied_at").notNull().default(""),
+});
+
+export const telegramAuthFlows = sqliteTable("telegram_auth_flows", {
+  id: text("id").primaryKey(),
+  mode: text("mode").notNull(),
+  stage: text("stage").notNull(),
+  encryptedSession: text("encrypted_session").notNull(),
+  challengeJson: text("challenge_json").notNull().default("{}"),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [index("telegram_auth_flows_expires_idx").on(table.expiresAt)]);
 
 export const syncTransactions = sqliteTable("sync_transactions", {
   id: text("id").primaryKey(),

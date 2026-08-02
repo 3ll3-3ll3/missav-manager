@@ -51,7 +51,13 @@ async function api(url: string, options?: RequestInit) {
   return payload;
 }
 
-export default function ToolPanel({ onSaved }: { onSaved: () => void }) {
+export default function ToolPanel({
+  onSaved,
+  onOpenTelegramSettings,
+}: {
+  onSaved: () => void;
+  onOpenTelegramSettings: () => void;
+}) {
   const [tool, setTool] = useState<ToolId>("twitter");
   const [paste, setPaste] = useState("");
   const [files, setFiles] = useState<InputDocument[]>([]);
@@ -304,7 +310,11 @@ export default function ToolPanel({ onSaved }: { onSaved: () => void }) {
         )}
       </section>
       {mode === "telegram" && (
-        <TelegramPanel tool={tool} onProcessed={onSaved} />
+        <TelegramPanel
+          tool={tool}
+          onProcessed={onSaved}
+          onOpenTelegramSettings={onOpenTelegramSettings}
+        />
       )}
       {mode === "script" && tool === "missav" && (
         <MissavScriptPanel results={chosen.length ? chosen : results} />

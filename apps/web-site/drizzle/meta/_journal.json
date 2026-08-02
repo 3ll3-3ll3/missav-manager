@@ -15,6 +15,20 @@
       "when": 1785578610411,
       "tag": "0001_ambitious_bloodscream",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785599240296,
+      "tag": "0002_small_garia",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785640045139,
+      "tag": "0003_glossy_bloodaxe",
+      "breakpoints": true
     }
   ]
 }

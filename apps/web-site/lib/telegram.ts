@@ -1,4 +1,14 @@
-export type TelegramImportMessage = { sourceKey: string; sourceName: string; messageId: string; messageDate: string; text: string };
+export type TelegramImportMessage = {
+  sourceKey: string;
+  sourceName: string;
+  messageId: string;
+  messageDate: string;
+  text: string;
+  connectionId?: string;
+  chatType?: string;
+  username?: string;
+  remoteUpdateId?: string;
+};
 
 function flatten(value: unknown): string {
   if (Array.isArray(value)) return value.map(flatten).join("");
@@ -30,7 +40,7 @@ export function parseTelegramOfficialJson(value: unknown) {
         const fingerprint = `${key}:${messageId}`;
         if (seen.has(fingerprint)) continue;
         seen.add(fingerprint);
-        output.push({ sourceKey: key, sourceName: name, messageId, messageDate: String(message.date ?? message.date_unixtime ?? ""), text: flatten(message.text ?? message.caption ?? "").trim().slice(0, 100_000) });
+        output.push({ sourceKey: key, sourceName: name, messageId, messageDate: String(message.date ?? message.date_unixtime ?? ""), text: flatten(message.text ?? message.caption ?? "").trim().slice(0, 100_000), connectionId: "telegram-import", chatType: "import" });
       }
     }
     for (const child of Object.values(object)) {
@@ -58,8 +68,7 @@ export function telegramBotUpdates(value: unknown) {
     const sourceKey = String(chat.id ?? "");
     const sourceName = String(chat.title ?? chat.username ?? [chat.first_name, chat.last_name].filter(Boolean).join(" ") ?? sourceKey).slice(0, 240);
     const body = [message.text, message.caption].map(flatten).filter(Boolean).join("\n").trim();
-    messages.push({ sourceKey, sourceName, messageId: String(message.message_id), messageDate: new Date(Number(message.date ?? 0) * 1000).toISOString(), text: body.slice(0, 100_000) });
+    messages.push({ sourceKey, sourceName, messageId: String(message.message_id), messageDate: new Date(Number(message.date ?? 0) * 1000).toISOString(), text: body.slice(0, 100_000), connectionId: "telegram-bot", chatType: String(chat.type ?? ""), username: String(chat.username ?? ""), remoteUpdateId: String(update.update_id ?? "") });
   }
   return { messages, nextOffset };
 }
-

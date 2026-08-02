@@ -9,6 +9,7 @@ import ToolPanel from "./components/tool-panel";
 import TaskCenter from "./components/task-center";
 import LogsPanel from "./components/logs-panel";
 import SnapshotsPanel from "./components/snapshots-panel";
+import TelegramSettingsPanel from "./components/telegram-settings";
 
 export type ViewId =
   | "overview"
@@ -20,6 +21,7 @@ export type ViewId =
   | "migration"
   | "snapshots"
   | "logs"
+  | "telegram"
   | "desktop";
 type Bootstrap = {
   summary: { records: number; runs: number; migrations: number };
@@ -37,6 +39,7 @@ const nav: Array<{ id: ViewId; label: string; icon: string }> = [
   { id: "migration", label: "数据迁移", icon: "⇄" },
   { id: "snapshots", label: "恢复点", icon: "↶" },
   { id: "logs", label: "运行日志", icon: "≡" },
+  { id: "telegram", label: "Telegram 设置", icon: "✈" },
   { id: "desktop", label: "Windows 回退", icon: "▣" },
 ];
 
@@ -138,7 +141,10 @@ export default function Workbench({ owner }: { owner: string }) {
         <div className="page-content">
           {view === "overview" && <Overview data={bootstrap} open={go} />}
           {view === "tools" && (
-            <ToolPanel onSaved={() => setRefreshKey((key) => key + 1)} />
+            <ToolPanel
+              onSaved={() => setRefreshKey((key) => key + 1)}
+              onOpenTelegramSettings={() => go("telegram")}
+            />
           )}
           {view === "tasks" && <TaskCenter />}
           {view === "records" && <DataCenter refreshKey={refreshKey} />}
@@ -149,6 +155,7 @@ export default function Workbench({ owner }: { owner: string }) {
           )}
           {view === "snapshots" && <SnapshotsPanel />}
           {view === "logs" && <LogsPanel />}
+          {view === "telegram" && <TelegramSettingsPanel />}
           {view === "desktop" && (
             <DesktopBoundary
               onExport={() =>

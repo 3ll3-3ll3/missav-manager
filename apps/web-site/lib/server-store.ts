@@ -110,16 +110,24 @@ export async function ensureSchema() {
       `CREATE INDEX IF NOT EXISTS import_batch_chunks_batch_idx ON import_batch_chunks(batch_id, id)`,
       `CREATE TABLE IF NOT EXISTS input_sources (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL, external_key TEXT NOT NULL, name TEXT NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT '', external_chat_id TEXT NOT NULL DEFAULT '',
+        chat_type TEXT NOT NULL DEFAULT '', username TEXT NOT NULL DEFAULT '',
+        access_status TEXT NOT NULL DEFAULT 'unknown', archived INTEGER NOT NULL DEFAULT 0,
+        last_sync_at TEXT NOT NULL DEFAULT '', latest_remote_message_id TEXT NOT NULL DEFAULT '',
+        incremental_checkpoint_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
         metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(kind, external_key)
       )`,
       `CREATE TABLE IF NOT EXISTS tool_source_bindings (
         id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES input_sources(id) ON DELETE CASCADE,
-        tool TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(source_id, tool)
+        tool TEXT NOT NULL, history_mode TEXT NOT NULL DEFAULT 'since_now', history_limit INTEGER NOT NULL DEFAULT 0,
+        history_from TEXT NOT NULL DEFAULT '', bound_at_message_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, UNIQUE(source_id, tool)
       )`,
       `CREATE TABLE IF NOT EXISTS telegram_messages (
         id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES input_sources(id) ON DELETE CASCADE,
-        message_id TEXT NOT NULL, message_date TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+        message_id TEXT NOT NULL, connection_id TEXT NOT NULL DEFAULT '', external_message_id TEXT NOT NULL DEFAULT '',
+        remote_update_id TEXT NOT NULL DEFAULT '', message_date TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
         body_deleted_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(source_id, message_id)
       )`,
@@ -127,7 +135,8 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS telegram_tool_queue (
         id TEXT PRIMARY KEY, telegram_message_id TEXT NOT NULL REFERENCES telegram_messages(id) ON DELETE CASCADE,
         tool TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', candidate_count INTEGER NOT NULL DEFAULT 0,
-        run_id TEXT NOT NULL DEFAULT '', processed_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        run_id TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', selected_at TEXT NOT NULL DEFAULT '',
+        processing_at TEXT NOT NULL DEFAULT '', processed_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(telegram_message_id, tool)
       )`,
       `CREATE INDEX IF NOT EXISTS telegram_tool_queue_tool_status_idx ON telegram_tool_queue(tool, status, updated_at)`,
@@ -135,6 +144,52 @@ export async function ensureSchema() {
         id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES input_sources(id) ON DELETE CASCADE,
         message_id TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(source_id, message_id)
       )`,
+      `CREATE TABLE IF NOT EXISTS telegram_accounts (
+        id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'authorized', encrypted_session TEXT NOT NULL,
+        account_key TEXT NOT NULL DEFAULT '', account_label TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS telegram_connections (
+        connection_id TEXT PRIMARY KEY, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'disconnected', account_key TEXT NOT NULL DEFAULT '',
+        account_label TEXT NOT NULL DEFAULT '', username TEXT NOT NULL DEFAULT '', session_encrypted TEXT NOT NULL DEFAULT '',
+        network_status TEXT NOT NULL DEFAULT 'unknown', last_connected_at TEXT NOT NULL DEFAULT '',
+        last_success_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_connections_kind_idx ON telegram_connections(kind, status)`,
+      `CREATE TABLE IF NOT EXISTS telegram_bot_state (
+        connection_id TEXT PRIMARY KEY REFERENCES telegram_connections(connection_id) ON DELETE CASCADE,
+        next_update_offset INTEGER NOT NULL DEFAULT 0, last_update_id INTEGER NOT NULL DEFAULT 0,
+        lock_until TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS telegram_read_states (
+        source_id TEXT PRIMARY KEY REFERENCES input_sources(id) ON DELETE CASCADE,
+        policy TEXT NOT NULL DEFAULT 'never', safe_read_message_id TEXT NOT NULL DEFAULT '',
+        last_marked_read_message_id TEXT NOT NULL DEFAULT '', read_baseline_message_id TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS telegram_sync_runs (
+        id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, source_id TEXT NOT NULL DEFAULT '', transport TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'incremental', status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL,
+        ended_at TEXT NOT NULL DEFAULT '', scanned_count INTEGER NOT NULL DEFAULT 0, inserted_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0, queue_count INTEGER NOT NULL DEFAULT 0,
+        empty_candidate_count INTEGER NOT NULL DEFAULT 0, checkpoint_before TEXT NOT NULL DEFAULT '',
+        checkpoint_after TEXT NOT NULL DEFAULT '', read_result TEXT NOT NULL DEFAULT 'not_attempted',
+        error_message TEXT NOT NULL DEFAULT '', detail_json TEXT NOT NULL DEFAULT '{}'
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_sync_runs_created_idx ON telegram_sync_runs(started_at, connection_id)`,
+      `CREATE TABLE IF NOT EXISTS telegram_migration_runs (
+        id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'preview', snapshot_id TEXT NOT NULL DEFAULT '',
+        counts_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT ''
+      )`,
+      `CREATE TABLE IF NOT EXISTS telegram_auth_flows (
+        id TEXT PRIMARY KEY, mode TEXT NOT NULL, stage TEXT NOT NULL, encrypted_session TEXT NOT NULL,
+        challenge_json TEXT NOT NULL DEFAULT '{}', expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_auth_flows_expires_idx ON telegram_auth_flows(expires_at)`,
       `CREATE TABLE IF NOT EXISTS sync_transactions (
         id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, status TEXT NOT NULL, received_count INTEGER NOT NULL DEFAULT 0,
         inserted_count INTEGER NOT NULL DEFAULT 0, duplicate_count INTEGER NOT NULL DEFAULT 0, queue_count INTEGER NOT NULL DEFAULT 0,
@@ -170,6 +225,55 @@ export async function ensureSchema() {
       `CREATE INDEX IF NOT EXISTS data_snapshot_items_snapshot_idx ON data_snapshot_items(snapshot_id, id)`,
     ];
     await db.batch(statements.map((statement) => db.prepare(statement)));
+    // The private Site has already been deployed with the pre-hub schema. D1
+    // migrations are checked in as well, but this bounded compatibility step
+    // lets an existing database adopt the new columns before the next request.
+    const columns: Array<[string, string]> = [
+      ["input_sources", "connection_id TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "external_chat_id TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "chat_type TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "username TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "access_status TEXT NOT NULL DEFAULT 'unknown'"],
+      ["input_sources", "archived INTEGER NOT NULL DEFAULT 0"],
+      ["input_sources", "last_sync_at TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "latest_remote_message_id TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "incremental_checkpoint_id TEXT NOT NULL DEFAULT ''"],
+      ["input_sources", "last_error TEXT NOT NULL DEFAULT ''"],
+      ["tool_source_bindings", "history_mode TEXT NOT NULL DEFAULT 'since_now'"],
+      ["tool_source_bindings", "history_limit INTEGER NOT NULL DEFAULT 0"],
+      ["tool_source_bindings", "history_from TEXT NOT NULL DEFAULT ''"],
+      ["tool_source_bindings", "bound_at_message_id TEXT NOT NULL DEFAULT ''"],
+      ["telegram_messages", "connection_id TEXT NOT NULL DEFAULT ''"],
+      ["telegram_messages", "external_message_id TEXT NOT NULL DEFAULT ''"],
+      ["telegram_messages", "remote_update_id TEXT NOT NULL DEFAULT ''"],
+      ["telegram_tool_queue", "error_message TEXT NOT NULL DEFAULT ''"],
+      ["telegram_tool_queue", "selected_at TEXT NOT NULL DEFAULT ''"],
+      ["telegram_tool_queue", "processing_at TEXT NOT NULL DEFAULT ''"],
+    ];
+    for (const [table, definition] of columns) {
+      try {
+        await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${definition}`).run();
+      } catch (error) {
+        if (!/duplicate column|already exists/i.test(String(error))) throw error;
+      }
+    }
+    await db.batch([
+      db.prepare("UPDATE input_sources SET connection_id=CASE WHEN kind='telegram_bot' THEN 'telegram-bot' WHEN kind='telegram_personal' THEN 'telegram-personal' ELSE 'legacy-' || kind END WHERE connection_id=''"),
+      db.prepare("UPDATE input_sources SET external_chat_id=external_key WHERE external_chat_id=''"),
+      db.prepare("UPDATE telegram_messages SET connection_id=(SELECT connection_id FROM input_sources WHERE input_sources.id=telegram_messages.source_id), external_message_id=message_id WHERE external_message_id=''"),
+      db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS input_sources_connection_chat_uq ON input_sources(connection_id, external_chat_id)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS input_sources_connection_status_idx ON input_sources(connection_id, access_status, updated_at)"),
+      db.prepare("INSERT OR IGNORE INTO telegram_connections(connection_id,kind,label,status,account_key,account_label,username,session_encrypted,network_status,last_connected_at,last_success_at,last_error,created_at,updated_at) SELECT 'telegram-personal','personal','Telegram 个人账号',status,account_key,account_label,'',encrypted_session,'unknown','',updated_at,'',created_at,updated_at FROM telegram_accounts"),
+      db.prepare("INSERT OR IGNORE INTO telegram_connections(connection_id,kind,label,status,created_at,updated_at) VALUES ('telegram-bot','bot','Telegram Bot','disconnected',datetime('now'),datetime('now'))"),
+    ]);
+    const legacyOffsetRow = await db.prepare("SELECT value_json FROM app_settings WHERE key='telegramBotOffset'").first<{ value_json: string }>();
+    if (legacyOffsetRow) {
+      let legacyOffset = 0;
+      try { legacyOffset = Math.max(0, Number(JSON.parse(legacyOffsetRow.value_json)) || 0); } catch { legacyOffset = 0; }
+      if (legacyOffset > 0) {
+        await db.prepare("UPDATE telegram_bot_state SET next_update_offset=MAX(next_update_offset,?),last_update_id=MAX(last_update_id,?),updated_at=? WHERE connection_id='telegram-bot'").bind(legacyOffset, legacyOffset - 1, nowIso()).run();
+      }
+    }
   })().catch((error) => {
     schemaReady = null;
     throw error;
