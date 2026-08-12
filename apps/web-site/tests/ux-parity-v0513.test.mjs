@@ -5,6 +5,7 @@ import { loadModule, projectFile } from "./helpers/bundle.mjs";
 
 const selection = await loadModule("lib/table-selection.ts");
 const taskStatus = await loadModule("lib/task-status.ts");
+const bindingFilter = await loadModule("lib/telegram-binding-filter.ts");
 
 test("一级导航严格保留六项，历史、规则、迁移、恢复点和 Windows 说明进入二级页面", async () => {
   const source = await readFile(projectFile("app/workbench.tsx"), "utf8");
@@ -43,6 +44,23 @@ test("默认绑定编辑器突出当前工具、待新增待移除及其他工�
   for (const label of ["当前工具绑定编辑器", "当前工具待新增", "当前工具待移除", "其他工具：", "高级入口：查看和编辑五列全局矩阵"]) assert.match(settings, new RegExp(label));
   assert.match(settings, /initialTool/);
   assert.match(settings, /current-binding-row/);
+});
+
+test("群组绑定面板默认折叠，并支持名称、用户名、ID 搜索和状态筛选", async () => {
+  const settings = await readFile(projectFile("app/components/telegram-settings.tsx"), "utf8");
+  for (const label of ["选择群组 / 频道", "默认收起，点击后搜索并勾选", "搜索群组名称、@用户名或 Telegram ID", "仅待保存变化", "已绑定其他工具", "清除筛选"]) assert.match(settings, new RegExp(label));
+  assert.match(settings, /<details className="binding-source-disclosure">/);
+  assert.doesNotMatch(settings, /<details className="binding-source-disclosure" open/);
+  assert.match(settings, /filteredBindingSources\.map/);
+
+  const source = { name: "摄影交流群", username: "Photo_Group", external_chat_id: "-1009988", chat_type: "supergroup" };
+  assert.equal(bindingFilter.matchesTelegramBindingSearch(source, "摄影"), true);
+  assert.equal(bindingFilter.matchesTelegramBindingSearch(source, "@photo_group"), true);
+  assert.equal(bindingFilter.matchesTelegramBindingSearch(source, "-1009988"), true);
+  assert.equal(bindingFilter.matchesTelegramBindingSearch(source, "不存在"), false);
+  assert.equal(bindingFilter.matchesTelegramBindingScope("changed", { before: false, after: true, hasOtherBindings: false }), true);
+  assert.equal(bindingFilter.matchesTelegramBindingScope("bound", { before: true, after: false, hasOtherBindings: false }), false);
+  assert.equal(bindingFilter.matchesTelegramBindingScope("other", { before: false, after: false, hasOtherBindings: true }), true);
 });
 
 test("表格选择支持单击替换、Ctrl 切换、Shift 区间及 Ctrl+Shift 追加", () => {

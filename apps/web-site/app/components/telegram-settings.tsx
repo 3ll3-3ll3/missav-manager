@@ -4,6 +4,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import QRCode from "qrcode";
 import { parseTelegramOfficialJson } from "../../lib/telegram";
+import {
+  matchesTelegramBindingScope,
+  matchesTelegramBindingSearch,
+  type TelegramBindingScope,
+} from "../../lib/telegram-binding-filter";
 import type { ToolId } from "../../lib/types";
 
 const TELEGRAM_TOOLS = ["twitter", "badnews", "haijiao", "missav", "av123"] as const;
@@ -75,6 +80,8 @@ export default function TelegramSettingsPanel({ initialTool }: { initialTool?: T
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
   const [selectedTool, setSelectedTool] = useState<string>(initialTool || TELEGRAM_TOOLS[0]);
   const [draftBindings, setDraftBindings] = useState<Record<string, Set<string>>>({});
+  const [bindingSearch, setBindingSearch] = useState("");
+  const [bindingScope, setBindingScope] = useState<TelegramBindingScope>("all");
   const [historyMode, setHistoryMode] = useState<"since_now" | "cached" | "recent" | "from_date">("since_now");
   const [historyLimit, setHistoryLimit] = useState("100");
   const [historyFrom, setHistoryFrom] = useState("");
@@ -225,6 +232,15 @@ export default function TelegramSettingsPanel({ initialTool }: { initialTool?: T
     added: [...currentDraftBindings].filter((id) => !originalCurrentBindings.has(id)).length,
     removed: [...originalCurrentBindings].filter((id) => !currentDraftBindings.has(id)).length,
   };
+  const activeBindingSources = hub.sources.filter((source) => !source.archived);
+  const selectedBindingSources = activeBindingSources.filter((source) => currentDraftBindings.has(source.id));
+  const filteredBindingSources = activeBindingSources.filter((source) => {
+    const before = originalCurrentBindings.has(source.id);
+    const after = currentDraftBindings.has(source.id);
+    const hasOtherBindings = TELEGRAM_TOOLS.some((tool) => tool !== selectedTool && (draftBindings[tool] || new Set()).has(source.id));
+    return matchesTelegramBindingSearch(source, bindingSearch)
+      && matchesTelegramBindingScope(bindingScope, { before, after, hasOtherBindings });
+  });
   return <div className="stack-lg telegram-settings">
     <section className="callout telegram-layer-callout"><strong>Telegram 三层连接模型</strong><p>全局连接 → 全局群组/频道会话库 → 工具永久绑定 → 工具内本次选择。连接、绑定和本次选择不会再共用一个状态。</p></section>
     <section className="settings-tabs" aria-label="Telegram 设置分区">
@@ -256,16 +272,36 @@ export default function TelegramSettingsPanel({ initialTool }: { initialTool?: T
         <input type="number" min="0" max="20000" value={historyLimit} onChange={(event) => setHistoryLimit(event.target.value)} placeholder="最近 N 条" />
         <input type="datetime-local" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} />
       </div>
-      <div className="current-tool-binding-list">
-        {hub.sources.filter((source) => !source.archived).map((source) => {
-          const before = originalCurrentBindings.has(source.id);
-          const after = currentDraftBindings.has(source.id);
-          const state = !before && after ? "pending-add" : before && !after ? "pending-remove" : after ? "bound" : "unbound";
-          const otherTools = TELEGRAM_TOOLS.filter((tool) => tool !== selectedTool && (draftBindings[tool] || new Set()).has(source.id));
-          return <label key={source.id} className={`current-binding-row ${state}`}><input type="checkbox" checked={after} onChange={() => toggleBinding(selectedTool, source.id)} /><span><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></span><span className={`binding-state ${state}`}>{state === "pending-add" ? "待新增" : state === "pending-remove" ? "待移除" : state === "bound" ? "当前已绑定" : "未绑定"}</span><small className="other-bindings">其他工具：{otherTools.length ? otherTools.map((tool) => TELEGRAM_TOOL_LABELS[tool]).join("、") : "无"}</small></label>;
-        })}
+      <div className="binding-selection-overview" aria-label="当前工具绑定概览">
+        <span><strong>{selectedBindingSources.length}</strong> 当前选择</span>
+        <span><strong>{activeBindingSources.length}</strong> 可选群组/频道</span>
+        <span><strong>{currentToolDiff.added + currentToolDiff.removed}</strong> 待保存变化</span>
       </div>
-      <details className="advanced-binding-matrix"><summary>高级入口：查看和编辑五列全局矩阵（总待新增 {diff.added} / 待移除 {diff.removed}）</summary><div className="binding-matrix"><div className="binding-matrix-head"><span>会话</span>{TELEGRAM_TOOLS.map((tool) => <span key={tool}>{TELEGRAM_TOOL_LABELS[tool]}<small>{(draftBindings[tool] || new Set()).size} 个</small></span>)}</div>{hub.sources.filter((source) => !source.archived).map((source) => <div className="binding-matrix-row" key={source.id}><div><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></div>{TELEGRAM_TOOLS.map((tool) => <label key={tool} className={`binding-cell ${tool === selectedTool ? "current-tool" : ""}`}><input type="checkbox" checked={(draftBindings[tool] || new Set()).has(source.id)} onChange={() => toggleBinding(tool, source.id)} aria-label={`${source.name} · ${TELEGRAM_TOOL_LABELS[tool]}`} /></label>)}</div>)}</div></details>
+      <details className="binding-source-disclosure">
+        <summary>
+          <span><strong>选择群组 / 频道</strong><small>默认收起，点击后搜索并勾选</small></span>
+          <span className="binding-summary-count">已选 {selectedBindingSources.length} / {activeBindingSources.length}</span>
+        </summary>
+        <div className="binding-picker-body">
+          <div className="binding-picker-toolbar">
+            <label className="binding-search-field"><span>搜索群组</span><input type="search" value={bindingSearch} onChange={(event) => setBindingSearch(event.target.value)} placeholder="搜索群组名称、@用户名或 Telegram ID" aria-label="搜索待绑定群组" /></label>
+            <label><span>显示范围</span><select value={bindingScope} onChange={(event) => setBindingScope(event.target.value as TelegramBindingScope)}><option value="all">全部群组</option><option value="bound">当前已选择</option><option value="unbound">尚未选择</option><option value="changed">仅待保存变化</option><option value="other">已绑定其他工具</option></select></label>
+            <button type="button" disabled={!bindingSearch && bindingScope === "all"} onClick={() => { setBindingSearch(""); setBindingScope("all"); }}>清除筛选</button>
+          </div>
+          <div className="binding-results-meta" aria-live="polite"><span>显示 {filteredBindingSources.length} 个结果</span><small>普通单击即可勾选，不需要 Ctrl 或 Shift</small></div>
+          <div className="current-tool-binding-list">
+            {filteredBindingSources.map((source) => {
+              const before = originalCurrentBindings.has(source.id);
+              const after = currentDraftBindings.has(source.id);
+              const state = !before && after ? "pending-add" : before && !after ? "pending-remove" : after ? "bound" : "unbound";
+              const otherTools = TELEGRAM_TOOLS.filter((tool) => tool !== selectedTool && (draftBindings[tool] || new Set()).has(source.id));
+              return <label key={source.id} className={`current-binding-row ${state}`}><input type="checkbox" checked={after} onChange={() => toggleBinding(selectedTool, source.id)} /><span><strong>{source.name}</strong><small>{source.username ? `@${source.username.replace(/^@/, "")} · ` : ""}{source.chat_type} · {source.external_chat_id}</small></span><span className={`binding-state ${state}`}>{state === "pending-add" ? "待新增" : state === "pending-remove" ? "待移除" : state === "bound" ? "当前已绑定" : "未绑定"}</span><small className="other-bindings">其他工具：{otherTools.length ? otherTools.map((tool) => TELEGRAM_TOOL_LABELS[tool]).join("、") : "无"}</small></label>;
+            })}
+            {!filteredBindingSources.length && <div className="empty compact binding-empty"><strong>没有符合条件的群组</strong><p>尝试清除搜索词或切换显示范围。</p></div>}
+          </div>
+        </div>
+      </details>
+      <details className="advanced-binding-matrix"><summary>高级入口：查看和编辑五列全局矩阵（总待新增 {diff.added} / 待移除 {diff.removed}）</summary><div className="binding-matrix"><div className="binding-matrix-head"><span>会话</span>{TELEGRAM_TOOLS.map((tool) => <span key={tool}>{TELEGRAM_TOOL_LABELS[tool]}<small>{(draftBindings[tool] || new Set()).size} 个</small></span>)}</div>{filteredBindingSources.map((source) => <div className="binding-matrix-row" key={source.id}><div><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></div>{TELEGRAM_TOOLS.map((tool) => <label key={tool} className={`binding-cell ${tool === selectedTool ? "current-tool" : ""}`}><input type="checkbox" checked={(draftBindings[tool] || new Set()).has(source.id)} onChange={() => toggleBinding(tool, source.id)} aria-label={`${source.name} · ${TELEGRAM_TOOL_LABELS[tool]}`} /></label>)}</div>)}</div></details>
     </section>}
 
     {tab === "syncs" && <section className="card"><div className="section-heading"><div><span className="eyebrow">只读审计</span><h3>同步记录</h3></div><button onClick={load}>刷新</button></div><div className="sync-table">{hub.syncRuns.map((run) => <article key={String(run.id)}><div><strong>{String(run.transport)} · {String(run.mode)}</strong><small>{String(run.started_at)} → {String(run.ended_at || "进行中")}</small></div><span className={`batch-status ${run.status === "completed" ? "applied" : ""}`}>{String(run.status)}{Number(run.has_more || 0) ? " · 有后续页" : ""}</span><p>扫描 {Number(run.scanned_count || 0).toLocaleString()} · 新增 {Number(run.inserted_count || 0).toLocaleString()} · 编辑 {Number(run.edited_count || 0).toLocaleString()} · 删除 {Number(run.deleted_count || 0).toLocaleString()} · 重复 {Number(run.duplicate_count || 0).toLocaleString()} · 队列 {Number(run.queue_count || 0).toLocaleString()} · 已读 {String(run.read_result || "not_attempted")}</p>{String(run.error_message || "").length > 0 && <small className="error-text">{String(run.error_message)}</small>}</article>)}{!hub.syncRuns.length && <div className="empty compact"><strong>还没有同步记录</strong><p>Bot、个人 API 或官方导入完成后会在这里保留审计记录。</p></div>}</div></section>}
