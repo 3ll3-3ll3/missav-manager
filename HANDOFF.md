@@ -66,8 +66,8 @@
 - 仓库：`3ll3-3ll3/missav-manager`（本地工作树位于 `E:\Desktop\codex项目\missav-manager`）
 - 当前分支：`codex/cloud/tg-session-center-handoff`
 - 云端网站基线提交：`53011e24586c55ba7bc644fea485d9faf40ca340`（`origin/codex/sites-private-web` 最新提交）
-- 本次提交范围：仅本文件 `HANDOFF.md`
-- 工作区状态：已有未跟踪的网站源码目录 `apps/web-site/`。本次不吸收、不覆盖、不回退该目录；它必须由云端任务单独核对。
+- 当前网站实现提交：`356d48c9cf9e999d963d5716d2f84355177fc64a`（30 个 `apps/web-site/**` 文件与本交接文件）
+- 网站源码状态：已完成 v18 来源审计和逐文件哈希核对；目标分支已纳入可构建的 `apps/web-site/**` 实现，未修改桌面端。
 
 ## 本次已完成内容
 
@@ -83,13 +83,13 @@
    - `codex/v0.5.13-desktop-stable` 不得修改。
    - `v0.5.13-desktop-baseline` 标签不得修改。
    - 已发布的 v0.5.13 Windows Release 不得修改。
-3. 已确认 `codex/sites-private-web` 已包含最新网站提交；本次交接文件将基于该提交放入 `codex/cloud/tg-session-center-handoff`，不覆盖网站分支。
+3. 已以 `codex/sites-private-web` 的 `53011e24586c55ba7bc644fea485d9faf40ca340` 为基线，在 `codex/cloud/tg-session-center-handoff` 完成网站实现；基线分支尚未合并或覆盖。
 4. 当前项目资料已经明确了桌面端 v0.5.13 的 Telegram Bot、个人 API、官方导入、消息去重、工具绑定、已读策略、历史和本地加密会话语义。
 5. 当前需求已经明确：Telegram 连接与会话应集中配置一次；每个工具只选择已配置的会话和来源，不再让每个工具重复登录或重复填写 Telegram API。
 
-## 交给云端的下一项具体任务
+## 后续真实验收与部署任务
 
-请在 `codex/cloud/tg-session-center-handoff` 上继续完成网站实现；完成后再按用户要求合并或提交到 `codex/sites-private-web`。不得只返回方案，必须做到可运行、可测试、可部署。
+网站代码与自动化验收已完成。下一步只在网站所有者确认真实 Telegram E2E 清单通过后，才允许创建 Sites 生产检查点、验证部署状态并决定是否把草稿 PR 合并到 `codex/sites-private-web`。
 
 ### A. 建立全局 Telegram 连接中心
 
@@ -223,7 +223,7 @@ npm run build
 
 ## 当前阻塞点
 
-1. `gh auth status` 仍显示账号 `3ll3-3ll3` 的 GitHub CLI Token 无效；本次 Git 推送已通过现有 Git 凭据管理器成功完成，但后续如果需要用 `gh` 创建 PR、读取检查或调用 GitHub API，必须先重新执行 `gh auth login -h github.com`。
-2. 当前工作区有未跟踪的 `apps/web-site/` 网站源码；本次没有对其做完整来源审计，云端不得假设它已经提交或已验收。
-3. 个人 API 网站端的真实登录、Session 重载、来源发现、增量接收和远端已读仍需在云端环境用测试账号完成端到端验收；不能只凭 TCP/WSS 可达或登录页面存在宣布完成。
-4. Bot Token、个人 API 凭据和正式 Telegram 数据均未提供，也不应通过聊天提供。云端只能读取已有 Site Secrets，并用合成/脱敏夹具完成自动测试。
+1. 真实 Telegram 凭据不应通过聊天提供；Agent Preview 也不注入正式 Site Secrets，因此个人账号登录、Bot 身份、真实来源与远端已读尚未执行。
+2. 用户明确要求真实端到端验收后再部署；Sites 的 checkpoint 本身就是生产部署，因此当前不能用 checkpoint 充当预部署测试环境，线上 v18 必须保持不变。
+3. 仍需网站所有者确认：二维码或手机号登录、刷新后 Session 恢复、真实来源同步、同一消息跨两个工具独立排队、Bot 重拉幂等、Webhook 冲突、编辑/删除、三种已读策略、断网/限流/Session 失效与重新部署后的持久化。
+4. 当前 Sites 无 Durable Object、队列或定时任务；如必须持续实时监听 MTProto，需要另增私有长生命周期执行环境。当前实现只承诺请求级短连接。
