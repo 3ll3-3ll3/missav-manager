@@ -20,6 +20,9 @@ type QueueRow = {
   message_date: string;
   body: string;
   body_deleted_at: string;
+  event_kind: string;
+  remote_edited_at: string;
+  remote_deleted_at: string;
   source_id: string;
   source_name: string;
   status: string;
@@ -272,7 +275,7 @@ export default function TelegramPanel({
           <select value={loadMode} onChange={(event) => setLoadMode(event.target.value as typeof loadMode)}>
             <option value="cached">已缓存待处理消息</option><option value="recent">最近 N 条</option><option value="range">指定时间范围</option><option value="oldest">从本地最早处继续</option><option value="incremental">从最新位置增量</option>
           </select>
-          <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}><option value="pending">待处理</option><option value="processing">处理中</option><option value="processed">已处理</option><option value="processed_empty">空结果</option><option value="ignored">已忽略</option><option value="">全部状态</option></select>
+          <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}><option value="pending">待处理</option><option value="processing">处理中</option><option value="processed">已处理</option><option value="processed_empty">空结果</option><option value="ignored">已忽略</option><option value="deleted">远端已删除</option><option value="">全部状态</option></select>
           <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="搜索消息、来源或消息 ID" />
           <input type="datetime-local" value={start} onChange={(event) => { setStart(event.target.value); setPage(1); }} aria-label="开始时间" />
           <input type="datetime-local" value={end} onChange={(event) => { setEnd(event.target.value); setPage(1); }} aria-label="结束时间" />
@@ -285,7 +288,7 @@ export default function TelegramPanel({
         <div className="section-heading"><div><span className="eyebrow">独立工具队列</span><h3>{total.toLocaleString()} 条消息</h3></div><div className="button-row"><button onClick={selectPage}>选择当前页</button><button onClick={() => setSelection({ mode: "all", excluded: new Set() })}>选择全部筛选结果</button><button onClick={() => setSelection({ mode: "ids", ids: new Set() })}>清除选择</button></div></div>
         {selectedCount > 0 && <div className="button-row queue-actions"><strong>已选择 {selectedCount.toLocaleString()} 条</strong><button className="primary" disabled={busy} onClick={() => void queueAction("process")}>处理所选</button><button disabled={busy} onClick={() => void queueAction("ignored")}>忽略</button><button disabled={busy} onClick={() => void queueAction("pending")}>恢复待处理</button><button disabled={busy} onClick={() => void exportChosen("txt")}>导出 TXT</button><button disabled={busy} onClick={() => void exportChosen("csv")}>导出 CSV</button></div>}
         <div className="telegram-list">
-          {rows.map((row) => <label key={row.id} className={isSelected(row.id) ? "selected" : ""}><input type="checkbox" checked={isSelected(row.id)} onChange={() => toggleQueue(row.id)} /><span className="queue-status">{row.status}</span><span><strong>{row.source_name}</strong><small>{row.message_date} · #{row.message_id}</small></span><span className="queue-preview">{row.body || "正文已按队列处理策略清理"}</span><small>{row.candidate_count ? `${row.candidate_count} 条结果` : "未处理"}</small></label>)}
+          {rows.map((row) => <label key={row.id} className={isSelected(row.id) ? "selected" : ""}><input type="checkbox" disabled={row.status === "deleted"} checked={isSelected(row.id)} onChange={() => toggleQueue(row.id)} /><span className="queue-status">{row.status}</span><span><strong>{row.source_name}</strong><small>{row.message_date} · #{row.message_id}{row.event_kind === "edited" ? " · 已编辑" : ""}</small></span><span className="queue-preview">{row.remote_deleted_at ? "Telegram 远端消息已删除" : row.body || "正文已按队列处理策略清理"}</span><small>{row.candidate_count ? `${row.candidate_count} 条结果` : row.status === "deleted" ? "不可处理" : "未处理"}</small></label>)}
           {!rows.length && <div className="empty compact"><strong>当前筛选没有消息</strong><p>先在全局设置中心同步消息，或调整来源、状态和时间筛选。</p></div>}
         </div>
         <div className="pagination"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>上一页</button><span>第 {page} / {pages} 页</span><button disabled={page >= pages} onClick={() => setPage((value) => value + 1)}>下一页</button></div>

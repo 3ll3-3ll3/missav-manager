@@ -1,5 +1,5 @@
 import { apiError, bodyJson, requireAuthenticated } from "../../../lib/api-response";
-import { applyTelegramMigration, bindTelegramSource, deleteTelegramBotConnection, exportTelegramQueue, importTelegramMessages, listTelegramQueue, processTelegramQueue, pullTelegramBot, resolveTelegramQueueSelection, saveTelegramBindings, telegramMigrationPreview, telegramStatus, updateTelegramQueue, updateTelegramSource } from "../../../lib/server-telegram";
+import { applyTelegramMigration, bindTelegramSource, checkTelegramBotConnection, deleteTelegramBotConnection, exportTelegramQueue, importTelegramMessages, listTelegramQueue, processTelegramQueue, pullTelegramBot, resolveTelegramQueueSelection, saveTelegramBindings, telegramMigrationPreview, telegramStatus, updateTelegramQueue, updateTelegramSource } from "../../../lib/server-telegram";
 import { discoverPersonalSources, logoutMtproto, markTelegramSourceRead, syncPersonalSources } from "../../../lib/server-mtproto";
 import type { TelegramImportMessage } from "../../../lib/telegram";
 
@@ -11,14 +11,14 @@ export async function GET(request: Request) {
       tool: params.get("tool") || "", page: Number(params.get("page") || 1), pageSize: Number(params.get("pageSize") || 50),
       status: params.get("status") || "", search: params.get("search") || "", start: params.get("start") || "", end: params.get("end") || "",
       sourceIds: (params.get("sourceIds") || "").split(",").map(String).filter(Boolean),
-    }));
+    }), { headers: { "cache-control": "private, no-store" } });
     if (params.get("view") === "tool") {
       const status = await telegramStatus();
       const tool = String(params.get("tool") || "");
       const bound = status.bindings.filter((row: Record<string, unknown>) => String(row.tool) === tool).map((row: Record<string, unknown>) => String(row.source_id));
-      return Response.json({ ...status, boundSourceIds: bound });
+      return Response.json({ ...status, boundSourceIds: bound }, { headers: { "cache-control": "private, no-store" } });
     }
-    return Response.json(await telegramStatus());
+    return Response.json(await telegramStatus(), { headers: { "cache-control": "private, no-store" } });
   } catch (error) { return apiError(error); }
 }
 
@@ -26,6 +26,7 @@ export async function POST(request: Request) {
   try {
     requireAuthenticated(request);
     const input = await bodyJson(request);
+    if (input.action === "check-bot") return Response.json(await checkTelegramBotConnection());
     if (input.action === "pull") return Response.json(await pullTelegramBot());
     if (input.action === "import") return Response.json(await importTelegramMessages((Array.isArray(input.messages) ? input.messages : []) as TelegramImportMessage[]));
     if (input.action === "bind") return Response.json(await bindTelegramSource({ sourceId: String(input.sourceId || ""), tool: String(input.tool || ""), enabled: input.enabled !== false }));

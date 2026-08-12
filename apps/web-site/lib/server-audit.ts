@@ -25,6 +25,56 @@ export async function writeLog(
     .run();
 }
 
+/**
+ * Persist an already-sanitized operational failure and mirror the same safe
+ * envelope to Worker observability. D1 and Worker logs are deliberately
+ * independent so a database write failure cannot erase the only diagnostic.
+ */
+export async function writeErrorLog(
+  category: string,
+  message: unknown,
+  detail: unknown = {},
+) {
+  const safeCategory = redact(category).slice(0, 80);
+  const safeMessage = redact(message);
+  const safeDetail = redact(safeJson(detail, {}));
+  const timestamp = nowIso();
+  let persisted = true;
+  try {
+    await getD1()
+      .prepare(
+        "INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)",
+      )
+      .bind(
+        crypto.randomUUID(),
+        "error",
+        safeCategory,
+        safeMessage,
+        safeDetail,
+        timestamp,
+      )
+      .run();
+  } catch (error) {
+    persisted = false;
+    console.error(JSON.stringify({
+      level: "error",
+      category: safeCategory,
+      message: "应用错误日志写入 D1 失败",
+      detail: redact(error instanceof Error ? error.message : error),
+      timestamp,
+    }));
+  }
+  console.error(JSON.stringify({
+    level: "error",
+    category: safeCategory,
+    message: safeMessage,
+    detail: safeDetail,
+    persisted,
+    timestamp,
+  }));
+  return { persisted, timestamp };
+}
+
 export async function listLogs(input: {
   page?: number;
   pageSize?: number;

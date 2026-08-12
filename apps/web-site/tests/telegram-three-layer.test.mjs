@@ -32,4 +32,8 @@ test("全局 Bot 游标与每工具独立队列存在于服务端同步事务中
   assert.match(server, /telegram_tool_queue[\s\S]*tool/);
   assert.match(server, /processed_empty/);
   assert.match(server, /INSERT OR IGNORE INTO telegram_tool_queue/);
+  assert.match(server, /verifyTelegramBotWebhook/);
+  assert.match(server, /webhook_status/);
+  assert.match(server, /event_kind/);
+  assert.match(server, /remote_deleted_at/);
 });
