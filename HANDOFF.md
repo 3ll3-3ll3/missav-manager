@@ -2,6 +2,21 @@
 
 更新日期：2026-08-12
 
+## 本轮任务卡（云端 Work 必读）
+
+- 本轮任务名：`telegram-session-center-web`
+- 基线分支：`codex/sites-private-web`
+- 基线提交：`53011e24586c55ba7bc644fea485d9faf40ca340`（GitHub 当前已知最新网站提交）
+- 需要修改的功能：全局 Telegram 连接/会话中心；个人 Telegram API 与 Bot 会话统一配置；二维码/手机号登录与加密 Session 恢复；群组、超级群组、频道发现；每个工具选择已配置会话和来源；来源多对多绑定；统一消息池、跨入口去重、事务分发、断点恢复、编辑/删除处理和三种已读策略。
+- 允许修改的文件：`apps/web-site/**`、本文件 `HANDOFF.md`；如确实需要修改仓库根目录构建入口，必须先在报告中说明原因、影响和验证结果，不得顺手修改桌面端。
+- 禁止修改的文件：`apps/desktop-v05/**`、根目录 Electron 兼容端、稳定分支相关文件、正式数据库、任何 Secret、以及 `AGENTS.md`、`docs/PROJECT_HANDOFF.md`、`docs/CHATGPT_WORK_SITE_HANDOFF.md` 中已确定的桌面基线内容。
+- 测试命令：`cd apps/web-site; npm run lint; npm test; npm run build`；完成后在仓库根目录运行 `git diff --check`。依赖安装若被缓存/权限阻断，必须记录具体错误，不得假报通过。
+- 完成标准：个人 API 与 Bot 都能在一个全局连接中心配置一次；工具页不重复登录；来源发现、绑定、统一去重、原子分发、编辑/删除、断点恢复和三种已读策略均有自动测试和至少一轮真实端到端验收；刷新/重部署后 Session 和业务数据仍可用；非所有者不能访问；Secret 不出现在前端、日志、数据库明文或错误堆栈；私人 Site 可构建、部署并给出可追溯提交。
+- 线上版本18源码是否已同步到 GitHub：**否，尚未证明同步**。云端核对报告称线上 v18 与 GitHub `53011e2` 源码不同步；不得把线上 v18 反向覆盖 GitHub，必须先获取可核对的部署提交/构建产物哈希，再决定是否迁移差异。
+- 目标分支：`codex/cloud/tg-session-center-handoff`
+
+当前任务边界：本轮先完成 Telegram 全局连接中心和工具绑定闭环；MissAV 过滤规则、123AV 本地账号操作、Chrome 扩展、Windows DPAPI 和 Raindrop API 不属于本轮网站修改范围，不能伪装为已迁移。
+
 ## 当前 Git 状态
 
 - 仓库：`3ll3-3ll3/missav-manager`（本地工作树位于 `E:\Desktop\codex项目\missav-manager`）
