@@ -11,8 +11,8 @@ test("CSV 公式、HTML 与日志敏感值均被安全处理", () => {
   assert.equal(security.csvSafe("=2+5"), '"\'=2+5"');
   assert.equal(security.csvSafe(" @SUM(A1:A2)"), '"\' @SUM(A1:A2)"');
   assert.equal(security.escapeHtml('<img src=x onerror="alert(1)">'), "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
-  const redacted = security.redact("token=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi 电话 +8613812345678");
-  assert.doesNotMatch(redacted, /ABCDEFGHIJKLMNOPQRSTUVWXYZ|13812345678/);
+  const redacted = security.redact('token=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi 电话 +8613812345678 {"session":"session-secret","api_hash":"hash-secret"} tg://login?token=qr-secret');
+  assert.doesNotMatch(redacted, /ABCDEFGHIJKLMNOPQRSTUVWXYZ|13812345678|session-secret|hash-secret|qr-secret/);
 });
 
 test("默认参考库与交接包一致，并生成未改写核心流程的完整三目录脚本", async () => {
