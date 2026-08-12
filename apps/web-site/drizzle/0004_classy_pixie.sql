@@ -1,19 +1,10 @@
-ALTER TABLE `input_sources` ADD `sync_cursor_message_id` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `input_sources` ADD `sync_target_message_id` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `sync_transactions` ADD `edited_count` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
-ALTER TABLE `sync_transactions` ADD `deleted_count` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_auth_flows` ADD `encrypted_challenge` text DEFAULT '' NOT NULL;--> statement-breakpoint
-DELETE FROM `telegram_auth_flows` WHERE `encrypted_challenge`='' AND `challenge_json`<>'{}';--> statement-breakpoint
-ALTER TABLE `telegram_bot_state` ADD `webhook_status` text DEFAULT 'unknown' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_bot_state` ADD `last_checked_at` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_message_fingerprints` ADD `content_hash` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_message_fingerprints` ADD `event_kind` text DEFAULT 'message' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_message_fingerprints` ADD `last_remote_update_id` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_message_fingerprints` ADD `updated_at` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_messages` ADD `event_kind` text DEFAULT 'message' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_messages` ADD `content_hash` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_messages` ADD `remote_edited_at` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_messages` ADD `remote_deleted_at` text DEFAULT '' NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_sync_runs` ADD `edited_count` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_sync_runs` ADD `deleted_count` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
-ALTER TABLE `telegram_sync_runs` ADD `has_more` integer DEFAULT 0 NOT NULL;
+-- Version 19 could be interrupted while this migration was running, leaving
+-- only a prefix of its ALTER TABLE statements applied. SQLite has no portable
+-- ADD COLUMN IF NOT EXISTS form, so replaying the migration would fail on the
+-- first existing column and prevent every later deployment.
+--
+-- The Worker now owns this one compatibility repair: ensureSchema() probes the
+-- base schema and adds each Telegram hub column individually, tolerating an
+-- already-existing column. Keep this hosted migration as a valid no-op so the
+-- migration runner can mark 0004 complete for both partial and fresh databases.
+SELECT 1;

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import QRCode from "qrcode";
 import { parseTelegramOfficialJson } from "../../lib/telegram";
+import type { ToolId } from "../../lib/types";
 
 const TELEGRAM_TOOLS = ["twitter", "badnews", "haijiao", "missav", "av123"] as const;
 const TELEGRAM_TOOL_LABELS: Record<string, string> = { twitter: "推特博主", badnews: "Bad.news", haijiao: "海角帖子", missav: "MissAV", av123: "123AV" };
@@ -34,7 +35,7 @@ type Hub = { configured: boolean; connections: Connection[]; sources: Source[]; 
 type MtprotoStatus = { apiConfigured: boolean; encryptionConfigured: boolean; authorized: boolean; accountLabel: string; stage: "idle" | "waiting_qr" | "waiting_code" | "waiting_password" | "authorized"; mode: "" | "qr" | "phone"; expiresAt: string; transport: "" | "cloudflare_tcp_with_websocket_fallback"; executionModel: "request_scoped"; liveConnection: boolean };
 type MtprotoProbe = { tcpReachable: boolean; websocketReachable: boolean; tcpElapsedMs: number; websocketElapsedMs: number; conclusion: string };
 const EMPTY_MTPROTO: MtprotoStatus = { apiConfigured: false, encryptionConfigured: false, authorized: false, accountLabel: "", stage: "idle", mode: "", expiresAt: "", transport: "", executionModel: "request_scoped", liveConnection: false };
-const STATUS_TIMEOUT_MS = 8_000;
+const STATUS_TIMEOUT_MS = 20_000;
 const ACTION_TIMEOUT_MS = 30_000;
 
 async function api(url: string, options?: RequestInit, timeoutMs = ACTION_TIMEOUT_MS) {
@@ -53,8 +54,8 @@ async function api(url: string, options?: RequestInit, timeoutMs = ACTION_TIMEOU
   }
 }
 
-export default function TelegramSettingsPanel() {
-  const [tab, setTab] = useState<Tab>("connections");
+export default function TelegramSettingsPanel({ initialTool }: { initialTool?: ToolId }) {
+  const [tab, setTab] = useState<Tab>(initialTool ? "bindings" : "connections");
   const [hub, setHub] = useState<Hub>({ configured: false, connections: [], sources: [], bindings: [], syncRuns: [], readStates: [], botState: null, executionModel: "request_scoped" });
   const [mtproto, setMtproto] = useState< MtprotoStatus>(EMPTY_MTPROTO);
   const [hubLoadState, setHubLoadState] = useState<"loading" | "ready" | "error">("loading");
@@ -72,7 +73,7 @@ export default function TelegramSettingsPanel() {
   const [sourceAccess, setSourceAccess] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
-  const [selectedTool, setSelectedTool] = useState<string>(TELEGRAM_TOOLS[0]);
+  const [selectedTool, setSelectedTool] = useState<string>(initialTool || TELEGRAM_TOOLS[0]);
   const [draftBindings, setDraftBindings] = useState<Record<string, Set<string>>>({});
   const [historyMode, setHistoryMode] = useState<"since_now" | "cached" | "recent" | "from_date">("since_now");
   const [historyLimit, setHistoryLimit] = useState("100");
@@ -85,34 +86,23 @@ export default function TelegramSettingsPanel() {
   const load = useCallback(async () => {
     setHubLoadState("loading");
     setMtprotoLoadState("loading");
-    const loadHub = async () => {
-      try {
-        const nextHub = await api("/api/telegram?view=settings", undefined, STATUS_TIMEOUT_MS);
-        setHub(nextHub);
-        setHubLoadState("ready");
-        setDraftBindings((current) => {
-          const next: Record<string, Set<string>> = {};
-          for (const tool of TELEGRAM_TOOLS) next[tool] = new Set((nextHub.bindings as Binding[]).filter((item) => item.tool === tool).map((item) => item.source_id));
-          return Object.keys(current).length ? current : next;
-        });
-        return "";
-      } catch (error) {
-        setHubLoadState("error");
-        return error instanceof Error ? error.message : "Bot 状态读取失败";
-      }
-    };
-    const loadMtproto = async () => {
-      try {
-        setMtproto(await api("/api/telegram/mtproto", undefined, STATUS_TIMEOUT_MS));
-        setMtprotoLoadState("ready");
-        return "";
-      } catch (error) {
-        setMtprotoLoadState("error");
-        return error instanceof Error ? error.message : "个人账号状态读取失败";
-      }
-    };
-    const errors = (await Promise.all([loadHub(), loadMtproto()])).filter(Boolean);
-    if (errors.length) setNotice(errors.join("；"));
+    try {
+      const nextHub = await api("/api/telegram?view=settings", undefined, STATUS_TIMEOUT_MS);
+      setHub(nextHub);
+      setMtproto(nextHub.mtproto || EMPTY_MTPROTO);
+      setHubLoadState("ready");
+      setMtprotoLoadState("ready");
+      setDraftBindings((current) => {
+        const next: Record<string, Set<string>> = {};
+        for (const tool of TELEGRAM_TOOLS) next[tool] = new Set((nextHub.bindings as Binding[]).filter((item) => item.tool === tool).map((item) => item.source_id));
+        return Object.keys(current).length ? current : next;
+      });
+      setNotice("");
+    } catch (error) {
+      setHubLoadState("error");
+      setMtprotoLoadState("error");
+      setNotice(error instanceof Error ? error.message : "Telegram 状态读取失败");
+    }
   }, []);
 
   useEffect(() => {
@@ -201,7 +191,7 @@ export default function TelegramSettingsPanel() {
     }
     if (!changes.length) { setNotice("没有待保存的绑定变化"); return; }
     setBusy(true);
-    try { const result = await api("/api/telegram", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "save-bindings", changes }) }); setNotice(`绑定已一次提交：新增 ${result.added}，移除 ${result.removed}，保持 ${result.unchanged}`); await load(); }
+    try { const result = await api("/api/telegram", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "save-bindings", changes }) }); setNotice(`绑定已一次提交：新增 ${result.added}，移除 ${result.removed}，保持 ${result.unchanged}；恢复点 ${String(result.snapshotId || "").slice(0, 8)}… 已建立`); await load(); }
     catch (error) { setNotice(error instanceof Error ? error.message : "绑定保存失败"); }
     finally { setBusy(false); }
   }
@@ -216,8 +206,9 @@ export default function TelegramSettingsPanel() {
     finally { setBusy(false); }
   }
   async function deleteConnection(kind: "bot" | "personal") {
+    if (!window.confirm(`删除${kind === "bot" ? " Bot" : "个人账号"}全局连接？系统会先建立恢复点，来源和消息历史保留。`)) return;
     setBusy(true);
-    try { await api("/api/telegram", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: kind === "bot" ? "delete-bot-connection" : "delete-personal-connection" }) }); setNotice(`${kind === "bot" ? "Bot" : "个人账号"}连接记录已删除；来源历史保留`); await load(); }
+    try { const result = await api("/api/telegram", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: kind === "bot" ? "delete-bot-connection" : "delete-personal-connection" }) }); setNotice(`${kind === "bot" ? "Bot" : "个人账号"}连接记录已删除；来源历史保留；恢复点 ${String(result.snapshotId || "").slice(0, 8)}… 已建立`); await load(); }
     catch (error) { setNotice(error instanceof Error ? error.message : "连接删除失败"); }
     finally { setBusy(false); }
   }
@@ -228,6 +219,12 @@ export default function TelegramSettingsPanel() {
   async function importJson(event: React.ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; event.target.value = ""; if (!file) return; setBusy(true); try { const messages = parseTelegramOfficialJson(JSON.parse(await file.text())); let inserted = 0; let duplicates = 0; for (let offset = 0; offset < messages.length; offset += 10) { const result = await api("/api/telegram", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "import", messages: messages.slice(offset, offset + 10) }) }); inserted += result.inserted; duplicates += result.duplicates; } setNotice(`官方 JSON 已导入：新增 ${inserted}，重复 ${duplicates}`); await load(); } catch (error) { setNotice(error instanceof Error ? error.message : "官方 JSON 导入失败"); } finally { setBusy(false); } }
 
   const diff = diffCount();
+  const originalCurrentBindings = new Set(hub.bindings.filter((item) => item.tool === selectedTool).map((item) => item.source_id));
+  const currentDraftBindings = draftBindings[selectedTool] || new Set<string>();
+  const currentToolDiff = {
+    added: [...currentDraftBindings].filter((id) => !originalCurrentBindings.has(id)).length,
+    removed: [...originalCurrentBindings].filter((id) => !currentDraftBindings.has(id)).length,
+  };
   return <div className="stack-lg telegram-settings">
     <section className="callout telegram-layer-callout"><strong>Telegram 三层连接模型</strong><p>全局连接 → 全局群组/频道会话库 → 工具永久绑定 → 工具内本次选择。连接、绑定和本次选择不会再共用一个状态。</p></section>
     <section className="settings-tabs" aria-label="Telegram 设置分区">
@@ -247,7 +244,29 @@ export default function TelegramSettingsPanel() {
     {tab === "sources" && <section className="card"><div className="source-toolbar"><select value={sourceAccess} onChange={(event) => setSourceAccess(event.target.value)}><option value="">全部访问状态</option><option value="accessible">可访问</option><option value="inaccessible">不可访问</option></select><button onClick={() => setIncludeArchived((value) => !value)}>{includeArchived ? "隐藏已停用来源" : "显示已停用来源"}</button></div></section>}
     {tab === "sources" && <div className="stack-md"><section className="card"><div className="section-heading"><div><span className="eyebrow">全局来源</span><h3>{hub.sources.length.toLocaleString()} 个群组 / 频道</h3></div><span className="subtle">最多按 100 个来源设计</span></div><div className="button-row"><button className="primary" disabled={busy || !mtproto.authorized} onClick={discover}>刷新个人账号会话</button><label className="file-button"><input type="file" accept=".json" onChange={importJson} />导入 Telegram 官方 JSON</label><button onClick={() => setSelectedSources(new Set(filteredSources.map((source) => source.id)))}>全选当前筛选</button><button onClick={() => setSelectedSources(new Set())}>清空选择</button></div><div className="source-toolbar"><input value={sourceSearch} onChange={(event) => setSourceSearch(event.target.value)} placeholder="搜索名称、用户名、Telegram ID" /><select value={sourceType} onChange={(event) => setSourceType(event.target.value)}><option value="">全部类型</option><option value="group">普通群</option><option value="supergroup">超级群</option><option value="channel">广播频道</option></select></div><div className="source-action-row"><select value={syncMode} onChange={(event) => setSyncMode(event.target.value as typeof syncMode)}><option value="incremental">从最新位置增量</option><option value="recent">最近 N 条（不推进增量）</option><option value="range">指定时间范围（不推进增量）</option><option value="history">从本地最早处继续（不推进增量）</option></select><input type="number" min="1" max="20000" value={syncLimit} onChange={(event) => setSyncLimit(event.target.value)} /><input type="datetime-local" value={syncStart} onChange={(event) => setSyncStart(event.target.value)} /><input type="datetime-local" value={syncEnd} onChange={(event) => setSyncEnd(event.target.value)} /><button disabled={busy || !selectedSources.size || !mtproto.authorized} onClick={syncPersonal}>同步所选个人来源</button></div></section><section className="card source-table-wrap"><div className="source-table desktop-only"><div className="source-table-head"><span>会话</span><span>类型 / ID</span><span>连接</span><span>本地状态</span><span>已读策略</span><span>安全已读</span><span /></div>{filteredSources.map((source) => { const readState = hub.readStates.find((row) => String(row.source_id) === source.id); return <div className={`source-table-row ${selectedSources.has(source.id) ? "selected" : ""}`} key={source.id}><label><input type="checkbox" checked={selectedSources.has(source.id)} onChange={() => toggleSource(source.id)} /><strong>{source.name}</strong><small>{source.username ? `@${source.username.replace(/^@/, "")}` : "无用户名"}</small></label><span>{source.chat_type || "未知"}<small>{source.external_chat_id}</small></span><span>{source.connection_id === "telegram-personal" ? "个人 API" : source.connection_id === "telegram-bot" ? "Bot" : "导入"}</span><span>{Number(source.message_count || 0).toLocaleString()} 条<small>待处理 {Number(source.pending_count || 0).toLocaleString()} · {source.access_status}</small></span><select value={String(readState?.policy || "never")} onChange={(event) => updateSource(source.id, { readPolicy: event.target.value })}><option value="safe_auto">safe_auto</option><option value="never">never</option><option value="manual">manual</option></select><button disabled={busy || source.connection_id !== "telegram-personal" || String(readState?.policy || "never") === "never" || !String(readState?.safe_read_message_id || "")} onClick={() => markRead(source.id)}>至 {String(readState?.safe_read_message_id || "-")}</button><button onClick={() => updateSource(source.id, { archived: !Boolean(source.archived) })}>{source.archived ? "重新启用" : "停用"}</button></div>})}{!filteredSources.length && <div className="empty compact"><strong>没有符合条件的会话</strong><p>先完成全局连接、刷新会话或导入官方 JSON。</p></div>}</div><div className="mobile-source-list mobile-only">{filteredSources.map((source) => <label key={source.id} className="mobile-source-card"><input type="checkbox" checked={selectedSources.has(source.id)} onChange={() => toggleSource(source.id)} /><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id} · {source.connection_id}</small><small>{Number(source.message_count || 0).toLocaleString()} 条 · 待处理 {Number(source.pending_count || 0).toLocaleString()}</small></label>)}</div></section></div>}
 
-    {tab === "bindings" && <section className="card"><div className="section-heading"><div><span className="eyebrow">永久允许投递</span><h3>工具绑定矩阵</h3></div><div className="button-row"><span className="batch-status">新增 {diff.added}</span><span className="batch-status">移除 {diff.removed}</span><button className="primary" disabled={busy} onClick={saveBindings}>一次提交全部变化</button></div></div><p>绑定只表示来源允许投递，不表示每次运行都处理。新增绑定的历史范围由下方选择；取消绑定不会删除历史、正文或其他工具队列。</p><div className="binding-controls"><select value={historyMode} onChange={(event) => setHistoryMode(event.target.value as typeof historyMode)}><option value="since_now">从现在开始（默认）</option><option value="cached">使用现有本地缓存</option><option value="recent">回拉最近 N 条</option><option value="from_date">从指定时间开始</option></select><input type="number" min="0" max="20000" value={historyLimit} onChange={(event) => setHistoryLimit(event.target.value)} placeholder="N" /><input type="datetime-local" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} /><select className="mobile-only" value={selectedTool} onChange={(event) => setSelectedTool(event.target.value)}>{TELEGRAM_TOOLS.map((tool) => <option key={tool} value={tool}>{TELEGRAM_TOOL_LABELS[tool]}</option>)}</select></div><div className="binding-matrix desktop-only"><div className="binding-matrix-head"><span>会话</span>{TELEGRAM_TOOLS.map((tool) => <span key={tool}>{TELEGRAM_TOOL_LABELS[tool]}<small>{(draftBindings[tool] || new Set()).size} 个</small></span>)}</div>{hub.sources.filter((source) => !source.archived).map((source) => <div className="binding-matrix-row" key={source.id}><div><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></div>{TELEGRAM_TOOLS.map((tool) => <label key={tool} className="binding-cell"><input type="checkbox" checked={(draftBindings[tool] || new Set()).has(source.id)} onChange={() => toggleBinding(tool, source.id)} aria-label={`${source.name} · ${TELEGRAM_TOOL_LABELS[tool]}`} /></label>)}</div>)}</div><div className="mobile-binding-list mobile-only">{hub.sources.filter((source) => !source.archived).map((source) => <label key={source.id} className="mobile-binding-card"><input type="checkbox" checked={(draftBindings[selectedTool] || new Set()).has(source.id)} onChange={() => toggleBinding(selectedTool, source.id)} /><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></label>)}</div></section>}
+    {tab === "bindings" && <section className="card binding-editor-card">
+      <div className="section-heading">
+        <div><span className="eyebrow">当前工具绑定编辑器</span><h3>{TELEGRAM_TOOL_LABELS[selectedTool]}</h3></div>
+        <div className="button-row"><span className="batch-status pending-add">当前工具待新增 {currentToolDiff.added}</span><span className="batch-status pending-remove">当前工具待移除 {currentToolDiff.removed}</span><button className="primary" disabled={busy} onClick={saveBindings}>一次提交全部变化</button></div>
+      </div>
+      <p>默认只编辑当前工具，避免误触其他工具。每个来源同时显示其他工具已有绑定；取消当前工具绑定不会删除历史、正文或其他工具队列。</p>
+      <div className="binding-controls">
+        <label><span>当前工具</span><select value={selectedTool} onChange={(event) => setSelectedTool(event.target.value)}>{TELEGRAM_TOOLS.map((tool) => <option key={tool} value={tool}>{TELEGRAM_TOOL_LABELS[tool]}</option>)}</select></label>
+        <label><span>新增绑定历史范围</span><select value={historyMode} onChange={(event) => setHistoryMode(event.target.value as typeof historyMode)}><option value="since_now">从现在开始（默认）</option><option value="cached">使用现有本地缓存</option><option value="recent">回拉最近 N 条</option><option value="from_date">从指定时间开始</option></select></label>
+        <input type="number" min="0" max="20000" value={historyLimit} onChange={(event) => setHistoryLimit(event.target.value)} placeholder="最近 N 条" />
+        <input type="datetime-local" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} />
+      </div>
+      <div className="current-tool-binding-list">
+        {hub.sources.filter((source) => !source.archived).map((source) => {
+          const before = originalCurrentBindings.has(source.id);
+          const after = currentDraftBindings.has(source.id);
+          const state = !before && after ? "pending-add" : before && !after ? "pending-remove" : after ? "bound" : "unbound";
+          const otherTools = TELEGRAM_TOOLS.filter((tool) => tool !== selectedTool && (draftBindings[tool] || new Set()).has(source.id));
+          return <label key={source.id} className={`current-binding-row ${state}`}><input type="checkbox" checked={after} onChange={() => toggleBinding(selectedTool, source.id)} /><span><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></span><span className={`binding-state ${state}`}>{state === "pending-add" ? "待新增" : state === "pending-remove" ? "待移除" : state === "bound" ? "当前已绑定" : "未绑定"}</span><small className="other-bindings">其他工具：{otherTools.length ? otherTools.map((tool) => TELEGRAM_TOOL_LABELS[tool]).join("、") : "无"}</small></label>;
+        })}
+      </div>
+      <details className="advanced-binding-matrix"><summary>高级入口：查看和编辑五列全局矩阵（总待新增 {diff.added} / 待移除 {diff.removed}）</summary><div className="binding-matrix"><div className="binding-matrix-head"><span>会话</span>{TELEGRAM_TOOLS.map((tool) => <span key={tool}>{TELEGRAM_TOOL_LABELS[tool]}<small>{(draftBindings[tool] || new Set()).size} 个</small></span>)}</div>{hub.sources.filter((source) => !source.archived).map((source) => <div className="binding-matrix-row" key={source.id}><div><strong>{source.name}</strong><small>{source.chat_type} · {source.external_chat_id}</small></div>{TELEGRAM_TOOLS.map((tool) => <label key={tool} className={`binding-cell ${tool === selectedTool ? "current-tool" : ""}`}><input type="checkbox" checked={(draftBindings[tool] || new Set()).has(source.id)} onChange={() => toggleBinding(tool, source.id)} aria-label={`${source.name} · ${TELEGRAM_TOOL_LABELS[tool]}`} /></label>)}</div>)}</div></details>
+    </section>}
 
     {tab === "syncs" && <section className="card"><div className="section-heading"><div><span className="eyebrow">只读审计</span><h3>同步记录</h3></div><button onClick={load}>刷新</button></div><div className="sync-table">{hub.syncRuns.map((run) => <article key={String(run.id)}><div><strong>{String(run.transport)} · {String(run.mode)}</strong><small>{String(run.started_at)} → {String(run.ended_at || "进行中")}</small></div><span className={`batch-status ${run.status === "completed" ? "applied" : ""}`}>{String(run.status)}{Number(run.has_more || 0) ? " · 有后续页" : ""}</span><p>扫描 {Number(run.scanned_count || 0).toLocaleString()} · 新增 {Number(run.inserted_count || 0).toLocaleString()} · 编辑 {Number(run.edited_count || 0).toLocaleString()} · 删除 {Number(run.deleted_count || 0).toLocaleString()} · 重复 {Number(run.duplicate_count || 0).toLocaleString()} · 队列 {Number(run.queue_count || 0).toLocaleString()} · 已读 {String(run.read_result || "not_attempted")}</p>{String(run.error_message || "").length > 0 && <small className="error-text">{String(run.error_message)}</small>}</article>)}{!hub.syncRuns.length && <div className="empty compact"><strong>还没有同步记录</strong><p>Bot、个人 API 或官方导入完成后会在这里保留审计记录。</p></div>}</div></section>}
     {tab === "connections" && <section className="card"><span className="eyebrow">连接维护</span><p className="subtle">删除连接只删除对应网站连接状态；来源、消息正文、绑定和工具结果保留。</p><div className="button-row"><button className="danger" disabled={busy} onClick={() => deleteConnection("bot")}>删除 Bot 连接记录</button><button className="danger" disabled={busy || !mtproto.authorized} onClick={() => deleteConnection("personal")}>删除个人连接并注销</button></div></section>}

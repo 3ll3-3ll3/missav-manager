@@ -1,6 +1,6 @@
 import { apiError, bodyJson, requireAuthenticated } from "../../../lib/api-response";
-import { applyTelegramMigration, bindTelegramSource, checkTelegramBotConnection, deleteTelegramBotConnection, exportTelegramQueue, importTelegramMessages, listTelegramQueue, processTelegramQueue, pullTelegramBot, resolveTelegramQueueSelection, saveTelegramBindings, telegramMigrationPreview, telegramStatus, updateTelegramQueue, updateTelegramSource } from "../../../lib/server-telegram";
-import { discoverPersonalSources, logoutMtproto, markTelegramSourceRead, syncPersonalSources } from "../../../lib/server-mtproto";
+import { applyTelegramMigration, bindTelegramSource, checkTelegramBotConnection, createTelegramSnapshot, deleteTelegramBotConnection, exportTelegramQueue, importTelegramMessages, listTelegramQueue, processTelegramQueue, pullTelegramBot, resolveBoundToolSyncSources, resolveTelegramQueueSelection, saveTelegramBindings, telegramMigrationPreview, telegramStatus, updateTelegramQueue, updateTelegramSource } from "../../../lib/server-telegram";
+import { discoverPersonalSources, logoutMtproto, markTelegramSourceRead, mtprotoStatus, syncPersonalSources } from "../../../lib/server-mtproto";
 import type { TelegramImportMessage } from "../../../lib/telegram";
 
 export async function GET(request: Request) {
@@ -10,6 +10,7 @@ export async function GET(request: Request) {
     if (params.get("view") === "queue") return Response.json(await listTelegramQueue({
       tool: params.get("tool") || "", page: Number(params.get("page") || 1), pageSize: Number(params.get("pageSize") || 50),
       status: params.get("status") || "", search: params.get("search") || "", start: params.get("start") || "", end: params.get("end") || "",
+      sort: params.get("sort") || "messageDate", direction: params.get("direction") === "asc" ? "asc" : "desc",
       sourceIds: (params.get("sourceIds") || "").split(",").map(String).filter(Boolean),
     }), { headers: { "cache-control": "private, no-store" } });
     if (params.get("view") === "tool") {
@@ -17,6 +18,10 @@ export async function GET(request: Request) {
       const tool = String(params.get("tool") || "");
       const bound = status.bindings.filter((row: Record<string, unknown>) => String(row.tool) === tool).map((row: Record<string, unknown>) => String(row.source_id));
       return Response.json({ ...status, boundSourceIds: bound }, { headers: { "cache-control": "private, no-store" } });
+    }
+    if (params.get("view") === "settings") {
+      const status = await telegramStatus();
+      return Response.json({ ...status, mtproto: await mtprotoStatus() }, { headers: { "cache-control": "private, no-store" } });
     }
     return Response.json(await telegramStatus(), { headers: { "cache-control": "private, no-store" } });
   } catch (error) { return apiError(error); }
@@ -33,9 +38,29 @@ export async function POST(request: Request) {
     if (input.action === "save-bindings") return Response.json(await saveTelegramBindings((Array.isArray(input.changes) ? input.changes : []) as Parameters<typeof saveTelegramBindings>[0]));
     if (input.action === "source-update") return Response.json(await updateTelegramSource({ sourceId: String(input.sourceId || ""), archived: input.archived === undefined ? undefined : Boolean(input.archived), accessStatus: input.accessStatus ? String(input.accessStatus) : undefined, readPolicy: input.readPolicy ? String(input.readPolicy) : undefined }));
     if (input.action === "delete-bot-connection") return Response.json(await deleteTelegramBotConnection());
-    if (input.action === "delete-personal-connection") return Response.json(await logoutMtproto());
+    if (input.action === "delete-personal-connection") {
+      const snapshotId = await createTelegramSnapshot("删除 Telegram 个人连接前自动恢复点");
+      return Response.json({ ...(await logoutMtproto()), snapshotId });
+    }
     if (input.action === "discover") return Response.json(await discoverPersonalSources());
     if (input.action === "sync-personal") return Response.json(await syncPersonalSources({ sourceIds: Array.isArray(input.sourceIds) ? input.sourceIds.map(String) : [], mode: ["incremental", "recent", "range", "history"].includes(String(input.mode)) ? input.mode as "incremental" | "recent" | "range" | "history" : "incremental", limit: Number(input.limit || 200), start: String(input.start || ""), end: String(input.end || "") }));
+    if (input.action === "sync-tool-sources") {
+      const scope = await resolveBoundToolSyncSources({
+        tool: String(input.tool || ""),
+        sourceIds: Array.isArray(input.sourceIds) ? input.sourceIds.map(String) : [],
+      });
+      const mode = ["incremental", "recent", "range", "history"].includes(String(input.mode))
+        ? input.mode as "incremental" | "recent" | "range" | "history"
+        : "incremental";
+      const personal = scope.personalSourceIds.length
+        ? await syncPersonalSources({ sourceIds: scope.personalSourceIds, mode, limit: Number(input.limit || 200), start: String(input.start || ""), end: String(input.end || "") })
+        : null;
+      // Telegram Bot exposes one account-wide getUpdates cursor. It is consumed
+      // exactly once here and all updates still enter the unified pool, while
+      // the caller's queue view remains restricted to the selected bound IDs.
+      const bot = scope.botSourceIds.length ? await pullTelegramBot() : null;
+      return Response.json({ scope, personal, bot, reusedGlobalCursor: true });
+    }
     if (input.action === "mark-read") return Response.json(await markTelegramSourceRead(input.sourceId, input.maxId));
     if (input.action === "migration-preview") return Response.json(await telegramMigrationPreview());
     if (input.action === "migration-apply") return Response.json(await applyTelegramMigration({ migrationId: String(input.migrationId || ""), confirm: input.confirm === true }));

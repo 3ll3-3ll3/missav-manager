@@ -1,4 +1,4 @@
-# MissAV Manager Private Web
+# TG 内容工具箱 Private Web
 
 这是 `missav-manager` v0.5.13 Windows 工具的 B 账号私人网站版本。网站复刻业务规则与数据工作流，不直接转换 EXE，也不复制 Tauri/Rust 桌面外壳。
 

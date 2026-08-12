@@ -1,229 +1,135 @@
-# Telegram 工具箱总控交接
+# TG 内容工具箱：Web UX v0.5.13 对齐交接
 
 更新日期：2026-08-12
 
-## 本轮任务卡（云端 Work 必读）
+## 1. 本轮结论
 
-- 本轮任务名：`telegram-session-center-web`
-- 基线分支：`codex/sites-private-web`
-- 基线提交：`53011e24586c55ba7bc644fea485d9faf40ca340`（GitHub 当前已知最新网站提交）
-- 需要修改的功能：全局 Telegram 连接/会话中心；个人 Telegram API 与 Bot 会话统一配置；二维码/手机号登录与加密 Session 恢复；群组、超级群组、频道发现；每个工具选择已配置会话和来源；来源多对多绑定；统一消息池、跨入口去重、事务分发、断点恢复、编辑/删除处理和三种已读策略。
-- 允许修改的文件：`apps/web-site/**`、本文件 `HANDOFF.md`；如确实需要修改仓库根目录构建入口，必须先在报告中说明原因、影响和验证结果，不得顺手修改桌面端。
-- 禁止修改的文件：`apps/desktop-v05/**`、根目录 Electron 兼容端、稳定分支相关文件、正式数据库、任何 Secret、以及 `AGENTS.md`、`docs/PROJECT_HANDOFF.md`、`docs/CHATGPT_WORK_SITE_HANDOFF.md` 中已确定的桌面基线内容。
-- 测试命令：`cd apps/web-site; npm run lint; npm test; npm run build`；完成后在仓库根目录运行 `git diff --check`。依赖安装若被缓存/权限阻断，必须记录具体错误，不得假报通过。
-- 完成标准：个人 API 与 Bot 都能在一个全局连接中心配置一次；工具页不重复登录；来源发现、绑定、统一去重、原子分发、编辑/删除、断点恢复和三种已读策略均有自动测试和至少一轮真实端到端验收；刷新/重部署后 Session 和业务数据仍可用；非所有者不能访问；Secret 不出现在前端、日志、数据库明文或错误堆栈；私人 Site 可构建、部署并给出可追溯提交。
-- 线上版本18源码是否已同步到 GitHub：**否，尚未证明同步**。云端核对报告称线上 v18 与 GitHub `53011e2` 源码不同步；不得把线上 v18 反向覆盖 GitHub，必须先获取可核对的部署提交/构建产物哈希，再决定是否迁移差异。
-- 目标分支：`codex/cloud/tg-session-center-handoff`
+- 目标分支：`codex/cloud/web-ux-parity-v0513`
+- Telegram 云端基线：PR #3 的 `codex/cloud/tg-session-center-handoff`，核对时 HEAD 为 `17fe8e2ac1a4d930d215d2cebb87916bc31c1fce`。
+- 生产源码基线：Sites v21，源码提交为 `f2c9b986892688c38353ba35fc75098ff36f53ae`。
+- GitHub 网站基线：`codex/sites-private-web`，核对时 HEAD 为 `53011e24586c55ba7bc644fea485d9faf40ca340`。
+- 本分支以 Telegram 云端实现为父提交，并同步 Sites v19-v21 已验证的生产修复，再完成 v0.5.13 Web UX 对齐。
+- 生产 Sites v21、Windows 稳定分支、标签、Release、EXE、正式数据库和 Secret 均未修改。
 
-当前任务边界：本轮先完成 Telegram 全局连接中心和工具绑定闭环；MissAV 过滤规则、123AV 本地账号操作、Chrome 扩展、Windows DPAPI 和 Raindrop API 不属于本轮网站修改范围，不能伪装为已迁移。
+## 2. 开始前核对
 
-## 云端执行状态（2026-08-12）
-
-### 线上 v18 与 GitHub 基线核对
-
-- 已取得线上版本 18 的可追溯来源提交：`72ab03fc841f1c67b18eab8e87ef8a083a498259`。
-- 已取得版本 18 源码归档哈希：`sha256:b5a2ba9e1a42904d9023ecd7dc55be4577d0494c86a3aeb1774e58e92ad810d6`，归档共 35 个文件。
-- 已确认版本 18 与 GitHub 基线 `53011e24586c55ba7bc644fea485d9faf40ca340` 并非同一源码；本次先按文件哈希核对差异，再只把 `apps/web-site/**` 内构成可构建网站所需的差异和本轮修复提交到目标分支。未使用线上版本覆盖仓库根目录或桌面端。
-- 线上版本 18 仍保持原部署状态，本提交没有创建 Sites 检查点或生产部署。
-
-### 本轮网站实现
-
-- 全局 Telegram 中心统一承载 Bot 与个人账号状态；工具页面只选择已永久绑定的来源，不包含登录、Token 输入或独立 `getUpdates`。
-- 个人账号支持二维码、手机号、验证码、2FA、加密 Session 恢复；验证码挑战与 Session 均使用服务端 AES-GCM 密钥加密，手机号、验证码、密码、二维码内容不持久化。
-- Sites Worker 明确采用请求级 MTProto 重连并在请求结束时断开，不再把端点可达或 Session 存在描述成常驻连接。
-- 会话库只发现群组、超级群组和频道；最多展示 100 个来源，截断刷新不会把未展示来源误标为失效。
-- Bot 使用单一全局 offset 和锁；拉取前检查 webhook 冲突，私聊更新被过滤。
-- 统一消息池以来源与消息 ID 去重；同一消息只保存一次，并向每个已绑定工具建立独立队列。编辑会更新正文并把已有工具队列重置为待处理；删除保留墓碑并传播 `deleted` 状态；重复删除不会重复计数。
-- 连续增量检查点、历史游标、接收高水位、安全已读点和最后远端已读点分离；最近、范围和历史回拉不会推进连续增量检查点，历史回拉不会自动标已读。
-- 手动已读只能使用已安全入库的边界；`never`、`safe_auto`、`manual` 三种策略均保留独立语义。
-- 新增 D1 迁移 `0004_classy_pixie.sql`，清理旧版明文验证码挑战并增加同步、生命周期、Bot webhook 与断点字段。
-
-### 已完成验证
-
-- `cd apps/web-site && npm run lint`：通过。
-- `cd apps/web-site && npx tsc --noEmit`：通过。
-- `cd apps/web-site && npm test`：通过，36/36；测试过程包含生产构建与 Sites 产物校验。
-- `cd apps/web-site && npm run build`：通过。
-- 仓库根目录 `git diff --check`：通过。
-- 私有 Agent Preview 浏览器验收：全局连接、会话库、工具绑定、同步记录与工具侧本次来源选择可正常导航；工具页面未出现重复登录或 Bot 拉取入口；页面源码没有前端运行错误。
-- 集成测试使用临时 SQLite/D1 适配器执行全部迁移，验证一个来源只落一份消息、两个工具各有独立队列、重复不重入、编辑重置双队列、删除传播和重复删除幂等。
-- 生产身份守卫、Secret 仅服务端读取、敏感登录状态不持久化均有自动测试。
-
-### 尚未满足的真实验收门禁
-
-- Agent Preview 不注入正式 Site Secrets，且用户要求真实端到端验收后再部署，因此本轮没有创建新的生产部署，也不能据此宣称 Telegram 登录已真实成功。
-- 仍需由网站所有者在可访问真实 Site Secrets 的受控环境完成：个人账号二维码或手机号登录、刷新后 Session 恢复、真实来源发现、同一来源向两个工具投递、Bot 重复拉取、编辑/删除、三种已读策略、故障恢复，以及重新部署后的持久化验证。
-- 当前 Sites 能力只提供 D1/R2，没有 Durable Object、队列或定时任务；个人 MTProto 因此是按操作短连接，不是跨请求常驻监听。若验收要求持续实时监听，必须另增具备长生命周期的私有后端或平台能力，不能把当前模式标成常驻连接。
-- 真实 E2E 通过前，本任务状态为“代码与自动化验收完成，生产部署待验收”，草稿 PR 不应合并。
-
-### 未修改范围
-
-- `codex/v0.5.13-desktop-stable`、`v0.5.13-desktop-baseline`、Windows Release、`apps/desktop-v05/**`、根目录 Electron 兼容端及正式数据库均未修改。
-
-
-## 当前 Git 状态
-
-- 仓库：`3ll3-3ll3/missav-manager`（本地工作树位于 `E:\Desktop\codex项目\missav-manager`）
-- 当前分支：`codex/cloud/tg-session-center-handoff`
-- 云端网站基线提交：`53011e24586c55ba7bc644fea485d9faf40ca340`（`origin/codex/sites-private-web` 最新提交）
-- 当前网站实现提交：`356d48c9cf9e999d963d5716d2f84355177fc64a`（30 个 `apps/web-site/**` 文件与本交接文件）
-- 网站源码状态：已完成 v18 来源审计和逐文件哈希核对；目标分支已纳入可构建的 `apps/web-site/**` 实现，未修改桌面端。
-
-## 本次已完成内容
-
-1. 已完整阅读并遵守：
-   - `AGENTS.md`
-   - `docs/PROJECT_HANDOFF.md`
-   - `docs/CHANGELOG_2026-07-12.md`
-   - `docs/CHATGPT_WORK_SITE_HANDOFF.md`
-   - `README.md`
-   - `使用教程.md`
-   - `GPT_Work交接包_v0.5.13_20260801/HANDOFF.md`
-2. 已核对稳定桌面基线约束：
-   - `codex/v0.5.13-desktop-stable` 不得修改。
-   - `v0.5.13-desktop-baseline` 标签不得修改。
-   - 已发布的 v0.5.13 Windows Release 不得修改。
-3. 已以 `codex/sites-private-web` 的 `53011e24586c55ba7bc644fea485d9faf40ca340` 为基线，在 `codex/cloud/tg-session-center-handoff` 完成网站实现；基线分支尚未合并或覆盖。
-4. 当前项目资料已经明确了桌面端 v0.5.13 的 Telegram Bot、个人 API、官方导入、消息去重、工具绑定、已读策略、历史和本地加密会话语义。
-5. 当前需求已经明确：Telegram 连接与会话应集中配置一次；每个工具只选择已配置的会话和来源，不再让每个工具重复登录或重复填写 Telegram API。
-
-## 后续真实验收与部署任务
-
-网站代码与自动化验收已完成。下一步只在网站所有者确认真实 Telegram E2E 清单通过后，才允许创建 Sites 生产检查点、验证部署状态并决定是否把草稿 PR 合并到 `codex/sites-private-web`。
-
-### A. 建立全局 Telegram 连接中心
-
-新增一个独立的 Telegram 设置/连接中心，统一管理：
-
-- 个人账号 MTProto 会话：`api_id`、`api_hash`、手机号、二维码登录、验证码、2FA 和加密 Session。
-- Bot API 会话：Bot Token 只从已有 Site Secret 读取，不允许输入框回显或写入仓库。
-- 连接状态、最近验证时间、失效、重连、注销和错误诊断。
-- 会话/凭据只配置一次，不能让工具页再建立第二套登录流程。
-
-个人 API 必须保留为网站能力；不能按旧文档把它错误地限制为 Windows 本地功能。Secret 只能来自 Site Secrets，Session 使用服务端密钥进行信封加密，日志和前端不得出现凭据、验证码、二维码 URL、Token 或完整 Session。
-
-### B. 工具选择会话和来源
-
-每个工具（推特、Bad.news、海角、MissAV、123AV）进入输入页后，只显示：
-
-- 可用 Telegram 会话下拉框。
-- 该会话可访问的群组、超级群组和频道多选列表。
-- 当前工具已绑定来源、待新增来源、待移除来源。
-- 明确的“当前工具”标题，避免把来源错绑到别的工具。
-
-同一来源可以绑定多个工具；同一工具可以绑定多个来源；保存一个工具的绑定不能覆盖其他工具的绑定。Bot 和个人 API 都进入同一统一消息池，不能按工具各自推进一个 Bot `getUpdates` 游标。
-
-### C. 统一消息池和独立工具队列
-
-实现并测试：
-
-- Bot、个人 API、官方 JSON/HTML 导入共用规范化消息模型。
-- 频道/超级群组优先使用 `peer_type + peer_id + message_id` 去重；普通群组/私聊必要时加入连接身份。
-- Bot offset、原始消息、指纹、所有工具队列、同步审计必须在同一事务内提交。
-- 同一消息可分发给多个工具，但每个工具的 `pending`、`completed`、`processed_empty`、`ignored`、`error` 状态完全独立。
-- 编辑消息使用版本/哈希重新提取；删除消息保留 `remote_deleted` 证据，不硬删处理历史。
-
-### D. 同步和已读语义
-
-实现后必须明确区分：
-
-- 只读取，不标已读。
-- 增量安全入库后标已读。
-- 手动确认后标已读。
-
-安全自动标已读只能在消息落库、所有绑定工具队列建立、事务提交且同步区间连续后执行。历史回拉永不自动标已读。必须保存接收高水位、连续同步点、最后标已读点和已读基线，不能用一个 checkpoint 混代。
-
-增量恢复不能只依赖一个易失分页游标；至少要保留来源级高水位、重叠校对页、错误状态和可恢复任务。普通 Worker 请求不能跨请求复用 MTProto Socket；需要长期连接时使用 Durable Object/队列/定时任务，不能把“TCP 可达”当成“Telegram 已经可用”。
-
-### E. 云端验收
-
-在报告“完成”前必须真实验证：
-
-1. 个人 API 二维码或手机号登录至少成功一次。
-2. 刷新/重新部署后加密 Session 可继续使用。
-3. 连接中心能分页发现群组、超级群组和频道。
-4. 两个工具共用同一个 Telegram 会话时不重复登录。
-5. 同一来源绑定两个工具后，消息只接收一次、队列各自独立。
-6. Bot 重复拉取不重复入库，且没有 Webhook/getUpdates 冲突。
-7. 编辑、删除、断网、限流、Session 失效都有明确可恢复状态。
-8. 三种已读策略分别验证，并证明历史回拉不会标已读。
-9. 非所有者访问被拒绝，Secret 不出现在前端、日志、数据库明文或错误堆栈。
-
-## 必须检查的文件
-
-开始云端修改前必须重新阅读：
+已完整阅读：
 
 - `AGENTS.md`
-- `docs/PROJECT_HANDOFF.md`
+- 本文件的 Telegram 前序交接版本
 - `docs/CHATGPT_WORK_SITE_HANDOFF.md`
-- `docs/TELEGRAM_SOURCE_DESIGN.md`
-- `apps/desktop-v05/src/components/SourcesView.vue`
+- `apps/desktop-v05/src/App.vue`
+- `apps/desktop-v05/src/components/HomeView.vue`
+- `apps/desktop-v05/src/components/ToolWorkspace.vue`
 - `apps/desktop-v05/src/components/TelegramToolWorkspace.vue`
-- `apps/desktop-v05/src-tauri/src/workspace.rs`
-- `apps/desktop-v05/src-tauri/src/telegram_user.rs`
-- `src/telegramBot.js`
-- `src/telegramClient.js`
-- `src/telegramSource.js`
-- `test/telegram-bot.test.js`
-- `test/telegram-client.test.js`
-- `test/telegram-database.test.js`
-- `test/telegram-source.test.js`
+- `apps/desktop-v05/src/components/SpreadsheetTable.vue`
 
-如果云端只存在 `apps/web-site/`，还必须检查其认证、数据库、迁移、Secret、API 路由和测试文件，并把桌面端语义逐项映射，不得只复制界面。
+已核对 PR #3、Telegram 交接分支和生产 Sites v21 的真实源码，而非只依赖文字说明。生产 v21 相对 PR #3 另含 Telegram 状态启动、迁移恢复等修复，本轮一并保留。
 
-## 禁止修改的文件、分支和外部数据
+## 3. 已实现产品变化
 
-- 禁止修改、重写、删除或强推：
-  - `codex/v0.5.13-desktop-stable`
-  - `v0.5.13-desktop-baseline`
-  - 已发布的 v0.5.13 Windows Release
-- 云端任务只能在 `codex/cloud/<任务名>` 或 `codex/sites-private-web` 上进行。
-- 本次不得把工作区现有的 Electron/Tauri/桌面端未提交改动顺手提交。
-- 禁止提交正式 SQLite、`-wal`、`-shm`、Telegram Token、`api_hash`、手机号、验证码、2FA 密码、Session、Cookie、Local/Session Storage、个人黑名单和其他 Secret。
-- 不得把 Raindrop API、123AV 登录或本地 Chrome 能力伪装成网站已完成能力。
-- 不得使用正式数据库做测试，不得执行 `git reset --hard`、`git checkout --` 或强制覆盖用户修改。
+### 全局框架
 
-## 测试命令
+- 产品名统一为“TG 内容工具箱”。
+- 默认使用 v0.5.13 护眼淡绿、无背景图样式。
+- 一级导航严格收敛为：`工具首页｜处理中心｜数据中心｜Telegram｜日志｜设置`。
+- 历史、规则库、迁移、恢复点和 Windows 边界说明保留在二级页面。
+- 首页提供 Twitter、Bad.news、海角、MissAV、123AV 五个独立入口。
 
-桌面端及根目录测试必须使用临时数据库/隔离用户目录：
+### 工具工作区
 
-```powershell
-cd E:\Desktop\codex项目\missav-manager\apps\desktop-v05
-npm run check
-npm run test:rust
-npm run build:web
+- 每次只显示一个工具，不再把五个工具和全部动作堆在同页。
+- 五个工具统一为：`1 输入｜2 Telegram 消息｜3 结果｜4 执行/导出｜5 历史`。
+- 保留 MissAV 脚本、两层黑名单、Raindrop 导出和 123AV 任务导入/导出能力。
+- 结果、Telegram 消息、任务与历史统一采用桌面表格和移动卡片两套呈现。
 
-cd E:\Desktop\codex项目\missav-manager
-npm test
-git diff --check
+### Telegram
+
+- Bot 与个人账号继续只在全局中心配置一次。
+- 来源与工具保持多对多绑定；默认编辑器突出当前工具，分别显示待新增、待移除及其他工具绑定，高级入口保留五列全局矩阵。
+- 工具内新增“刷新同步消息”，只能选择当前工具已绑定的来源。
+- 同步复用全局个人连接、唯一 Bot offset、统一消息池、来源检查点和独立工具队列，不建立第二套登录或游标。
+- Bot 协议仍以一次全局 `getUpdates` 消费保证 offset 正确；工具视图只展示本次选择来源对应的已绑定消息。
+- 保留历史回拉、人工多选、一键处理所有未处理、复制所选消息以及 TXT/CSV 导出。
+
+### 表格与恢复
+
+- 统一支持单击替换、Ctrl 切换、Shift 连选、Ctrl+Shift 追加区间、全选本页、全选筛选结果、Ctrl+A/C、方向键、Enter、Delete、搜索、筛选、排序、分页、列设置、编辑、批量、复制和导出。
+- 任务、消息队列、连接删除、历史批量删除和永久结果覆盖前创建恢复点。
+- Telegram 恢复点支持按允许列表恢复连接、来源、绑定、统一消息池、队列与检查点；不执行任意表或任意 SQL。
+- 手机端以卡片列表呈现，同时保留同一字段、筛选、选择、批量和导出语义。
+
+### 任务、状态与错误
+
+- 处理中心规范状态：`待处理｜运行中｜已暂停｜已完成｜部分完成｜等待重试｜需要人工处理｜已取消`。
+- 旧的 `pending/running/completed/failed/retrying/needs_review/cancelled` 等状态继续兼容显示和筛选，写入或恢复操作使用规范状态。
+- 任务显示总量、成功、空结果、错误、实际速度、ETA、最后活动和恢复操作。
+- 错误默认显示中文摘要；脱敏技术详情按需展开；网络/限流/会话错误不会映射为“未找到”。
+
+## 4. 数据与安全边界
+
+- 本轮没有新增 D1 schema 迁移；同步的是生产 v21 已验证的 `0004_classy_pixie.sql` 修复版本。
+- D1 与 Windows SQLite 继续完全独立；只统一字段、状态和导出格式，不进行实时双向同步。
+- 所有 API 仍经过所有者身份守卫；Telegram Token、API Hash、验证码、2FA、二维码内容和 Session 不进入前端、Git 或明文日志。
+- Session 继续使用服务端加密；Bot 继续使用全局 offset、锁、Webhook 冲突检测；个人 API 继续使用请求级短连接和加密 Session 恢复。
+- 保留 100 来源、会话发现、跨工具扇出、去重、编辑/删除传播、独立队列、来源检查点、三种已读策略、D1 历史、数据中心及权限防护。
+
+## 5. 验证结果
+
+最终回归结果：
+
+```text
+cd apps/web-site
+npm run lint          # 通过
+npx tsc --noEmit      # 通过
+npm test              # 通过，47/47；命令内先完成生产构建和 Sites 产物校验
+npm run build         # 通过
+cd ../..
+git diff --check      # 通过
 ```
 
-云端网站还必须执行其实际可用的：
+新增或扩展测试覆盖：
 
-```powershell
-npm run lint
-npm run test
-npm run build
-```
+- 六项一级导航与五工具独立入口
+- 五阶段工作区
+- 工具内只同步已绑定来源
+- 同一消息跨工具扇出及独立队列
+- 表格选择和键盘语义
+- 一键处理所有未处理
+- 旧任务状态兼容
+- 刷新/恢复点恢复
+- 所有者身份、Secret 与错误脱敏边界
 
-如果脚本名称不同，必须在交付说明中列出实际命令和结果；禁止用“已测试”替代输出。涉及 UI 时必须做桌面、窄屏/移动端和刷新恢复验收。
+Agent Preview 桌面验收使用运行时提供的 1363×936 视口，并截取 1363×900：一级导航为 6 项、首页工具卡为 5 个、背景图为 `none`、页面无横向溢出；Twitter 结果表为 3 行、表格可视高度 380 px、页面允许纵向滚动，移动卡在桌面计算样式中为 `display:none`。另已验证 Ctrl 多选和 TXT 下载。预览运行时无法可靠切换为 390×844；移动断点、卡片结构、选择和导出已由源码与自动化测试验证，但真实约 390×844 的浏览器截图仍列为人工验收项，不伪报完成。
 
-## 明确完成标准
+## 6. 待用户 E2E 验收
 
-只有同时满足以下条件，云端任务才能标记完成：
+以下项目未经网站所有者使用真实账号和已有 Site Secrets 操作，状态必须保持“待用户 E2E 验收”：
 
-- 全局 Telegram 连接中心可配置和验证个人 API 与 Bot；工具不重复登录。
-- 多来源、多工具绑定可视、可搜索、可增删，且不会错绑或互相覆盖。
-- Bot、个人 API、官方导入共用统一消息池、强去重和原子分发。
-- 同步断点、编辑/删除、三种已读策略和失败恢复均有真实测试。
-- 个人 API Session 安全加密，Secret 不泄漏，所有者之外无法访问。
-- 网页刷新、重新登录、重部署后连接配置和业务数据语义保持一致。
-- 自动测试、构建、权限测试和至少一轮真实端到端验收全部通过。
-- 报告中明确列出网站已完成能力、仍留在 Windows 的能力、已知限制和回退方式，并给出对应提交号和部署来源。
+1. Telegram 个人账号二维码或手机号登录。
+2. 页面刷新及重新部署后的加密 Session 恢复。
+3. Bot 真实拉取、Webhook 冲突和重复拉取幂等。
+4. 真实来源发现、历史读取和连续增量。
+5. 同一真实来源绑定多个工具后的独立排队。
+6. 真实消息编辑、删除传播。
+7. `never`、`safe_auto`、`manual` 三种已读策略。
+8. 断网、限流、Session 失效和重新登录恢复。
+9. 约 390×844 真机/真实浏览器滚动、手机选择和导出。
 
-## 当前阻塞点
+自动测试、类型检查或构建成功不能代替以上验收。
 
-1. 真实 Telegram 凭据不应通过聊天提供；Agent Preview 也不注入正式 Site Secrets，因此个人账号登录、Bot 身份、真实来源与远端已读尚未执行。
-2. 用户明确要求真实端到端验收后再部署；Sites 的 checkpoint 本身就是生产部署，因此当前不能用 checkpoint 充当预部署测试环境，线上 v18 必须保持不变。
-3. 仍需网站所有者确认：二维码或手机号登录、刷新后 Session 恢复、真实来源同步、同一消息跨两个工具独立排队、Bot 重拉幂等、Webhook 冲突、编辑/删除、三种已读策略、断网/限流/Session 失效与重新部署后的持久化。
-4. 当前 Sites 无 Durable Object、队列或定时任务；如必须持续实时监听 MTProto，需要另增私有长生命周期执行环境。当前实现只承诺请求级短连接。
+## 7. 发布与回退
+
+- 先把准确源码提交并推送至本分支，再保存指向同一 Git SHA 的 Sites 候选版本。
+- 保存 Sites 版本不等于部署；生产部署必须等待所有者确认，不创建生产 checkpoint，不调用生产 deploy。
+- 当前生产继续为 Sites v21 / `f2c9b986892688c38353ba35fc75098ff36f53ae`。
+- 回退方式是在 Sites 选择已验证的 v21；Windows v0.5.13 仍独立运行，不依赖 D1。
+
+## 8. 交接时必须报告
+
+- 分支、GitHub 提交和 PR 链接。
+- 五个规定命令的真实结果与测试数量。
+- Agent Preview 截图/验收结果及无法完成项。
+- D1/SQLite 迁移边界和恢复方式。
+- 所有“待用户 E2E 验收”项目。
+- 当前生产版本与 SHA、候选 Sites 版本与 SHA；明确生产是否部署。

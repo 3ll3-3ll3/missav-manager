@@ -353,3 +353,15 @@ Windows 回退不缩减网站 Telegram 范围。只有 123AV 账号操作、本�
 如果 Work 已经能读取仓库，可直接发送：
 
 > 请在 `3ll3-3ll3/missav-manager` 的 `codex/sites-private-web` 分支工作。完整阅读 `AGENTS.md` 和 `docs/CHATGPT_WORK_SITE_HANDOFF.md`，以 `codex/v0.5.13-desktop-stable` / `v0.5.13-desktop-baseline` 的 v0.5.13 为行为基线。只在 `apps/web-site/` 建立 Sites 私人网站，不修改稳定分支、标签或 Windows Release。Telegram 必须同时支持 Bot API 与个人账号 MTProto；Windows 端只作为独立回退，不构成网站删减理由。按交接文档直接完成实现、真实外部测试和私人部署；未完成真实登录、来源发现、历史、连续增量、三种已读策略、Session 恢复/注销与安全测试前，不得宣布 Telegram 完成。
+
+## 17. Web UX v0.5.13 对齐增补（2026-08-12）
+
+- 产品名改为“TG 内容工具箱”，默认使用护眼淡绿且不使用背景图。
+- 一级导航只保留工具首页、处理中心、数据中心、Telegram、日志、设置；历史、规则库、迁移、恢复点和 Windows 说明转为二级入口，功能不删除。
+- Twitter、Bad.news、海角、MissAV、123AV 使用独立工作区；每个工作区固定为输入、Telegram 消息、结果、执行/导出、历史五阶段。
+- Telegram 登录和 Bot 只在全局中心配置；工具内刷新只能选择当前工具已绑定来源，并复用全局连接、Bot offset、统一消息池和来源检查点。
+- 结果、消息、任务和历史统一桌面表格选择语义，并提供等价的移动卡片语义；高影响写操作前创建恢复点。
+- 处理中心写入八种规范状态并兼容旧状态；网络和会话错误不得归类成未找到。
+- D1 与 Windows SQLite 继续独立，只统一字段和导出格式。
+- 真实 Telegram 登录、Session 恢复、Bot 拉取、编辑/删除和三种已读策略在所有者操作前一律标记“待用户 E2E 验收”。
+- 生产发布门禁：源码先提交推送，Sites 候选版本引用同一 SHA；保存候选版本后仍须等待所有者确认，才能部署生产。

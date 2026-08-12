@@ -38,6 +38,53 @@ const SORT_FIELDS: Record<string, string> = {
 
 let schemaReady: Promise<void> | null = null;
 
+const TELEGRAM_HUB_COMPATIBILITY_COLUMNS: Array<[string, string]> = [
+  ["input_sources", "sync_cursor_message_id TEXT NOT NULL DEFAULT ''"],
+  ["input_sources", "sync_target_message_id TEXT NOT NULL DEFAULT ''"],
+  ["sync_transactions", "edited_count INTEGER NOT NULL DEFAULT 0"],
+  ["sync_transactions", "deleted_count INTEGER NOT NULL DEFAULT 0"],
+  ["telegram_auth_flows", "encrypted_challenge TEXT NOT NULL DEFAULT ''"],
+  ["telegram_bot_state", "webhook_status TEXT NOT NULL DEFAULT 'unknown'"],
+  ["telegram_bot_state", "last_checked_at TEXT NOT NULL DEFAULT ''"],
+  ["telegram_message_fingerprints", "content_hash TEXT NOT NULL DEFAULT ''"],
+  ["telegram_message_fingerprints", "event_kind TEXT NOT NULL DEFAULT 'message'"],
+  ["telegram_message_fingerprints", "last_remote_update_id TEXT NOT NULL DEFAULT ''"],
+  ["telegram_message_fingerprints", "updated_at TEXT NOT NULL DEFAULT ''"],
+  ["telegram_messages", "event_kind TEXT NOT NULL DEFAULT 'message'"],
+  ["telegram_messages", "content_hash TEXT NOT NULL DEFAULT ''"],
+  ["telegram_messages", "remote_edited_at TEXT NOT NULL DEFAULT ''"],
+  ["telegram_messages", "remote_deleted_at TEXT NOT NULL DEFAULT ''"],
+  ["telegram_sync_runs", "edited_count INTEGER NOT NULL DEFAULT 0"],
+  ["telegram_sync_runs", "deleted_count INTEGER NOT NULL DEFAULT 0"],
+  ["telegram_sync_runs", "has_more INTEGER NOT NULL DEFAULT 0"],
+];
+
+function schemaObjectMissing(error: unknown) {
+  return /no such table|no such column|has no column named/i.test(String(error));
+}
+
+async function probeBaseSchema(db: D1Database) {
+  await db.batch([
+    db.prepare("SELECT key FROM app_settings LIMIT 1"),
+    db.prepare("SELECT connection_id FROM telegram_connections LIMIT 1"),
+    db.prepare("SELECT stage FROM telegram_auth_flows LIMIT 1"),
+    db.prepare("SELECT connection_id, external_chat_id FROM input_sources LIMIT 1"),
+    db.prepare("SELECT history_mode FROM tool_source_bindings LIMIT 1"),
+    db.prepare("SELECT next_update_offset FROM telegram_bot_state LIMIT 1"),
+  ]);
+}
+
+async function applyTelegramHubSchemaCompatibility(db: D1Database) {
+  for (const [table, definition] of TELEGRAM_HUB_COMPATIBILITY_COLUMNS) {
+    try {
+      await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${definition}`).run();
+    } catch (error) {
+      if (!/duplicate column|already exists/i.test(String(error))) throw error;
+    }
+  }
+  await db.prepare("DELETE FROM telegram_auth_flows WHERE encrypted_challenge='' AND challenge_json<>'{}'").run();
+}
+
 async function probeCurrentSchema(db: D1Database) {
   await db.batch([
     db.prepare("SELECT key FROM app_settings LIMIT 1"),
@@ -85,8 +132,25 @@ export async function ensureSchema() {
     try {
       await probeCurrentSchema(db);
       return;
-    } catch {
-      // Fall through to the bounded legacy compatibility initializer.
+    } catch (currentProbeError) {
+      try {
+        await probeBaseSchema(db);
+      } catch (baseProbeError) {
+        if (!schemaObjectMissing(baseProbeError)) throw baseProbeError;
+        // Fall through to the bounded legacy compatibility initializer below.
+      }
+      if (!schemaObjectMissing(currentProbeError)) throw currentProbeError;
+      try {
+        // Version 19 can reach an existing v18 database before hosted migrations
+        // finish. Repair only the new Telegram hub columns here instead of
+        // replaying every table definition on a status-page cold start.
+        await applyTelegramHubSchemaCompatibility(db);
+        await probeCurrentSchema(db);
+        return;
+      } catch (compatibilityError) {
+        if (!schemaObjectMissing(compatibilityError)) throw compatibilityError;
+        // A genuinely older database still needs the full legacy initializer.
+      }
     }
     const statements = [
       `CREATE TABLE IF NOT EXISTS content_runs (
@@ -498,6 +562,28 @@ export async function saveRun(input: {
     .run();
 
   const values = [...unique.values()];
+  const overwrittenIds: string[] = [];
+  for (let offset = 0; offset < values.length; offset += 80) {
+    const keys = values.slice(offset, offset + 80).map((item) => item.resultKey);
+    if (!keys.length) continue;
+    const existing = await db
+      .prepare(
+        `SELECT id FROM permanent_records WHERE tool=? AND record_key IN (${keys.map(() => "?").join(",")})`,
+      )
+      .bind(tool, ...keys)
+      .all();
+    overwrittenIds.push(
+      ...(existing.results ?? []).map((row: Record<string, unknown>) =>
+        String(row.id),
+      ),
+    );
+  }
+  const overwriteSnapshotId = overwrittenIds.length
+    ? await createRecordSnapshot(
+        overwrittenIds,
+        `保存 ${name} 前自动恢复点`,
+      )
+    : "";
   for (let offset = 0; offset < values.length; offset += 40) {
     const chunk = values.slice(offset, offset + 40);
     const statements = [];
@@ -596,12 +682,24 @@ export async function saveRun(input: {
     .bind(
       crypto.randomUUID(),
       tool,
-      tool === "av123" || tool === "missav" ? "website" : "completed",
+      tool === "av123" || tool === "missav" ? "pending" : "completed",
       name,
       runId,
       "",
       "",
-      json({ resultCount: unique.size }, {}),
+      json(
+        {
+          total: unique.size,
+          success: tool === "av123" || tool === "missav" ? 0 : unique.size,
+          empty: 0,
+          error: 0,
+          actualSpeed: 0,
+          etaSeconds: 0,
+          lastActivityAt: timestamp,
+          overwriteSnapshotId,
+        },
+        {},
+      ),
       timestamp,
       timestamp,
     )
@@ -610,7 +708,7 @@ export async function saveRun(input: {
     runId,
     resultCount: unique.size,
   });
-  return { runId, resultCount: unique.size };
+  return { runId, resultCount: unique.size, overwriteSnapshotId };
 }
 
 export async function listRuns(
@@ -618,6 +716,8 @@ export async function listRuns(
   pageSize = 30,
   tool = "",
   search = "",
+  sort = "createdAt",
+  direction: "asc" | "desc" = "desc",
 ) {
   await ensureSchema();
   const db = getD1();
@@ -633,6 +733,14 @@ export async function listRuns(
     values.push(`%${search.trim().slice(0, 160)}%`);
   }
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const sortFields: Record<string, string> = {
+    createdAt: "created_at",
+    name: "name",
+    tool: "tool",
+    resultCount: "result_count",
+  };
+  const sortField = sortFields[String(sort)] || "created_at";
+  const sortDirection = direction === "asc" ? "ASC" : "DESC";
   const safePage = Math.max(1, Math.trunc(page));
   const safeSize = Math.min(100, Math.max(10, Math.trunc(pageSize)));
   const [count, rows] = await db.batch([
@@ -641,7 +749,7 @@ export async function listRuns(
       .bind(...values),
     db
       .prepare(
-        `SELECT * FROM content_runs${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM content_runs${where} ORDER BY ${sortField} ${sortDirection},id ${sortDirection} LIMIT ? OFFSET ?`,
       )
       .bind(...values, safeSize, (safePage - 1) * safeSize),
   ]);
@@ -651,6 +759,115 @@ export async function listRuns(
     page: safePage,
     pageSize: safeSize,
   };
+}
+
+export async function resolveRunSelection(input: {
+  mode?: "ids" | "all";
+  ids?: string[];
+  excludeIds?: string[];
+  filters?: { tool?: string; search?: string };
+}) {
+  if (input.mode !== "all")
+    return [...new Set((input.ids ?? []).map(String).filter(Boolean))].slice(
+      0,
+      1_000,
+    );
+  const tool = String(input.filters?.tool || "");
+  const search = String(input.filters?.search || "");
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  if (tool) {
+    cleanTool(tool);
+    clauses.push("tool=?");
+    values.push(tool);
+  }
+  if (search.trim()) {
+    clauses.push("name LIKE ?");
+    values.push(`%${search.trim().slice(0, 160)}%`);
+  }
+  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const rows = await getD1()
+    .prepare(`SELECT id FROM content_runs${where} ORDER BY id LIMIT 1001`)
+    .bind(...values)
+    .all();
+  const excluded = new Set((input.excludeIds ?? []).map(String));
+  const ids = (rows.results ?? [])
+    .map((row: Record<string, unknown>) => String(row.id))
+    .filter((id) => !excluded.has(id));
+  if (ids.length > 1_000)
+    throw new Error("历史批量操作最多 1,000 个批次，请先增加筛选条件");
+  return ids;
+}
+
+export async function exportSelectedRuns(
+  ids: string[],
+  format: "txt" | "csv" | "json",
+) {
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const runs: Array<Record<string, unknown>> = [];
+  const results: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(",");
+    const [runRows, resultRows] = await getD1().batch([
+      getD1()
+        .prepare(`SELECT * FROM content_runs WHERE id IN (${placeholders})`)
+        .bind(...chunk),
+      getD1()
+        .prepare(
+          `SELECT * FROM content_results WHERE run_id IN (${placeholders}) ORDER BY created_at,id`,
+        )
+        .bind(...chunk),
+    ]);
+    runs.push(...((runRows.results ?? []) as Array<Record<string, unknown>>));
+    results.push(...((resultRows.results ?? []) as Array<Record<string, unknown>>));
+  }
+  if (results.length > 100_000)
+    throw new Error("历史导出超过 100,000 条结果，请缩小筛选范围");
+  const order = new Map(unique.map((id, index) => [id, index]));
+  runs.sort(
+    (a, b) =>
+      (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0),
+  );
+  if (format === "json")
+    return JSON.stringify(
+      {
+        exportedAt: nowIso(),
+        runs,
+        results,
+      },
+      null,
+      2,
+    );
+  if (format === "txt")
+    return runs
+      .map(
+        (run) =>
+          `${run.tool}\t${run.name}\t${run.result_count}\t${run.created_at}`,
+      )
+      .join("\r\n");
+  const byRun = new Map(runs.map((run) => [String(run.id), run]));
+  return `\uFEFF${[
+    ["run_id", "tool", "run_name", "primary", "secondary", "status", "source", "created_at"]
+      .map(csvSafe)
+      .join(","),
+    ...results.map((row) => {
+      const run = byRun.get(String(row.run_id)) || {};
+      return [row.run_id, row.tool, run.name, row.primary_value, row.secondary_value, row.status, row.source, row.created_at]
+        .map(csvSafe)
+        .join(",");
+    }),
+  ].join("\r\n")}`;
+}
+
+export async function deleteSelectedRuns(ids: string[]) {
+  const snapshots: string[] = [];
+  for (const id of [...new Set(ids.map(String).filter(Boolean))]) {
+    const result = await mutateRun(id, "delete");
+    if (result && "snapshotId" in result)
+      snapshots.push(String(result.snapshotId));
+  }
+  return { deleted: snapshots.length, snapshotIds: snapshots };
 }
 
 export async function getRun(id: string, resultPage = 1, resultPageSize = 100) {

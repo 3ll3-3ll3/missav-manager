@@ -342,6 +342,54 @@ export async function telegramStatus() {
   };
 }
 
+export async function resolveBoundToolSyncSources(input: {
+  tool: string;
+  sourceIds: string[];
+}) {
+  await ensureSchema();
+  const tool = cleanTool(input.tool);
+  const sourceIds = [
+    ...new Set((input.sourceIds ?? []).map(String).filter(Boolean)),
+  ].slice(0, 100);
+  if (!sourceIds.length) throw new Error("请先选择本次要同步的已绑定来源");
+  const rows = await getD1()
+    .prepare(
+      `SELECT s.id,s.name,s.connection_id,s.access_status,s.archived
+       FROM input_sources s
+       JOIN tool_source_bindings b ON b.source_id=s.id AND b.tool=?
+       WHERE s.id IN (${sourceIds.map(() => "?").join(",")})`,
+    )
+    .bind(tool, ...sourceIds)
+    .all();
+  const bound = (rows.results ?? []) as Array<Record<string, unknown>>;
+  const boundIds = new Set(bound.map((row) => String(row.id)));
+  const rejected = sourceIds.filter((id) => !boundIds.has(id));
+  if (rejected.length) {
+    throw new Error("本次选择包含未绑定到当前工具的来源，请刷新绑定后重试");
+  }
+  if (bound.some((row) => Number(row.archived || 0) === 1)) {
+    throw new Error("本次选择包含已停用来源，请先在全局会话库重新启用");
+  }
+  return {
+    tool,
+    sourceIds,
+    personalSourceIds: bound
+      .filter((row) => String(row.connection_id) === "telegram-personal")
+      .map((row) => String(row.id)),
+    botSourceIds: bound
+      .filter((row) => String(row.connection_id) === "telegram-bot")
+      .map((row) => String(row.id)),
+    cachedSourceIds: bound
+      .filter(
+        (row) =>
+          !["telegram-personal", "telegram-bot"].includes(
+            String(row.connection_id),
+          ),
+      )
+      .map((row) => String(row.id)),
+  };
+}
+
 async function telegramBotApi(secret: string, method: string, query: Record<string, string> = {}) {
   const params = new URLSearchParams(query);
   const suffix = params.size ? `?${params}` : "";
@@ -498,12 +546,15 @@ export async function bindTelegramSource(input: {
   const sourceId = String(input.sourceId || "");
   const timestamp = nowIso();
   if (!sourceId) throw new Error("缺少 Telegram 来源");
+  const snapshotId = await createTelegramSnapshot(
+    `修改 ${tool} Telegram 来源绑定前自动恢复点`,
+  );
   if (!input.enabled) {
     await getD1()
       .prepare("DELETE FROM tool_source_bindings WHERE source_id=? AND tool=?")
       .bind(sourceId, tool)
       .run();
-    return { enabled: false };
+    return { enabled: false, snapshotId };
   }
   await getD1()
     .prepare(
@@ -582,7 +633,7 @@ export async function bindTelegramSource(input: {
     cursor = String(chunk.at(-1)?.id ?? "");
     if (chunk.length < 80) break;
   }
-  return { enabled: true };
+  return { enabled: true, snapshotId };
 }
 
 const HISTORY_MODES = new Set(["since_now", "cached", "recent", "from_date"]);
@@ -614,6 +665,9 @@ export async function saveTelegramBindings(changes: TelegramBindingChange[]) {
   if (sourceSet.size !== sourceIds.length) throw new Error("绑定来源不存在，请先刷新全局会话库");
   const current = await getD1().prepare(`SELECT source_id,tool FROM tool_source_bindings WHERE (${sourceIds.map(() => "source_id=?").join(" OR ")})`).bind(...sourceIds).all();
   const currentSet = new Set((current.results ?? []).map((row) => `${row.source_id}\u0000${row.tool}`));
+  const snapshotId = await createTelegramSnapshot(
+    "修改 Telegram 工具绑定前自动恢复点",
+  );
   let added = 0; let removed = 0; let unchanged = 0; let queued = 0;
   const statements: D1PreparedStatement[] = [];
   const timestamp = nowIso();
@@ -644,7 +698,7 @@ export async function saveTelegramBindings(changes: TelegramBindingChange[]) {
   }
   await getD1().batch(statements);
   await writeLog("info", "telegram", "Telegram 工具绑定已事务提交", { added, removed, unchanged, queued });
-  return { added, removed, unchanged, queued };
+  return { added, removed, unchanged, queued, snapshotId };
 }
 
 export async function updateTelegramSource(input: { sourceId: string; archived?: boolean; accessStatus?: string; readPolicy?: string }) {
@@ -653,6 +707,9 @@ export async function updateTelegramSource(input: { sourceId: string; archived?:
   if (!sourceId) throw new Error("缺少 Telegram 会话");
   const policy = input.readPolicy === undefined ? "" : String(input.readPolicy);
   if (input.readPolicy !== undefined && !new Set(["safe_auto", "never", "manual"]).has(policy)) throw new Error("已读策略无效");
+  const snapshotId = await createTelegramSnapshot(
+    "修改 Telegram 来源设置前自动恢复点",
+  );
   const timestamp = nowIso();
   const statements = [
     getD1().prepare("UPDATE input_sources SET archived=COALESCE(?,archived),access_status=COALESCE(?,access_status),updated_at=? WHERE id=?")
@@ -663,11 +720,14 @@ export async function updateTelegramSource(input: { sourceId: string; archived?:
       .bind(sourceId, policy, "", "", "", timestamp));
   }
   await getD1().batch(statements);
-  return { sourceId, archived: input.archived === undefined ? undefined : Boolean(input.archived), readPolicy: input.readPolicy === undefined ? undefined : policy };
+  return { sourceId, archived: input.archived === undefined ? undefined : Boolean(input.archived), readPolicy: input.readPolicy === undefined ? undefined : policy, snapshotId };
 }
 
 export async function deleteTelegramBotConnection() {
   await ensureSchema();
+  const snapshotId = await createTelegramSnapshot(
+    "删除 Telegram Bot 连接前自动恢复点",
+  );
   const timestamp = nowIso();
   await getD1().batch([
     getD1().prepare("UPDATE input_sources SET access_status='unavailable',last_error='Bot 全局连接已删除',updated_at=? WHERE connection_id='telegram-bot'").bind(timestamp),
@@ -675,7 +735,7 @@ export async function deleteTelegramBotConnection() {
     getD1().prepare("DELETE FROM telegram_connections WHERE connection_id='telegram-bot'"),
   ]);
   await writeLog("info", "telegram", "Telegram Bot 全局连接记录已删除，来源历史保留", {});
-  return { connectionId: "telegram-bot", deleted: true, historyPreserved: true };
+  return { connectionId: "telegram-bot", deleted: true, historyPreserved: true, snapshotId };
 }
 
 export async function telegramMigrationPreview() {
@@ -701,7 +761,7 @@ export async function telegramMigrationPreview() {
   return { migrationId: id, counts, warnings };
 }
 
-async function createTelegramSnapshot(reason: string) {
+export async function createTelegramSnapshot(reason: string) {
   const snapshotId = crypto.randomUUID();
   const timestamp = nowIso();
   const tables = ["telegram_connections", "telegram_bot_state", "input_sources", "tool_source_bindings", "telegram_messages", "telegram_message_fingerprints", "telegram_tool_queue", "telegram_read_states", "telegram_sync_runs", "telegram_accounts", "telegram_auth_flows"];
@@ -720,6 +780,73 @@ async function createTelegramSnapshot(reason: string) {
   } catch (error) {
     await getD1().prepare("UPDATE data_snapshots SET status='error' WHERE id=?").bind(snapshotId).run();
     throw error;
+  }
+  return snapshotId;
+}
+
+async function createTelegramQueueSnapshot(ids: string[], reason: string) {
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const snapshotId = crypto.randomUUID();
+  const timestamp = nowIso();
+  const queueRows: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `SELECT * FROM telegram_tool_queue WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .all();
+    queueRows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
+  }
+  const messageIds = [
+    ...new Set(queueRows.map((row) => String(row.telegram_message_id))),
+  ];
+  const messageRows: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < messageIds.length; offset += 80) {
+    const chunk = messageIds.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `SELECT * FROM telegram_messages WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .all();
+    messageRows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
+  }
+  const items = [
+    ...messageRows.map((row) => ({
+      key: `telegram_messages:${String(row.id)}`,
+      row,
+    })),
+    ...queueRows.map((row) => ({
+      key: `telegram_tool_queue:${String(row.id)}`,
+      row,
+    })),
+  ];
+  await getD1()
+    .prepare(
+      "INSERT INTO data_snapshots(id,reason,entity,item_count,status,created_at,restored_at) VALUES (?,?,?,?,?,?,?)",
+    )
+    .bind(
+      snapshotId,
+      reason.slice(0, 240),
+      "telegram_queue",
+      items.length,
+      "ready",
+      timestamp,
+      "",
+    )
+    .run();
+  for (let offset = 0; offset < items.length; offset += 50) {
+    await getD1().batch(
+      items.slice(offset, offset + 50).map((item) =>
+        getD1()
+          .prepare(
+            "INSERT INTO data_snapshot_items(snapshot_id,entity_key,previous_json) VALUES (?,?,?)",
+          )
+          .bind(snapshotId, item.key, safeJson(item.row, {})),
+      ),
+    );
   }
   return snapshotId;
 }
@@ -791,6 +918,8 @@ export async function listTelegramQueue(input: {
   start?: string;
   end?: string;
   sourceIds?: string[];
+  sort?: string;
+  direction?: "asc" | "desc";
 }) {
   await ensureSchema();
   const page = Math.max(1, Math.trunc(Number(input.page) || 1));
@@ -799,13 +928,21 @@ export async function listTelegramQueue(input: {
     Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
   );
   const { where, from, values } = queueFilter(input);
+  const sortFields: Record<string, string> = {
+    messageDate: "m.message_date",
+    source: "s.name",
+    status: "q.status",
+    messageId: "m.message_id",
+  };
+  const sort = sortFields[String(input.sort || "messageDate")] || "m.message_date";
+  const direction = input.direction === "asc" ? "ASC" : "DESC";
   const [count, rows] = await getD1().batch([
     getD1()
       .prepare(`SELECT COUNT(*) AS count${from}${where}`)
       .bind(...values),
     getD1()
       .prepare(
-        `SELECT q.*,m.message_id,m.message_date,m.body,m.event_kind,m.remote_edited_at,m.remote_deleted_at,m.body_deleted_at,s.id AS source_id,s.name AS source_name${from}${where} ORDER BY m.message_date DESC,m.id DESC LIMIT ? OFFSET ?`,
+        `SELECT q.*,m.message_id,m.message_date,m.body,m.event_kind,m.remote_edited_at,m.remote_deleted_at,m.body_deleted_at,s.id AS source_id,s.name AS source_name${from}${where} ORDER BY ${sort} ${direction},m.id ${direction} LIMIT ? OFFSET ?`,
       )
       .bind(...values, pageSize, (page - 1) * pageSize),
   ]);
@@ -828,8 +965,29 @@ export async function resolveTelegramQueueSelection(input: {
   end?: string;
   sourceIds?: string[];
 }) {
-  if (input.mode !== "all")
-    return [...new Set((input.queueIds ?? []).map(String).filter(Boolean))];
+  if (input.mode !== "all") {
+    const requested = [
+      ...new Set((input.queueIds ?? []).map(String).filter(Boolean)),
+    ];
+    const tool = cleanTool(input.tool);
+    const allowed = new Set<string>();
+    for (let offset = 0; offset < requested.length; offset += 80) {
+      const chunk = requested.slice(offset, offset + 80);
+      const rows = await getD1()
+        .prepare(
+          `SELECT q.id FROM telegram_tool_queue q
+           JOIN telegram_messages m ON m.id=q.telegram_message_id
+           JOIN tool_source_bindings b ON b.source_id=m.source_id AND b.tool=q.tool
+           WHERE q.tool=? AND q.id IN (${chunk.map(() => "?").join(",")})`,
+        )
+        .bind(tool, ...chunk)
+        .all();
+      for (const row of rows.results ?? []) allowed.add(String(row.id));
+    }
+    if (allowed.size !== requested.length)
+      throw new Error("所选 Telegram 消息不属于当前工具或绑定已变化，请刷新后重试");
+    return requested;
+  }
   const query = queueFilter(input);
   const excluded = new Set((input.excludeIds ?? []).map(String));
   const ids: string[] = [];
@@ -878,9 +1036,15 @@ export async function processTelegramQueue(input: {
       .all();
     rows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
   }
+  if (rows.length !== ids.length)
+    throw new Error("所选 Telegram 消息不属于当前工具或绑定已变化，请刷新后重试");
   if (rows.some((row) => String(row.status) === "deleted" || String(row.remote_deleted_at || ""))) {
     throw new Error("所选范围包含 Telegram 远端已删除消息；请取消选择后再处理。");
   }
+  const snapshotId = await createTelegramQueueSnapshot(
+    rows.map((row) => String(row.id)),
+    `处理 ${tool} Telegram 队列前自动恢复点`,
+  );
   const allResults = [];
   const counts = new Map<string, number>();
   for (const row of rows) {
@@ -947,7 +1111,7 @@ export async function processTelegramQueue(input: {
     resultCount: allResults.length,
     runId,
   });
-  return { selected: rows.length, resultCount: allResults.length, runId };
+  return { selected: rows.length, resultCount: allResults.length, runId, snapshotId };
 }
 
 export async function updateTelegramQueue(
@@ -959,6 +1123,12 @@ export async function updateTelegramQueue(
   const unique = [...new Set(ids.map(String).filter(Boolean))];
   if (unique.length > 10_000)
     throw new Error("单次 Telegram 状态修改最多 10,000 条，请缩小筛选范围。 ");
+  const snapshotId = unique.length
+    ? await createTelegramQueueSnapshot(
+        unique,
+        `${status === "ignored" ? "忽略" : "恢复"} Telegram 队列前自动恢复点`,
+      )
+    : "";
   let changed = 0;
   for (let offset = 0; offset < unique.length; offset += 80) {
     const chunk = unique.slice(offset, offset + 80);
@@ -970,7 +1140,7 @@ export async function updateTelegramQueue(
       .run();
     changed += Number(result.meta?.changes ?? 0);
   }
-  return { changed };
+  return { changed, snapshotId };
 }
 
 export async function exportTelegramQueue(

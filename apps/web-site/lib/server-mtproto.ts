@@ -261,7 +261,7 @@ async function connectedClient(sessionText: string, attempt: typeof TRANSPORT_AT
     networkSocket: attempt.socket as typeof PromisedWebSockets,
     keepAliveInterval: 0,
     baseLogger: logger,
-    deviceModel: "MissAV Manager Web",
+    deviceModel: "TG 内容工具箱 Web",
     systemVersion: "Cloudflare Worker",
     appVersion: "0.1.0",
     langCode: "zh",

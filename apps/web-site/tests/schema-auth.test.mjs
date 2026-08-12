@@ -12,11 +12,14 @@ test("生产 API 拒绝缺少 ChatGPT 身份头，开发主机仍可本地验收
 });
 
 test("数据库迁移覆盖完整业务语义、唯一约束与分块校验表",async()=>{
-  const sql=(await Promise.all(["drizzle/0001_ambitious_bloodscream.sql","drizzle/0002_small_garia.sql","drizzle/0003_glossy_bloodaxe.sql","drizzle/0004_classy_pixie.sql"].map((file)=>readFile(projectFile(file),"utf8")))).join("\n");
+  const sql=(await Promise.all(["drizzle/0001_ambitious_bloodscream.sql","drizzle/0002_small_garia.sql","drizzle/0003_glossy_bloodaxe.sql"].map((file)=>readFile(projectFile(file),"utf8")))).join("\n");
+  const compatibilityMigration=await readFile(projectFile("drizzle/0004_classy_pixie.sql"),"utf8");
+  const store=await readFile(projectFile("lib/server-store.ts"),"utf8");
   for(const table of ["input_sources","tool_source_bindings","telegram_messages","telegram_tool_queue","telegram_message_fingerprints","telegram_accounts","telegram_auth_flows","telegram_connections","telegram_bot_state","telegram_read_states","telegram_sync_runs","telegram_migration_runs","sync_transactions","task_inbox","script_generations","app_logs","data_snapshots","data_snapshot_items","import_batch_chunks"])assert.ok(sql.includes("CREATE TABLE `"+table+"`"),`missing ${table}`);
   assert.match(sql,/import_batch_chunks_batch_index_uq/);assert.match(sql,/telegram_tool_queue_message_tool_uq/);assert.match(sql,/ON DELETE cascade/);
-  assert.match(sql,/encrypted_session/);assert.match(sql,/encrypted_challenge/);assert.match(sql,/telegram_auth_flows_expires_idx/);
-  for(const column of ["sync_cursor_message_id","sync_target_message_id","content_hash","remote_edited_at","remote_deleted_at","webhook_status","edited_count","deleted_count","has_more"])assert.match(sql,new RegExp(column));
+  assert.match(sql,/encrypted_session/);assert.match(sql,/telegram_auth_flows_expires_idx/);
+  assert.match(compatibilityMigration,/valid no-op/);assert.match(compatibilityMigration,/SELECT 1/);
+  for(const column of ["sync_cursor_message_id","sync_target_message_id","encrypted_challenge","content_hash","remote_edited_at","remote_deleted_at","webhook_status","edited_count","deleted_count","has_more"])assert.match(store,new RegExp(column));
 });
 
 test("Secret 变量只在服务端读取，客户端与默认配置不含 Token 值",async()=>{
@@ -36,10 +39,11 @@ test("Telegram 配置读取期间不再伪装成未配置状态",async()=>{
   assert.match(settings,/正在检测/);
   assert.match(settings,/读取失败/);
   assert.match(settings,/cache:\s*"no-store"/);
-  assert.match(settings,/STATUS_TIMEOUT_MS\s*=\s*8_000/);
+  assert.match(settings,/STATUS_TIMEOUT_MS\s*=\s*20_000/);
   assert.match(settings,/new AbortController\(\)/);
-  assert.match(settings,/Promise\.all\(\[loadHub\(\), loadMtproto\(\)\]\)/);
-  assert.doesNotMatch(settings,/Promise\.allSettled\(\[/);
+  assert.doesNotMatch(settings,/Promise\.all\(\[loadHub\(\), loadMtproto\(\)\]\)/);
+  assert.match(settings,/setMtproto\(nextHub\.mtproto \|\| EMPTY_MTPROTO\)/);
+  assert.match(telegramRoute,/mtproto:\s*await mtprotoStatus\(\)/);
   assert.match(telegramRoute,/cache-control[^\n]+no-store/i);
   assert.match(mtprotoRoute,/cache-control[^\n]+no-store/i);
 });
@@ -47,8 +51,12 @@ test("Telegram 配置读取期间不再伪装成未配置状态",async()=>{
 test("Worker 冷启动优先执行只读 schema 探针，不重复争抢 D1 写锁",async()=>{
   const store=await readFile(projectFile("lib/server-store.ts"),"utf8");
   const probeIndex=store.indexOf("await probeCurrentSchema(db)");
+  const compatibilityIndex=store.indexOf("await applyTelegramHubSchemaCompatibility(db)");
   const ddlIndex=store.indexOf("const statements = [");
   assert.ok(probeIndex>0&&ddlIndex>probeIndex,"read-only schema probe must precede legacy DDL fallback");
+  assert.ok(compatibilityIndex>probeIndex&&ddlIndex>compatibilityIndex,"targeted Telegram schema repair must precede legacy DDL fallback");
+  assert.match(store,/probeBaseSchema/);
+  assert.match(store,/TELEGRAM_HUB_COMPATIBILITY_COLUMNS/);
   assert.match(store,/SELECT connection_id FROM telegram_connections LIMIT 1/);
   assert.match(store,/Hosted migrations own the normal schema lifecycle/);
 });

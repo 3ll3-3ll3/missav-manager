@@ -118,7 +118,7 @@ export default function LibraryPanel() {
     a.href = url;
     a.download = name;
     a.click();
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
   }
   return (
     <div className="stack-lg">
