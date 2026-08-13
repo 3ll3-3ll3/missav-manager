@@ -164,7 +164,7 @@ export default function LibraryPanel() {
           note="完整库保留；脚本生成时才应用第一层名单。"
         />
         <Editor
-          title="参考库黑名单"
+          title="第一层黑名单"
           badge="第一层"
           value={values.referenceBlacklist}
           onChange={(value) =>
@@ -173,7 +173,7 @@ export default function LibraryPanel() {
           note="只取消参考命中资格，不物理删除参考 Tag。"
         />
         <Editor
-          title="导出黑名单"
+          title="第二层黑名单"
           badge="第二层"
           value={values.exportBlacklist}
           onChange={(value) =>
@@ -231,6 +231,26 @@ function Editor({
   onChange: (value: string) => void;
   note: string;
 }) {
+  async function importList(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!/\.(txt|csv|log)$/i.test(file.name)) {
+      window.alert("列表只接受 TXT、CSV 或 LOG 文件");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      window.alert("列表文件超过 5 MB，请先拆分");
+      return;
+    }
+    try {
+      const rows = parseList(await file.text());
+      if (!rows.length) throw new Error("文件中没有可用列表项");
+      onChange(rows.join("\n"));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "列表读取失败");
+    }
+  }
   return (
     <article className="card library-card">
       <div className="section-heading">
@@ -243,6 +263,10 @@ function Editor({
         </strong>
       </div>
       <p>{note}</p>
+      <label className="file-button compact-file-button">
+        <input type="file" accept=".txt,.csv,.log" onChange={importList} />
+        导入并预览替换
+      </label>
       <textarea
         value={value}
         onChange={(event) => onChange(event.target.value)}

@@ -1,7 +1,38 @@
 import { apiError, bodyJson, requireAuthenticated } from "../../../lib/api-response";
 import { applyTelegramMigration, bindTelegramSource, checkTelegramBotConnection, createTelegramSnapshot, deleteTelegramBotConnection, exportTelegramQueue, importTelegramMessages, listTelegramQueue, processTelegramQueue, pullTelegramBot, resolveBoundToolSyncSources, resolveTelegramQueueSelection, saveTelegramBindings, telegramMigrationPreview, telegramStatus, updateTelegramQueue, updateTelegramSource } from "../../../lib/server-telegram";
 import { discoverPersonalSources, logoutMtproto, markTelegramSourceRead, mtprotoStatus, syncPersonalSources } from "../../../lib/server-mtproto";
+import { redact } from "../../../lib/security";
 import type { TelegramImportMessage } from "../../../lib/telegram";
+
+function processTelegramStream(tool: string, queueIds: string[], deleteBody: boolean) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (payload: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+      };
+      void processTelegramQueue({
+        tool,
+        queueIds,
+        deleteBody,
+        onProgress: (progress) => send({ type: "progress", progress }),
+      }).then((result) => {
+        send({ type: "complete", result });
+        controller.close();
+      }).catch((error) => {
+        send({ type: "error", error: redact(error instanceof Error ? error.message : String(error || "Telegram 消息处理失败")) });
+        controller.close();
+      });
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
 
 export async function GET(request: Request) {
   try {
@@ -12,6 +43,8 @@ export async function GET(request: Request) {
       status: params.get("status") || "", search: params.get("search") || "", start: params.get("start") || "", end: params.get("end") || "",
       sort: params.get("sort") || "messageDate", direction: params.get("direction") === "asc" ? "asc" : "desc",
       sourceIds: (params.get("sourceIds") || "").split(",").map(String).filter(Boolean),
+      includeCleaned: params.get("includeCleaned") === "1",
+      includeNoise: params.get("includeNoise") === "1",
     }), { headers: { "cache-control": "private, no-store" } });
     if (params.get("view") === "tool") {
       const status = await telegramStatus();
@@ -64,6 +97,7 @@ export async function POST(request: Request) {
     if (input.action === "mark-read") return Response.json(await markTelegramSourceRead(input.sourceId, input.maxId));
     if (input.action === "migration-preview") return Response.json(await telegramMigrationPreview());
     if (input.action === "migration-apply") return Response.json(await applyTelegramMigration({ migrationId: String(input.migrationId || ""), confirm: input.confirm === true }));
+    if (input.action === "process-stream") {const queueIds=await resolveTelegramQueueSelection(input as Parameters<typeof resolveTelegramQueueSelection>[0]);return processTelegramStream(String(input.tool || ""),queueIds,input.deleteBody !== false);}
     if (input.action === "process") {const queueIds=await resolveTelegramQueueSelection(input as Parameters<typeof resolveTelegramQueueSelection>[0]);return Response.json(await processTelegramQueue({ tool: String(input.tool || ""), queueIds, deleteBody: input.deleteBody !== false }));}
     if (input.action === "queue-status") {const queueIds=await resolveTelegramQueueSelection(input as Parameters<typeof resolveTelegramQueueSelection>[0]);return Response.json(await updateTelegramQueue(queueIds, input.status === "ignored" ? "ignored" : "pending"));}
     if(input.action==="export"){const queueIds=await resolveTelegramQueueSelection(input as Parameters<typeof resolveTelegramQueueSelection>[0]);const format=input.format==="csv"?"csv":"txt";return Response.json({content:await exportTelegramQueue(queueIds,format),count:queueIds.length});}

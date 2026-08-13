@@ -6,6 +6,7 @@ export type InputMessage = {
 };
 
 const TWITTER_RESERVED = new Set(["about","compose","explore","hashtag","home","i","intent","login","messages","notifications","search","settings","share","signup"]);
+const TWITTER_TOPIC_TAGS = new Set(["adult", "cosplay", "hentai", "nude", "nsfw", "porn", "porno", "sex", "sexy", "xxx"]);
 const HAIJIAO_CATEGORIES = ["hjjd","hjmz","hjyc","hjfn","hjsz","hjrq","hjhj"];
 const NOISE_PREFIXES = new Set([
   "MESSAGE","MESSAGES","USERPIC","MEDIA","VIDEO","PHOTO","AVATAR","PAGINATION","DETAILS","STATUS","TITLE","BODY","CLASS","STYLE",
@@ -109,6 +110,7 @@ export function parseTelegramDate(value: unknown) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
   if (typeof value === "number" && Number.isFinite(value)) { const date = new Date(value > 1e12 ? value : value * 1000); return Number.isNaN(date.getTime()) ? null : date; }
   const text = String(value || "").trim(); if (!text) return null;
+  if (/^\d{9,16}$/.test(text)) { const numeric = Number(text); const date = new Date(numeric > 1e12 ? numeric : numeric * 1000); return Number.isNaN(date.getTime()) ? null : date; }
   const telegram = text.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s+UTC([+-])(\d{2}):?(\d{2})$/i);
   if (telegram) {
     const [,day,month,year,hour,minute,second="0",sign,offsetHour,offsetMinute] = telegram;
@@ -134,8 +136,18 @@ function collectJsonMessages(value: unknown, source: string, output: InputMessag
     for (const message of object.messages as Array<Record<string, unknown>>) {
       if (!message || typeof message !== "object") continue;
       const flatten = (item: unknown): string => Array.isArray(item) ? item.map(flatten).join("") : typeof item === "object" && item ? flatten((item as Record<string,unknown>).text ?? (item as Record<string,unknown>).caption ?? "") : String(item ?? "");
+      const collectRichLinks = (item: unknown): string[] => {
+        if (Array.isArray(item)) return item.flatMap(collectRichLinks);
+        if (!item || typeof item !== "object") return [];
+        const rich = item as Record<string, unknown>;
+        return [rich.href, rich.url, rich.displayUrl, rich.display_url]
+          .map(String)
+          .filter((url) => /^https?:\/\//i.test(url))
+          .concat(Object.values(rich).flatMap((child) => child === item ? [] : collectRichLinks(child)));
+      };
       const text = flatten(message.text ?? message.caption ?? "");
-      const links = [...text.matchAll(/https?:\/\/[^\s<>"']+/gi)].map((match) => match[0]);
+      const richLinks = collectRichLinks(message);
+      const links = [...new Set([...text.matchAll(/https?:\/\/[^\s<>"']+/gi)].map((match) => match[0]).concat(richLinks))];
       output.push({ text, links, messageDate: String(message.date ?? message.date_unixtime ?? ""), sourceType: "export_json", source });
     }
   }
@@ -163,6 +175,10 @@ export function parseDocument(document: InputDocument): InputMessage[] {
 
 function messageText(message: InputMessage) { return [message.text,...message.links].filter(Boolean).join("\n"); }
 function validHandle(value: string) { const handle = value.trim().replace(/^[@#]/,""); return /^[A-Za-z0-9_]{1,15}$/.test(handle) && !TWITTER_RESERVED.has(handle.toLowerCase()) ? handle : ""; }
+function isTwitterTopicTag(value: string) {
+  const tag = value.toLowerCase();
+  return TWITTER_TOPIC_TAGS.has(tag) || /^(?:adult|nsfw|porn|porno|sex|xxx)\d+$/i.test(tag);
+}
 function sourceFor(value: string, messages: InputMessage[]) { const needle = value.toLowerCase(); return messages.find((message)=>messageText(message).toLowerCase().includes(needle))?.source || ""; }
 
 function twitterResults(messages: InputMessage[]) {
@@ -173,7 +189,7 @@ function twitterResults(messages: InputMessage[]) {
     const candidates: Array<{ index: number; value: string }> = [];
     for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])#([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) {
       const handle = validHandle(match[1]); const index = Number(match.index || 0) + match[0].lastIndexOf("#"); const prefix = text.slice(Math.max(0,index-24),index);
-      if (handle.length >= 4 && !/传送门[\s：:→-]*$/u.test(prefix)) candidates.push({ index, value: handle });
+      if (handle.length >= 4 && !isTwitterTopicTag(handle) && !/传送门[\s：:→-]*$/u.test(prefix)) candidates.push({ index, value: handle });
     }
     for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])@([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) if (!/_bot$/i.test(match[1])) candidates.push({ index: Number(match.index || 0) + match[0].lastIndexOf("@"), value: match[1] });
     for (const match of text.matchAll(/https?:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})(?=$|[/?#\s"'<>])/gi)) candidates.push({ index: Number(match.index || 0), value: match[1] });
@@ -210,13 +226,13 @@ function trustedSiteUrl(value: string, tool: ToolId) {
 export function processDocuments(tool: ToolId, documents: InputDocument[], start = "", end = "") {
   const allMessages = documents.flatMap(parseDocument); const messages = filterByTime(allMessages,start,end);
   let results: ToolResult[] = [];
-  if (tool === "twitter") results = twitterResults(messages).map((item)=>({resultKey:item.name.toLowerCase(),primaryValue:item.name,secondaryValue:item.url,source:sourceFor(item.name,messages),metadata:{profileUrl:item.url}}));
-  else if (tool === "badnews" || tool === "haijiao") results = linkResults(messages,tool).map((url)=>({resultKey:url,primaryValue:url,source:sourceFor(url,messages),metadata:{url}}));
+  if (tool === "twitter") results = twitterResults(messages).map((item)=>({resultKey:item.name.toLowerCase(),primaryValue:item.name,secondaryValue:item.url,status:"success",tags:[],source:sourceFor(item.name,messages),metadata:{profileUrl:item.url}}));
+  else if (tool === "badnews" || tool === "haijiao") results = linkResults(messages,tool).map((url)=>({resultKey:url,primaryValue:url,secondaryValue:"",status:"success",tags:[],source:sourceFor(url,messages),metadata:{url}}));
   else {
     const combined = messages.map(messageText).join("\n"); const codes = parseCodeList(combined); const sources = [...combined.matchAll(/https?:\/\/[^\s"'<>)]*/gi)].map((m)=>trustedSiteUrl(m[0], tool)).filter(Boolean);
     results = codes.map((code)=>{
       const sourceUrl = sources.find((url)=>codesFromTrustedUrl(url).some((candidate)=>codeKey(candidate)===codeKey(code))) || "";
-      return { resultKey:code.toLowerCase(),primaryValue:code,secondaryValue:sourceUrl,status:tool === "av123" ? "task_ready" : "pending",source:sourceUrl || documents.map((item)=>item.name).join(", "),metadata:{querySite:tool === "av123" ? "123AV local task" : "MissAV"} };
+      return { resultKey:code.toLowerCase(),primaryValue:code,secondaryValue:sourceUrl,status:tool === "av123" ? "task_ready" : "pending",tags:[],source:sourceUrl || documents.map((item)=>item.name).join(", "),metadata:{querySite:tool === "av123" ? "123AV local task" : "MissAV"} };
     });
   }
   return { messages, results };

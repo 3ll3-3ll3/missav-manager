@@ -491,7 +491,7 @@ export async function dashboardSummary() {
   const db = getD1();
   const [records, runs, migrations] = await db.batch([
     db.prepare("SELECT COUNT(*) AS count FROM permanent_records"),
-    db.prepare("SELECT COUNT(*) AS count FROM content_runs"),
+    db.prepare("SELECT COUNT(*) AS count FROM content_runs WHERE input_kind NOT LIKE '__building__:%'"),
     db.prepare(
       "SELECT COUNT(*) AS count FROM import_batches WHERE status='applied'",
     ),
@@ -539,28 +539,6 @@ export async function saveRun(input: {
       primaryValue: primary,
     });
   }
-  await db
-    .prepare(
-      `INSERT INTO content_runs
-    (id,tool,name,input_kind,start_at,end_at,source_summary,total_count,result_count,error_count,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    )
-    .bind(
-      runId,
-      tool,
-      name,
-      String(input.inputKind ?? "manual").slice(0, 60),
-      String(input.startAt ?? "").slice(0, 40),
-      String(input.endAt ?? "").slice(0, 40),
-      String(input.sourceSummary ?? "").slice(0, 2000),
-      results.length,
-      unique.size,
-      0,
-      timestamp,
-      timestamp,
-    )
-    .run();
-
   const values = [...unique.values()];
   const overwrittenIds: string[] = [];
   for (let offset = 0; offset < values.length; offset += 80) {
@@ -584,126 +562,70 @@ export async function saveRun(input: {
         `保存 ${name} 前自动恢复点`,
       )
     : "";
-  for (let offset = 0; offset < values.length; offset += 40) {
-    const chunk = values.slice(offset, offset + 40);
-    const statements = [];
-    for (const item of chunk) {
-      const id = crypto.randomUUID();
-      const status = String(
-        item.status ?? (tool === "missav" ? "pending" : "success"),
-      ).slice(0, 64);
-      const secondary = String(item.secondaryValue ?? "").slice(0, 4000);
-      const tags = json(
-        Array.isArray(item.tags) ? item.tags.slice(0, 200) : [],
-        [],
-      );
-      const actressTags = json(
-        Array.isArray(item.actressTags) ? item.actressTags.slice(0, 200) : [],
-        [],
-      );
-      const genreTags = json(
-        Array.isArray(item.genreTags) ? item.genreTags.slice(0, 200) : [],
-        [],
-      );
-      const source = String(item.source ?? "").slice(0, 1000);
-      const permanentSource = safeHttpUrl(
-        [source, secondary, item.primaryValue].find((value) => /^https?:\/\//i.test(String(value ?? ""))) || "",
-      );
-      const missavUrl = tool === "missav" && /\/\/(?:[^/]+\.)?missav\.(?:ai|ws)\//i.test(permanentSource) ? permanentSource : "";
-      const av123Url = tool === "av123" && /\/\/(?:[^/]+\.)?123av\.com\//i.test(permanentSource) ? permanentSource : "";
-      const metadata = json(item.metadata, {});
-      statements.push(
-        db
-          .prepare(
-            `INSERT INTO content_results
-        (id,run_id,tool,result_key,primary_value,secondary_value,status,tags_json,source,metadata_json,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-          )
-          .bind(
-            id,
-            runId,
-            tool,
-            item.resultKey,
-            item.primaryValue,
-            secondary,
-            status,
-            tags,
-            source,
-            metadata,
-            timestamp,
-            timestamp,
-          ),
-      );
-      statements.push(
-        db
-          .prepare(
-            `INSERT INTO permanent_records
+  const inputKind = String(input.inputKind ?? "manual").slice(0, 45);
+  const buildingKind = `__building__:${inputKind}`;
+  await db.prepare(`INSERT INTO content_runs
+    (id,tool,name,input_kind,start_at,end_at,source_summary,total_count,result_count,error_count,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(runId, tool, name, buildingKind, String(input.startAt ?? "").slice(0, 40), String(input.endAt ?? "").slice(0, 40), String(input.sourceSummary ?? "").slice(0, 2000), results.length, unique.size, 0, timestamp, timestamp)
+    .run();
+  try {
+    // Large runs are staged in bounded batches. They stay invisible and cannot
+    // modify permanent records until the final D1 transaction commits.
+    for (let offset = 0; offset < values.length; offset += 40) {
+      const chunk = values.slice(offset, offset + 40);
+      await db.batch(chunk.map((item, chunkIndex) => {
+        // The result id carries a stable zero-padded sequence because the
+        // existing schema has no ordinal column. All history readers order by
+        // created_at,id, so this preserves Windows first-seen output order.
+        const id = `${runId}:${String(offset + chunkIndex).padStart(6, "0")}`;
+        const status = String(item.status ?? (tool === "missav" ? "pending" : "success")).slice(0, 64);
+        const secondary = String(item.secondaryValue ?? "").slice(0, 4000);
+        const tags = Array.isArray(item.tags) ? item.tags.slice(0, 200) : [];
+        const actressTags = Array.isArray(item.actressTags) ? item.actressTags.slice(0, 200) : [];
+        const genreTags = Array.isArray(item.genreTags) ? item.genreTags.slice(0, 200) : [];
+        const source = String(item.source ?? "").slice(0, 1000);
+        const permanentSource = safeHttpUrl([source, secondary, item.primaryValue].find((value) => /^https?:\/\//i.test(String(value ?? ""))) || "");
+        const missavUrl = tool === "missav" && /\/\/(?:[^/]+\.)?missav\.(?:ai|ws)\//i.test(permanentSource) ? permanentSource : "";
+        const av123Url = tool === "av123" && /\/\/(?:[^/]+\.)?123av\.com\//i.test(permanentSource) ? permanentSource : "";
+        const baseMetadata = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata : {};
+        const metadata = json({ ...baseMetadata, __runStage: { actressTags, genreTags, permanentSource, missavUrl, av123Url } }, {});
+        return db.prepare(`INSERT INTO content_results
+          (id,run_id,tool,result_key,primary_value,secondary_value,status,tags_json,source,metadata_json,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .bind(id, runId, tool, item.resultKey, item.primaryValue, secondary, status, json(tags, []), source, metadata, timestamp, timestamp);
+      }));
+    }
+    await db.batch([
+      db.prepare(`INSERT INTO permanent_records
         (id,tool,record_key,primary_value,secondary_value,status,tags_json,actress_tags_json,genre_tags_json,source_url,missav_url,av123_url,metadata_json,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        SELECT id,tool,result_key,primary_value,secondary_value,status,tags_json,
+          COALESCE(json_extract(metadata_json,'$.__runStage.actressTags'),'[]'),
+          COALESCE(json_extract(metadata_json,'$.__runStage.genreTags'),'[]'),
+          COALESCE(json_extract(metadata_json,'$.__runStage.permanentSource'),''),
+          COALESCE(json_extract(metadata_json,'$.__runStage.missavUrl'),''),
+          COALESCE(json_extract(metadata_json,'$.__runStage.av123Url'),''),
+          json_remove(metadata_json,'$.__runStage'),created_at,updated_at
+        FROM content_results WHERE run_id=?
         ON CONFLICT(tool,record_key) DO UPDATE SET
           primary_value=excluded.primary_value,
           secondary_value=CASE WHEN excluded.secondary_value<>'' THEN excluded.secondary_value ELSE permanent_records.secondary_value END,
-          status=excluded.status,
-          tags_json=excluded.tags_json,
-          actress_tags_json=excluded.actress_tags_json,
-          genre_tags_json=excluded.genre_tags_json,
+          status=excluded.status,tags_json=excluded.tags_json,actress_tags_json=excluded.actress_tags_json,genre_tags_json=excluded.genre_tags_json,
           source_url=CASE WHEN excluded.source_url<>'' THEN excluded.source_url ELSE permanent_records.source_url END,
           missav_url=CASE WHEN excluded.missav_url<>'' THEN excluded.missav_url ELSE permanent_records.missav_url END,
           av123_url=CASE WHEN excluded.av123_url<>'' THEN excluded.av123_url ELSE permanent_records.av123_url END,
-          metadata_json=excluded.metadata_json,
-          updated_at=excluded.updated_at`,
-          )
-          .bind(
-            id,
-            tool,
-            item.resultKey,
-            item.primaryValue,
-            secondary,
-            status,
-            tags,
-            actressTags,
-            genreTags,
-            permanentSource,
-            missavUrl,
-            av123Url,
-            metadata,
-            timestamp,
-            timestamp,
-          ),
-      );
-    }
-    await db.batch(statements);
+          metadata_json=excluded.metadata_json,updated_at=excluded.updated_at`).bind(runId),
+      db.prepare("UPDATE content_results SET metadata_json=json_remove(metadata_json,'$.__runStage') WHERE run_id=?").bind(runId),
+      db.prepare(`INSERT INTO task_inbox(id,tool,stage,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), tool, tool === "av123" || tool === "missav" ? "pending" : "completed", name, runId, "", "", json({ total: unique.size, success: tool === "av123" || tool === "missav" ? 0 : unique.size, empty: 0, error: 0, actualSpeed: 0, etaSeconds: 0, lastActivityAt: timestamp, overwriteSnapshotId }, {}), timestamp, timestamp),
+      db.prepare("UPDATE content_runs SET input_kind=?,updated_at=? WHERE id=? AND input_kind=?").bind(inputKind, timestamp, runId, buildingKind),
+    ]);
+  } catch (error) {
+    // A failed stage is never listed as history. Best-effort cleanup removes
+    // the run and its cascading staged rows without touching permanent data.
+    try { await db.prepare("DELETE FROM content_runs WHERE id=? AND input_kind LIKE '__building__:%'").bind(runId).run(); } catch { /* hidden orphan remains recoverable */ }
+    throw error;
   }
-  await db
-    .prepare(
-      `INSERT INTO task_inbox(id,tool,stage,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    )
-    .bind(
-      crypto.randomUUID(),
-      tool,
-      tool === "av123" || tool === "missav" ? "pending" : "completed",
-      name,
-      runId,
-      "",
-      "",
-      json(
-        {
-          total: unique.size,
-          success: tool === "av123" || tool === "missav" ? 0 : unique.size,
-          empty: 0,
-          error: 0,
-          actualSpeed: 0,
-          etaSeconds: 0,
-          lastActivityAt: timestamp,
-          overwriteSnapshotId,
-        },
-        {},
-      ),
-      timestamp,
-      timestamp,
-    )
-    .run();
   await writeLog("info", "run", `已保存 ${tool} 处理历史`, {
     runId,
     resultCount: unique.size,
@@ -721,7 +643,7 @@ export async function listRuns(
 ) {
   await ensureSchema();
   const db = getD1();
-  const clauses: string[] = [];
+  const clauses: string[] = ["input_kind NOT LIKE '__building__:%'"];
   const values: unknown[] = [];
   if (tool) {
     cleanTool(tool);
@@ -774,7 +696,7 @@ export async function resolveRunSelection(input: {
     );
   const tool = String(input.filters?.tool || "");
   const search = String(input.filters?.search || "");
-  const clauses: string[] = [];
+  const clauses: string[] = ["input_kind NOT LIKE '__building__:%'"];
   const values: unknown[] = [];
   if (tool) {
     cleanTool(tool);
@@ -811,11 +733,11 @@ export async function exportSelectedRuns(
     const placeholders = chunk.map(() => "?").join(",");
     const [runRows, resultRows] = await getD1().batch([
       getD1()
-        .prepare(`SELECT * FROM content_runs WHERE id IN (${placeholders})`)
+        .prepare(`SELECT * FROM content_runs WHERE input_kind NOT LIKE '__building__:%' AND id IN (${placeholders})`)
         .bind(...chunk),
       getD1()
         .prepare(
-          `SELECT * FROM content_results WHERE run_id IN (${placeholders}) ORDER BY created_at,id`,
+          `SELECT * FROM content_results WHERE run_id IN (SELECT id FROM content_runs WHERE input_kind NOT LIKE '__building__:%' AND id IN (${placeholders})) ORDER BY created_at,id`,
         )
         .bind(...chunk),
     ]);
@@ -879,7 +801,7 @@ export async function getRun(id: string, resultPage = 1, resultPageSize = 100) {
     Math.max(20, Math.trunc(Number(resultPageSize) || 100)),
   );
   const [run, count, results] = await db.batch([
-    db.prepare("SELECT * FROM content_runs WHERE id=?").bind(id),
+    db.prepare("SELECT * FROM content_runs WHERE id=? AND input_kind NOT LIKE '__building__:%'").bind(id),
     db
       .prepare("SELECT COUNT(*) AS count FROM content_results WHERE run_id=?")
       .bind(id),
@@ -902,7 +824,7 @@ export async function getRun(id: string, resultPage = 1, resultPageSize = 100) {
 export async function exportRunResults(id: string) {
   await ensureSchema();
   const [run, rows] = await getD1().batch([
-    getD1().prepare("SELECT * FROM content_runs WHERE id=?").bind(id),
+    getD1().prepare("SELECT * FROM content_runs WHERE id=? AND input_kind NOT LIKE '__building__:%'").bind(id),
     getD1()
       .prepare(
         "SELECT * FROM content_results WHERE run_id=? ORDER BY created_at,id LIMIT 100001",

@@ -9,7 +9,7 @@ test("Telegram 三层架构把连接、会话绑定和本次选择分开", async
   const server = await readFile(projectFile("lib/server-telegram.ts"), "utf8");
   const route = await readFile(projectFile("app/api/telegram/route.ts"), "utf8");
   for (const label of ["连接账号", "会话库", "工具绑定", "同步记录", "一次提交全部变化", "safe_auto", "manual"]) assert.match(settings, new RegExp(label));
-  for (const label of ["本次要处理的来源", "全选已绑定会话", "清空本次选择", "管理绑定"]) assert.match(panel, new RegExp(label));
+  for (const label of ["本次来源", "全选搜索结果", "清空本次选择", "管理绑定"]) assert.match(panel, new RegExp(label));
   assert.match(route, /save-bindings/);
   assert.match(server, /telegram_connections/);
   assert.match(server, /telegram_bot_state/);

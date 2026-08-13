@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { build } from "esbuild";
-import { projectFile } from "./helpers/bundle.mjs";
+import { loadModule, projectFile } from "./helpers/bundle.mjs";
 
 class TestPreparedStatement {
   constructor(database, sql, values = []) {
@@ -90,6 +90,8 @@ async function loadServer(entryPath, env) {
 
 const loadTelegramServer = (env) => loadServer("lib/server-telegram.ts", env);
 const loadAuditServer = (env) => loadServer("lib/server-audit.ts", env);
+const loadStoreServer = (env) => loadServer("lib/server-store.ts", env);
+const telegram = await loadModule("lib/telegram.ts");
 
 async function applySchema(database) {
   const files = [
@@ -140,8 +142,12 @@ test("一个来源只落一份消息，并向两个工具生成独立队列；�
   const twitterQueue = database.prepare("SELECT id FROM telegram_tool_queue WHERE telegram_message_id=? AND tool='twitter'").get(message.id);
   await assert.rejects(
     () => server.resolveTelegramQueueSelection({ tool: "missav", mode: "ids", queueIds: [twitterQueue.id] }),
-    /不属于当前工具或绑定已变化/,
+    /绑定已变化/,
   );
+  await server.ingestTelegramMessages([{ ...base, messageId: "3", text: "Se #sex80000" }]);
+  const twitterVisible = await server.listTelegramQueue({ tool: "twitter", sourceIds: [source.id], status: "pending" });
+  assert.equal(twitterVisible.total, 1);
+  assert.equal(twitterVisible.rows[0].message_id, "2");
 
   database.prepare("UPDATE telegram_tool_queue SET status='processed' WHERE telegram_message_id=? AND tool='twitter'").run(message.id);
   const duplicate = await server.ingestTelegramMessages([{ ...base, messageId: "2", text: "ABF-354 @alice_test" }]);
@@ -183,6 +189,112 @@ test("一个来源只落一份消息，并向两个工具生成独立队列；�
   database.close();
 });
 
+test("Telegram 处理返回实际进度和结果，正文清理后的记录默认从消息工作表隐藏", async () => {
+  const database = new DatabaseSync(":memory:");
+  await applySchema(database);
+  const server = await loadTelegramServer({ DB: new TestD1Database(database) });
+  const base = {
+    sourceKey: "-1002002",
+    sourceName: "Bad.news 合成频道",
+    connectionId: "telegram-personal",
+    chatType: "channel",
+    username: "badnews_fixture",
+    messageDate: "2026-08-12T01:00:00.000Z",
+  };
+
+  await server.ingestTelegramMessages([{ ...base, messageId: "1", text: "建立来源" }]);
+  const source = database.prepare("SELECT id FROM input_sources WHERE external_chat_id=?").get(base.sourceKey);
+  database.prepare("INSERT INTO tool_source_bindings(id,source_id,tool,history_mode,history_limit,history_from,bound_at_message_id,created_at) VALUES (?,?,?,?,?,?,?,?)")
+    .run("binding-badnews", source.id, "badnews", "cached", 0, "", "", base.messageDate);
+  await server.ingestTelegramMessages([
+    { ...base, messageId: "2", text: telegram.telegramMessageText({ caption: "点击查看帖子", caption_entities: [{ type: "text_link", url: "https://bad.news/t/123456?from=telegram" }] }) },
+    { ...base, messageId: "3", text: "Se #sex80000" },
+  ]);
+  const queue = database.prepare("SELECT q.id FROM telegram_tool_queue q JOIN telegram_messages m ON m.id=q.telegram_message_id WHERE q.tool='badnews' AND m.message_id='2'").get();
+  const noiseQueue = database.prepare("SELECT q.id FROM telegram_tool_queue q JOIN telegram_messages m ON m.id=q.telegram_message_id WHERE q.tool='badnews' AND m.message_id='3'").get();
+  const before = await server.listTelegramQueue({ tool: "badnews", sourceIds: [source.id], status: "pending" });
+  assert.equal(before.total, 1);
+  assert.equal(before.rows[0].message_id, "2");
+  assert.deepEqual(await server.resolveTelegramQueueSelection({ tool: "badnews", mode: "all", sourceIds: [source.id], status: "pending" }), [queue.id]);
+  await assert.rejects(
+    () => server.resolveTelegramQueueSelection({ tool: "badnews", mode: "ids", queueIds: [noiseQueue.id] }),
+    /没有当前工具可用结果/,
+  );
+  const progress = [];
+  const result = await server.processTelegramQueue({
+    tool: "badnews",
+    queueIds: [queue.id],
+    deleteBody: true,
+    onProgress: (event) => progress.push(event),
+  });
+
+  assert.equal(result.selected, 1);
+  assert.equal(result.resultCount, 1);
+  assert.equal(result.results[0].primaryValue, "https://bad.news/t/123456");
+  assert.ok(result.runId);
+  assert.ok(progress.some((event) => event.phase === "processing" && event.current === 1 && event.total === 1));
+  assert.equal(progress.at(-1).phase, "completed");
+  assert.equal(database.prepare("SELECT body FROM telegram_messages WHERE message_id='2'").get().body, "");
+
+  await server.updateTelegramQueue([queue.id], "pending");
+  database.prepare("UPDATE telegram_messages SET body_deleted_at='' WHERE message_id='2'").run();
+  const visible = await server.listTelegramQueue({ tool: "badnews", sourceIds: [source.id], status: "pending" });
+  assert.equal(visible.total, 0);
+  const audit = await server.listTelegramQueue({ tool: "badnews", sourceIds: [source.id], status: "pending", includeCleaned: true, includeNoise: true });
+  assert.equal(audit.total, 2);
+
+  delete globalThis.__TELEGRAM_TEST_ENV__;
+  database.close();
+});
+
+test("事务式提取同时提交运行、结果、永久记录和任务；最终提交失败不留下半历史", async () => {
+  const successDatabase = new DatabaseSync(":memory:");
+  await applySchema(successDatabase);
+  const successStore = await loadStoreServer({ DB: new TestD1Database(successDatabase) });
+  const saved = await successStore.saveRun({
+    tool: "badnews",
+    name: "Bad.news 富文本回归",
+    inputKind: "manual",
+    sourceSummary: "测试",
+    results: [
+      { resultKey: "https://bad.news/t/123456", primaryValue: "https://bad.news/t/123456", secondaryValue: "", status: "success", tags: [], source: "telegram" },
+      { resultKey: "https://bad.news/t/123457", primaryValue: "https://bad.news/t/123457", secondaryValue: "", status: "success", tags: [], source: "telegram" },
+    ],
+  });
+  assert.ok(saved.runId);
+  assert.equal(successDatabase.prepare("SELECT input_kind FROM content_runs WHERE id=?").get(saved.runId).input_kind, "manual");
+  assert.equal(successDatabase.prepare("SELECT COUNT(*) AS count FROM content_results WHERE run_id=?").get(saved.runId).count, 2);
+  assert.equal(successDatabase.prepare("SELECT COUNT(*) AS count FROM permanent_records WHERE tool='badnews'").get().count, 2);
+  assert.equal(successDatabase.prepare("SELECT COUNT(*) AS count FROM task_inbox WHERE run_id=?").get(saved.runId).count, 1);
+  assert.equal(successDatabase.prepare("SELECT metadata_json FROM content_results WHERE run_id=?").get(saved.runId).metadata_json.includes("__runStage"), false);
+  const restoredOrder = await successStore.getRun(saved.runId, 1, 100);
+  assert.deepEqual(restoredOrder.results.map((row) => row.primary_value), ["https://bad.news/t/123456", "https://bad.news/t/123457"]);
+  successDatabase.close();
+
+  const failedDatabase = new DatabaseSync(":memory:");
+  await applySchema(failedDatabase);
+  const failedD1 = new TestD1Database(failedDatabase);
+  const originalBatch = failedD1.batch.bind(failedD1);
+  failedD1.batch = async (statements) => {
+    if (statements.some((statement) => /INSERT INTO task_inbox/.test(statement.sql))) throw new Error("synthetic final commit failure");
+    return originalBatch(statements);
+  };
+  const failedStore = await loadStoreServer({ DB: failedD1 });
+  await assert.rejects(() => failedStore.saveRun({
+    tool: "badnews",
+    name: "必须整体回滚",
+    inputKind: "manual",
+    results: [{ resultKey: "https://bad.news/t/999999", primaryValue: "https://bad.news/t/999999", secondaryValue: "", status: "success", tags: [], source: "telegram" }],
+  }), /synthetic final commit failure/);
+  assert.equal(failedDatabase.prepare("SELECT COUNT(*) AS count FROM content_runs").get().count, 0);
+  assert.equal(failedDatabase.prepare("SELECT COUNT(*) AS count FROM content_results").get().count, 0);
+  assert.equal(failedDatabase.prepare("SELECT COUNT(*) AS count FROM permanent_records").get().count, 0);
+  assert.equal(failedDatabase.prepare("SELECT COUNT(*) AS count FROM task_inbox").get().count, 0);
+  failedDatabase.close();
+
+  delete globalThis.__TELEGRAM_TEST_ENV__;
+});
+
 test("旧任务状态可规范写入，并可用高影响操作恢复点还原", async () => {
   const database = new DatabaseSync(":memory:");
   await applySchema(database);
@@ -202,6 +314,14 @@ test("旧任务状态可规范写入，并可用高影响操作恢复点还原",
     timestamp,
     timestamp,
   );
+  const insertTask = database.prepare("INSERT INTO task_inbox(id,tool,stage,title,run_id,record_id,source_id,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)");
+  for (const [id, stage] of [["received", "new"], ["filtered", "filtered"], ["website", "website"], ["review", "needs_review"], ["error", "failed"], ["completed", "done"]]) {
+    insertTask.run(`task-${id}`, "badnews", stage, `阶段 ${id}`, "", "", "", "{}", timestamp, timestamp);
+  }
+  const phases = await audit.listTasks({ page: 1, pageSize: 50 });
+  assert.deepEqual(phases.counts, { received: 1, filtered: 1, website: 2, review: 1, error: 1, completed: 1 });
+  assert.deepEqual((await audit.listTasks({ phase: "filtered", page: 1, pageSize: 20 })).rows.map((row) => row.id), ["task-filtered"]);
+  assert.deepEqual((await audit.listTasks({ phase: "website", page: 1, pageSize: 20 })).rows.map((row) => row.id).sort(), ["task-legacy", "task-website"]);
 
   const changed = await audit.updateTasks(["task-legacy"], "failed");
   assert.equal(changed.changed, 1);

@@ -54,6 +54,7 @@ export default function Workbench({ owner }: { owner: string }) {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [menu, setMenu] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [requestedRun, setRequestedRun] = useState<{ tool: ToolId; runId: string; nonce: number } | null>(null);
 
   useEffect(() => {
     fetch("/api/bootstrap", { cache: "no-store" })
@@ -65,21 +66,47 @@ export default function Workbench({ owner }: { owner: string }) {
       .catch(() => setBootstrap(null));
   }, [refreshKey]);
 
+  useEffect(() => {
+    const applyHash = () => {
+      const value = window.location.hash.replace(/^#\/?/, "");
+      const [kind, id] = value.split("/");
+      if (kind === "tool" && TOOL_DEFINITIONS.some((item) => item.id === id)) { setActiveTool(id as ToolId); setView("tool"); }
+      else if (NAV.some((item) => item.id === value)) setView(value as Exclude<ViewId, "tool">);
+    };
+    applyHash(); window.addEventListener("hashchange", applyHash); return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
+
   function go(id: ViewId) {
     if (id === "telegram") setTelegramTool(undefined);
     setView(id);
     setMenu(false);
+    window.history.replaceState(null, "", id === "home" ? "#home" : `#${id}`);
   }
 
   function openTool(tool: ToolId) {
     setActiveTool(tool);
     setView("tool");
     setMenu(false);
+    window.history.replaceState(null, "", `#tool/${tool}`);
   }
 
   function openToolBinding(tool: ToolId) {
     setTelegramTool(tool);
     setView("telegram");
+    window.history.replaceState(null, "", "#telegram");
+  }
+
+  function openTask(tool: ToolId, runId: string) {
+    if (!runId) return;
+    setRequestedRun({ tool, runId, nonce: Date.now() });
+    openTool(tool);
+  }
+
+  function openRuleLibrary() {
+    setDataTab("library");
+    setView("data");
+    setMenu(false);
+    window.history.replaceState(null, "", "#data");
   }
 
   const title = view === "tool"
@@ -100,8 +127,8 @@ export default function Workbench({ owner }: { owner: string }) {
         <header className="topbar"><button className="menu-button" onClick={() => setMenu(true)}>☰</button><div><span className="eyebrow">TG 内容工具箱</span><h1>{title}</h1></div><div className="top-actions"><span className="db-badge"><span className="status-dot" />Sites D1</span><button className="icon-button" title="刷新" aria-label="刷新页面数据" onClick={() => setRefreshKey((key) => key + 1)}>↻</button></div></header>
         <div className="page-content">
           {view === "home" && <ToolHome data={bootstrap} openTool={openTool} openData={() => go("data")} />}
-          {view === "tool" && <ToolPanel key={activeTool} tool={activeTool} onSaved={() => setRefreshKey((key) => key + 1)} onOpenTelegramSettings={openToolBinding} onBack={() => go("home")} />}
-          {view === "processing" && <TaskCenter />}
+          {TOOL_DEFINITIONS.map((definition) => <div key={definition.id} className={view === "tool" && activeTool === definition.id ? "tool-route active" : "tool-route"} hidden={view !== "tool" || activeTool !== definition.id}><ToolPanel tool={definition.id} requestedRun={requestedRun?.tool === definition.id ? requestedRun : null} onSaved={() => setRefreshKey((key) => key + 1)} onOpenTelegramSettings={openToolBinding} onOpenRuleLibrary={openRuleLibrary} onBack={() => go("home")} /></div>)}
+          {view === "processing" && <TaskCenter onOpenTask={openTask} />}
           {view === "data" && <><SecondaryNav items={DATA_TABS} value={dataTab} setValue={(value) => setDataTab(value as DataTab)} />{dataTab === "records" && <DataCenter refreshKey={refreshKey} />}{dataTab === "history" && <HistoryPanel refreshKey={refreshKey} />}{dataTab === "library" && <LibraryPanel />}{dataTab === "migration" && <MigrationPanel onChanged={() => setRefreshKey((key) => key + 1)} />}{dataTab === "snapshots" && <SnapshotsPanel />}</>}
           {view === "telegram" && <TelegramSettingsPanel key={telegramTool || "global"} initialTool={telegramTool} />}
           {view === "logs" && <LogsPanel />}
@@ -117,7 +144,7 @@ function SecondaryNav({ items, value, setValue }: { items: Array<{ id: string; l
 }
 
 function ToolHome({ data, openTool, openData }: { data: Bootstrap | null; openTool: (tool: ToolId) => void; openData: () => void }) {
-  return <div className="stack-lg"><section className="hero tool-home-hero"><div><span className="pill">Windows v0.5.13 体验基线</span><h2>TG 内容工具箱</h2><p>五个工具各自进入独立的“输入 → Telegram 消息 → 结果 → 执行/导出 → 历史”流程。默认采用护眼淡绿、无背景图界面。</p><div className="button-row"><button className="primary" onClick={() => openTool("twitter")}>打开第一个工具</button><button onClick={openData}>查看永久数据</button></div></div><div className="hero-gauge"><span>云端能力</span><strong>5 × 5</strong><small>5 个独立工具 · 5 个固定阶段</small></div></section><section className="tool-home-grid">{TOOL_DEFINITIONS.map((tool, index) => <button key={tool.id} className={`tool-home-card tool-${tool.id}`} onClick={() => openTool(tool.id)}><span className="tool-card-index">0{index + 1}</span><span className="tool-card-mark">{tool.mark}</span><div><strong>{tool.title}</strong><p>{tool.note}</p><small>1 输入 · 2 Telegram · 3 结果 · 4 执行/导出 · 5 历史</small></div><span className="tool-card-arrow">→</span></button>)}</section><section className="metric-grid"><Metric label="永久记录" value={data?.summary.records} note="D1 服务端分页" /><Metric label="处理历史" value={data?.summary.runs} note="五工具独立检索" /><Metric label="迁移批次" value={data?.summary.migrations} note="预览与恢复点" /><Metric label="Telegram 来源" value={100} note="按最多 100 来源设计" /></section><section className="callout"><strong>数据边界保持独立</strong><p>云端 D1 与 Windows SQLite 不做实时双向同步；两端只对齐业务字段和 TXT/CSV/JSON 导出格式。</p></section></div>;
+  return <div className="stack-lg"><section className="hero tool-home-hero"><div><span className="pill">Windows v0.5.13 体验基线</span><h2>TG 内容工具箱</h2><p>五个工具各自保留独立输入、筛选、选择和结果。Telegram 是每个工具输入页的子模式，全局只登录和配置一次。</p><div className="button-row"><button className="primary" onClick={() => openTool("twitter")}>打开第一个工具</button><button onClick={openData}>查看永久数据</button></div></div><div className="hero-gauge"><span>独立工作区</span><strong>5</strong><small>文本工具 3 阶段 · 专用工具 4 阶段</small></div></section><section className="tool-home-grid">{TOOL_DEFINITIONS.map((tool, index) => <button key={tool.id} className={`tool-home-card tool-${tool.id}`} onClick={() => openTool(tool.id)}><span className="tool-card-index">0{index + 1}</span><span className="tool-card-mark">{tool.mark}</span><div><strong>{tool.title}</strong><p>{tool.note}</p><small>{tool.id === "missav" ? "输入 · 结果 · 浏览器脚本 · 历史" : tool.id === "av123" ? "输入 · 结果 · 本地任务 · 历史" : "输入 · 结果 · 历史"}</small></div><span className="tool-card-arrow">→</span></button>)}</section><section className="metric-grid"><Metric label="永久记录" value={data?.summary.records} note="D1 服务端分页" /><Metric label="处理历史" value={data?.summary.runs} note="五工具独立检索" /><Metric label="迁移批次" value={data?.summary.migrations} note="预览与恢复点" /><Metric label="Telegram 来源" value={100} note="按最多 100 来源设计" /></section><section className="callout"><strong>数据边界保持独立</strong><p>云端 D1 与 Windows SQLite 不做实时双向同步；两端只对齐业务字段和 TXT/CSV/JSON 导出格式。</p></section></div>;
 }
 
 function Metric({ label, value, note }: { label: string; value: number | undefined; note: string }) {

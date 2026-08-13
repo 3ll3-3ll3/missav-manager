@@ -504,9 +504,29 @@ export async function restoreSnapshot(snapshotId: string) {
   return { restored: parsed.length };
 }
 
-function taskFilters(input: { stage?: string; tool?: string; search?: string }) {
+const TASK_PHASE_ALIASES: Record<string, string[]> = {
+  received: ["pending", "new", "queued"],
+  filtered: ["filtered"],
+  website: ["running", "website", "processing", "in_progress", "paused", "pause"],
+  review: ["needs_manual", "review", "needs_review", "needs_attention", "manual", "partial_completed", "partial", "partially_completed", "partial_success"],
+  error: ["retry_waiting", "error", "failed", "retry", "retrying", "retry_pending", "waiting_retry"],
+  completed: ["completed", "success", "succeeded", "done", "complete", "cancelled", "canceled", "aborted"],
+};
+
+function taskPhase(value: unknown) {
+  const raw = String(value || "");
+  return Object.entries(TASK_PHASE_ALIASES).find(([, aliases]) => aliases.includes(raw))?.[0] || "review";
+}
+
+function taskFilters(input: { phase?: string; stage?: string; tool?: string; search?: string }) {
   const clauses: string[] = [];
   const values: unknown[] = [];
+  if (input.phase) {
+    const aliases = TASK_PHASE_ALIASES[String(input.phase)];
+    if (!aliases) throw new Error("任务阶段筛选无效");
+    clauses.push(`stage IN (${aliases.map(() => "?").join(",")})`);
+    values.push(...aliases);
+  }
   if (input.stage) {
     const canonical = normalizeTaskStatus(input.stage);
     const aliases = taskStatusAliases(canonical);
@@ -527,6 +547,7 @@ function taskFilters(input: { stage?: string; tool?: string; search?: string }) 
 export async function listTasks(input: {
   page?: number;
   pageSize?: number;
+  phase?: string;
   stage?: string;
   tool?: string;
   search?: string;
@@ -540,6 +561,8 @@ export async function listTasks(input: {
   );
   const { clauses, values } = taskFilters(input);
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const countScope = taskFilters({ tool: input.tool, search: input.search });
+  const countWhere = countScope.clauses.length ? ` WHERE ${countScope.clauses.join(" AND ")}` : "";
   const sortFields: Record<string, string> = {
     tool: "tool",
     stage: "stage",
@@ -548,7 +571,7 @@ export async function listTasks(input: {
   };
   const sort = sortFields[String(input.sort || "updatedAt")] || "updated_at";
   const direction = input.direction === "asc" ? "ASC" : "DESC";
-  const [count, rows] = await getD1().batch([
+  const [count, rows, statusCounts] = await getD1().batch([
     getD1()
       .prepare(`SELECT COUNT(*) AS count FROM task_inbox${where}`)
       .bind(...values),
@@ -557,12 +580,21 @@ export async function listTasks(input: {
         `SELECT * FROM task_inbox${where} ORDER BY ${sort} ${direction},id ${direction} LIMIT ? OFFSET ?`,
       )
       .bind(...values, pageSize, (page - 1) * pageSize),
+    getD1()
+      .prepare(`SELECT stage,COUNT(*) AS count FROM task_inbox${countWhere} GROUP BY stage`)
+      .bind(...countScope.values),
   ]);
+  const counts: Record<string, number> = {};
+  for (const row of statusCounts.results ?? []) {
+    const phase = taskPhase(row.stage);
+    counts[phase] = (counts[phase] || 0) + Number(row.count || 0);
+  }
   return {
     rows: rows.results ?? [],
     total: Number(count.results?.[0]?.count ?? 0),
     page,
     pageSize,
+    counts,
   };
 }
 
@@ -570,7 +602,7 @@ export async function resolveTaskSelection(input: {
   mode?: "ids" | "all";
   ids?: string[];
   excludeIds?: string[];
-  filters?: { stage?: string; tool?: string; search?: string };
+  filters?: { phase?: string; stage?: string; tool?: string; search?: string };
 }) {
   if (input.mode !== "all") {
     return [...new Set((input.ids ?? []).map(String).filter(Boolean))].slice(

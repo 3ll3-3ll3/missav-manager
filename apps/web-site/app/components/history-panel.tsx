@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ToolId } from "../../lib/types";
+import type { ToolId, ToolResult } from "../../lib/types";
 import {
   isTableRowSelected,
   selectedTableCount,
@@ -43,7 +43,7 @@ function download(name: string, content: string, type: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-export default function HistoryPanel({ refreshKey, toolId }: { refreshKey: number; toolId?: ToolId }) {
+export default function HistoryPanel({ refreshKey, toolId, onLoadRun }: { refreshKey: number; toolId?: ToolId; onLoadRun?: (detail: { runId: string; results: ToolResult[] }) => void }) {
   const [rows, setRows] = useState<Run[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -92,6 +92,43 @@ export default function HistoryPanel({ refreshKey, toolId }: { refreshKey: numbe
       setRenameName(payload.run.name);
       setError(null);
     } catch (reason) { setError(toUiError(reason, "历史详情读取失败")); }
+  }
+
+  function parseJsonList(value: unknown) {
+    try { const parsed = JSON.parse(String(value || "[]")); return Array.isArray(parsed) ? parsed.map(String) : []; }
+    catch { return []; }
+  }
+
+  function parseJsonObject(value: unknown) {
+    try { const parsed = JSON.parse(String(value || "{}")); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; }
+    catch { return {}; }
+  }
+
+  async function loadRunIntoWorkspace(id: string) {
+    if (!onLoadRun) return;
+    try {
+      const first = await api(`/api/runs?id=${encodeURIComponent(id)}&resultPage=1&resultPageSize=100`);
+      const pages = Math.max(1, Math.ceil(Number(first.total || 0) / 100));
+      const all = [...(first.results || [])] as Array<Record<string, unknown>>;
+      for (let nextPage = 2; nextPage <= pages; nextPage += 1) {
+        const part = await api(`/api/runs?id=${encodeURIComponent(id)}&resultPage=${nextPage}&resultPageSize=100`);
+        all.push(...(part.results || []));
+      }
+      onLoadRun({ runId: id, results: all.map((row) => ({
+        resultKey: String(row.result_key || row.id || ""),
+        primaryValue: String(row.primary_value || ""),
+        secondaryValue: String(row.secondary_value || ""),
+        status: String(row.status || ""),
+        tags: parseJsonList(row.tags_json),
+        source: String(row.source || ""),
+        metadata: parseJsonObject(row.metadata_json),
+      })) });
+    } catch (reason) { setError(toUiError(reason, "历史任务载入失败")); }
+  }
+
+  async function loadSelectedRun() {
+    if (selection.mode !== "ids" || selection.ids.size !== 1) return;
+    await loadRunIntoWorkspace([...selection.ids][0]);
   }
 
   function selectRow(index: number, event: React.MouseEvent) {
@@ -145,10 +182,10 @@ export default function HistoryPanel({ refreshKey, toolId }: { refreshKey: numbe
   }
 
   return <div className="stack-md history-workspace" tabIndex={0} onKeyDown={keyboard}>
-    <section className="data-toolbar card"><div className="searchbox"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); resetSelection(); }} placeholder="搜索历史名称" /></div>{!toolId && <select value={tool} onChange={(event) => { setTool(event.target.value); setPage(1); resetSelection(); }}><option value="">全部工具</option><option value="twitter">Twitter</option><option value="badnews">Bad.news</option><option value="haijiao">海角</option><option value="missav">MissAV</option><option value="av123">123AV</option></select>}<button onClick={() => setSelection(toggleTablePage(selection, pageIds))}>全选本页</button><button onClick={() => setSelection({ mode: "all", excluded: new Set() })}>全选筛选结果</button><button onClick={() => setShowSource((value) => !value)}>列设置</button><button onClick={() => void load()}>刷新</button></section>
+    <section className="data-toolbar card"><div className="searchbox"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); resetSelection(); }} placeholder="搜索历史名称" /></div>{!toolId && <select value={tool} onChange={(event) => { setTool(event.target.value); setPage(1); resetSelection(); }}><option value="">全部工具</option><option value="twitter">Twitter</option><option value="badnews">Bad.news</option><option value="haijiao">海角</option><option value="missav">MissAV</option><option value="av123">123AV</option></select>}{onLoadRun && <button className="primary" disabled={selection.mode !== "ids" || selection.ids.size !== 1} onClick={() => void loadSelectedRun()}>载入所选任务</button>}<button onClick={() => setSelection(toggleTablePage(selection, pageIds))}>全选本页</button><button onClick={() => setSelection({ mode: "all", excluded: new Set() })}>全选筛选结果</button><button onClick={() => setShowSource((value) => !value)}>列设置</button><button onClick={() => void load()}>刷新</button></section>
     {notice && <div className="notice">{notice}</div>}{error && <ErrorNotice error={error} retry={() => void load()} />}
     {selectedCount > 0 && <section className="bulkbar"><strong>已选 {selectedCount.toLocaleString()} 个批次</strong><button onClick={() => void exportSelection("txt", true)}>复制</button><button onClick={() => void exportSelection("txt")}>TXT</button><button onClick={() => void exportSelection("csv")}>CSV</button><button onClick={() => void exportSelection("json")}>JSON</button><button className="danger" onClick={() => void removeSelected()}>删除并建恢复点</button><button onClick={resetSelection}>清除选择</button></section>}
     <section className="table-card history-table-card"><div className="table-scroll desktop-only"><table className="sheet"><thead><tr><th className="check" onClick={() => setSelection(toggleTablePage(selection, pageIds))}><input readOnly type="checkbox" checked={rows.length > 0 && rows.every((row) => isTableRowSelected(selection, row.id))} /></th><th onClick={() => sortBy("tool")}>工具</th><th onClick={() => sortBy("name")}>历史名称</th><th onClick={() => sortBy("resultCount")}>结果量</th>{showSource && <th>来源</th>}<th onClick={() => sortBy("createdAt")}>创建时间</th><th>操作</th></tr></thead><tbody>{rows.map((run, index) => <tr key={run.id} className={`${isTableRowSelected(selection, run.id) ? "selected" : ""} ${detail?.run.id === run.id ? "focused-row" : ""}`} onClick={(event) => selectRow(index, event)}><td className="check"><input readOnly type="checkbox" checked={isTableRowSelected(selection, run.id)} /></td><td><span className={`tool-chip ${run.tool}`}>{run.tool}</span></td><td><strong>{run.name}</strong></td><td>{run.result_count.toLocaleString()}</td>{showSource && <td>{run.source_summary || "—"}</td>}<td>{new Date(run.created_at).toLocaleString("zh-CN")}</td><td><button onClick={(event) => { event.stopPropagation(); void open(run.id); }}>查看 / 编辑</button></td></tr>)}</tbody></table></div><div className="mobile-history-list mobile-only">{rows.map((run, index) => <article key={run.id} className={`mobile-table-card ${isTableRowSelected(selection, run.id) ? "selected" : ""}`} onClick={(event) => selectRow(index, event)}><div className="mobile-card-heading"><input readOnly type="checkbox" checked={isTableRowSelected(selection, run.id)} /><span className={`tool-chip ${run.tool}`}>{run.tool}</span><span>{new Date(run.created_at).toLocaleDateString("zh-CN")}</span></div><strong>{run.name}</strong><p>{run.source_summary || "无来源摘要"}</p><small>{run.result_count.toLocaleString()} 条结果</small><button onClick={(event) => { event.stopPropagation(); void open(run.id); }}>查看 / 编辑</button></article>)}</div>{!rows.length && <div className="empty compact"><strong>暂无历史</strong><p>处理结果保存后会出现在这里。</p></div>}<footer className="pagination"><span>共 {total.toLocaleString()} 个 · 第 {page} / {pages} 页</span><select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); resetSelection(); }}><option value="20">20 / 页</option><option value="30">30 / 页</option><option value="50">50 / 页</option></select><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>上一页</button><button disabled={page >= pages} onClick={() => setPage((value) => value + 1)}>下一页</button></footer></section>
-    <section className="card history-detail">{detail ? <><div className="section-heading"><div><span className="eyebrow">历史详情</span><h3>{detail.run.name}</h3></div><button onClick={() => { window.location.href = `/api/export?runId=${detail.run.id}`; }}>导出完整 JSON</button></div><div className="rename-row"><input value={renameName} onChange={(event) => setRenameName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void rename()} /><button onClick={() => void rename()}>保存名称</button></div><dl className="detail-meta"><div><dt>工具</dt><dd>{detail.run.tool}</dd></div><div><dt>结果</dt><dd>{detail.total.toLocaleString()} 条</dd></div><div><dt>来源</dt><dd>{detail.run.source_summary || "—"}</dd></div></dl><div className="detail-results">{detail.results.map((row, index) => <div key={String(row.id)}><span>{(detailPage - 1) * 100 + index + 1}</span><strong>{String(row.primary_value)}</strong><small>{String(row.secondary_value || row.source || "")}</small></div>)}</div><footer className="pagination"><span>结果第 {detailPage} / {detailPages} 页</span><button disabled={detailPage <= 1} onClick={() => void open(detail.run.id, detailPage - 1)}>上一页</button><button disabled={detailPage >= detailPages} onClick={() => void open(detail.run.id, detailPage + 1)}>下一页</button></footer></> : <div className="empty compact"><strong>选择一条历史查看详情</strong><p>单击替换选择，Ctrl 切换，Shift 连选；Ctrl+A/C、方向键、Enter 和 Delete 可用。</p></div>}</section>
+    <section className="card history-detail">{detail ? <><div className="section-heading"><div><span className="eyebrow">历史详情</span><h3>{detail.run.name}</h3></div><div className="button-row">{onLoadRun && <button className="primary" onClick={() => void loadRunIntoWorkspace(detail.run.id)}>载入到结果页</button>}<button onClick={() => { window.location.href = `/api/export?runId=${detail.run.id}`; }}>导出完整 JSON</button></div></div><div className="rename-row"><input value={renameName} onChange={(event) => setRenameName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void rename()} /><button onClick={() => void rename()}>保存名称</button></div><dl className="detail-meta"><div><dt>工具</dt><dd>{detail.run.tool}</dd></div><div><dt>结果</dt><dd>{detail.total.toLocaleString()} 条</dd></div><div><dt>来源</dt><dd>{detail.run.source_summary || "—"}</dd></div></dl><div className="detail-results">{detail.results.map((row, index) => <div key={String(row.id)}><span>{(detailPage - 1) * 100 + index + 1}</span><strong>{String(row.primary_value)}</strong><small>{String(row.secondary_value || row.source || "")}</small></div>)}</div><footer className="pagination"><span>结果第 {detailPage} / {detailPages} 页</span><button disabled={detailPage <= 1} onClick={() => void open(detail.run.id, detailPage - 1)}>上一页</button><button disabled={detailPage >= detailPages} onClick={() => void open(detail.run.id, detailPage + 1)}>下一页</button></footer></> : <div className="empty compact"><strong>选择一条历史查看详情</strong><p>单击替换选择，Ctrl 切换，Shift 连选；Ctrl+A/C、方向键、Enter 和 Delete 可用。</p></div>}</section>
   </div>;
 }

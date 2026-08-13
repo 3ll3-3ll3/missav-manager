@@ -65,11 +65,104 @@ export function telegramSyncCheckpointPlan(input: {
   };
 }
 
-function telegramDate(value: unknown) {
-  const seconds = Number(value ?? 0);
-  return Number.isFinite(seconds) && seconds > 0
-    ? new Date(seconds * 1_000).toISOString()
-    : "";
+export function telegramDate(value: unknown) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "" : value.toISOString();
+  }
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  const numeric = Number(text);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const milliseconds = numeric > 1e12 ? numeric : numeric * 1_000;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function telegramHttpUrl(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!/^https?:\/\//i.test(text)) return "";
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function appendTelegramUrl(output: string[], seen: Set<string>, value: unknown) {
+  const url = telegramHttpUrl(value);
+  if (!url || seen.has(url)) return;
+  seen.add(url);
+  output.push(url);
+}
+
+function entityUrls(value: unknown, output: string[], seen: Set<string>) {
+  if (!Array.isArray(value)) return;
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    appendTelegramUrl(output, seen, (item as Record<string, unknown>).url);
+  }
+}
+
+function buttonUrls(value: unknown, output: string[], seen: Set<string>) {
+  if (!value || typeof value !== "object") return;
+  const markup = value as Record<string, unknown>;
+  const rows = Array.isArray(markup.rows)
+    ? markup.rows
+    : Array.isArray(markup.inline_keyboard)
+      ? markup.inline_keyboard
+      : [];
+  for (const rowValue of rows) {
+    const row = rowValue && typeof rowValue === "object"
+      ? rowValue as Record<string, unknown>
+      : {};
+    const buttons = Array.isArray(row.buttons)
+      ? row.buttons
+      : Array.isArray(rowValue)
+        ? rowValue
+        : [];
+    for (const button of buttons) {
+      if (!button || typeof button !== "object") continue;
+      appendTelegramUrl(output, seen, (button as Record<string, unknown>).url);
+    }
+  }
+}
+
+/**
+ * Builds the exact text that enters the five tool rules. Telegram can hide a
+ * URL behind rich text, an inline button, or a web-page preview; keeping only
+ * the visible caption makes a real Bad.news/Haijiao post look empty.
+ */
+export function telegramMessageText(value: unknown) {
+  const message = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  const visible = [message.message, message.text, message.caption]
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .join("\n");
+  const links: string[] = [];
+  const seen = new Set<string>();
+  for (const match of visible.matchAll(/https?:\/\/[^\s<>"']+/gi)) {
+    appendTelegramUrl(links, seen, match[0]);
+  }
+  entityUrls(message.entities, links, seen);
+  entityUrls(message.captionEntities ?? message.caption_entities, links, seen);
+  buttonUrls(message.replyMarkup ?? message.reply_markup, links, seen);
+  const media = message.media && typeof message.media === "object"
+    ? message.media as Record<string, unknown>
+    : {};
+  const webpage = (media.webpage ?? message.webpage ?? message.webPreview ?? message.link_preview_options);
+  if (webpage && typeof webpage === "object") {
+    const page = webpage as Record<string, unknown>;
+    appendTelegramUrl(links, seen, page.url);
+    appendTelegramUrl(links, seen, page.displayUrl ?? page.display_url);
+  }
+  const hidden = links.filter((url) => !visible.includes(url));
+  return [visible, ...hidden].filter(Boolean).join("\n").slice(0, 100_000);
 }
 
 function flatten(value: unknown): string {
@@ -77,7 +170,7 @@ function flatten(value: unknown): string {
   if (value && typeof value === "object") {
     const item = value as Record<string, unknown>;
     const label = flatten(item.text ?? item.caption ?? "");
-    const href = String(item.href ?? "");
+    const href = String(item.href ?? item.url ?? "");
     return href && !label.includes(href) ? `${label} ${href}` : label;
   }
   return String(value ?? "");
@@ -102,7 +195,7 @@ export function parseTelegramOfficialJson(value: unknown) {
         const fingerprint = `${key}:${messageId}`;
         if (seen.has(fingerprint)) continue;
         seen.add(fingerprint);
-        output.push({ sourceKey: key, sourceName: name, messageId, messageDate: String(message.date ?? message.date_unixtime ?? ""), text: flatten(message.text ?? message.caption ?? "").trim().slice(0, 100_000), connectionId: "telegram-import", chatType: "import", eventKind: "message" });
+        output.push({ sourceKey: key, sourceName: name, messageId, messageDate: telegramDate(message.date ?? message.date_unixtime), text: telegramMessageText({ ...message, text: flatten(message.text ?? message.caption ?? "") }).trim().slice(0, 100_000), connectionId: "telegram-import", chatType: "import", eventKind: "message" });
       }
     }
     for (const child of Object.values(object)) {
@@ -132,7 +225,7 @@ export function telegramBotUpdates(value: unknown) {
     if (!["group", "supergroup", "channel"].includes(chatType)) continue;
     const sourceKey = String(chat.id ?? "");
     const sourceName = String(chat.title ?? chat.username ?? [chat.first_name, chat.last_name].filter(Boolean).join(" ") ?? sourceKey).slice(0, 240);
-    const body = [message.text, message.caption].map(flatten).filter(Boolean).join("\n").trim();
+    const body = telegramMessageText(message);
     messages.push({
       sourceKey,
       sourceName,

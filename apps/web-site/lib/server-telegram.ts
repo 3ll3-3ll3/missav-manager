@@ -874,7 +874,61 @@ type QueueFilters = {
   start?: string;
   end?: string;
   sourceIds?: string[];
+  includeCleaned?: boolean;
+  includeNoise?: boolean;
 };
+
+type TelegramQueueRow = Record<string, unknown>;
+
+function candidateHintClause(tool: ToolId) {
+  if (tool === "badnews") return "LOWER(m.body) LIKE '%bad.news/t/%'";
+  if (tool === "haijiao") {
+    return `(${["hjjd", "hjmz", "hjyc", "hjfn", "hjsz", "hjrq", "hjhj"]
+      .map((category) => `LOWER(m.body) LIKE '%haijiaolove.xyz/${category}/%'`)
+      .join(" OR ")})`;
+  }
+  if (tool === "twitter") {
+    return "(m.body LIKE '%#%' OR m.body LIKE '%@%' OR LOWER(m.body) LIKE '%x.com/%' OR LOWER(m.body) LIKE '%twitter.com/%')";
+  }
+  return "(UPPER(m.body) GLOB '*[A-Z][A-Z]*[0-9]*' OR LOWER(m.body) LIKE '%missav.%' OR LOWER(m.body) LIKE '%123av.com/%')";
+}
+
+function telegramQueueCandidates(tool: ToolId, row: TelegramQueueRow) {
+  const body = String(row.body ?? "").trim();
+  if (!body) return [];
+  return processDocuments(tool, [{
+    name: `${String(row.source_name || "Telegram")}#${String(row.message_id || "")}`,
+    text: body,
+  }]).results;
+}
+
+function telegramQueueRowHasCandidate(tool: ToolId, row: TelegramQueueRow) {
+  return telegramQueueCandidates(tool, row).length > 0;
+}
+
+function withTelegramCandidates(tool: ToolId, row: TelegramQueueRow, resolved?: ReturnType<typeof telegramQueueCandidates>) {
+  const candidates = resolved ?? telegramQueueCandidates(tool, row);
+  return {
+    ...row,
+    candidate_count: candidates.length,
+    candidate_preview: candidates.slice(0, 5).map((item) =>
+      item.secondaryValue
+        ? `${item.primaryValue} → ${item.secondaryValue}`
+        : item.primaryValue,
+    ).join("；"),
+  };
+}
+
+function telegramQueueRowIsVisible(
+  tool: ToolId,
+  row: TelegramQueueRow,
+  options: { includeCleaned?: boolean; includeNoise?: boolean },
+) {
+  const body = String(row.body ?? "");
+  if (!options.includeCleaned && (String(row.body_deleted_at ?? "") || !body.trim())) return false;
+  return options.includeNoise || telegramQueueRowHasCandidate(tool, row);
+}
+
 function queueFilter(input: QueueFilters) {
   const tool = cleanTool(input.tool);
   const clauses = ["q.tool=?"];
@@ -901,6 +955,12 @@ function queueFilter(input: QueueFilters) {
     clauses.push("m.message_date<=?");
     values.push(String(input.end).slice(0, 40));
   }
+  if (!input.includeCleaned) {
+    clauses.push("COALESCE(m.body_deleted_at,'')='' AND LENGTH(TRIM(COALESCE(m.body,'')))>0");
+  }
+  if (!input.includeNoise) {
+    clauses.push(candidateHintClause(tool));
+  }
   return {
     tool,
     where: ` WHERE ${clauses.join(" AND ")}`,
@@ -918,6 +978,8 @@ export async function listTelegramQueue(input: {
   start?: string;
   end?: string;
   sourceIds?: string[];
+  includeCleaned?: boolean;
+  includeNoise?: boolean;
   sort?: string;
   direction?: "asc" | "desc";
 }) {
@@ -927,7 +989,7 @@ export async function listTelegramQueue(input: {
     200,
     Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
   );
-  const { where, from, values } = queueFilter(input);
+  const { tool, where, from, values } = queueFilter(input);
   const sortFields: Record<string, string> = {
     messageDate: "m.message_date",
     source: "s.name",
@@ -936,19 +998,50 @@ export async function listTelegramQueue(input: {
   };
   const sort = sortFields[String(input.sort || "messageDate")] || "m.message_date";
   const direction = input.direction === "asc" ? "ASC" : "DESC";
-  const [count, rows] = await getD1().batch([
-    getD1()
-      .prepare(`SELECT COUNT(*) AS count${from}${where}`)
-      .bind(...values),
-    getD1()
-      .prepare(
-        `SELECT q.*,m.message_id,m.message_date,m.body,m.event_kind,m.remote_edited_at,m.remote_deleted_at,m.body_deleted_at,s.id AS source_id,s.name AS source_name${from}${where} ORDER BY ${sort} ${direction},m.id ${direction} LIMIT ? OFFSET ?`,
-      )
-      .bind(...values, pageSize, (page - 1) * pageSize),
-  ]);
+  const select = `SELECT q.*,m.message_id,m.message_date,m.body,m.event_kind,m.remote_edited_at,m.remote_deleted_at,m.body_deleted_at,s.id AS source_id,s.name AS source_name${from}${where}`;
+  if (input.includeNoise) {
+    const [count, rows] = await getD1().batch([
+      getD1().prepare(`SELECT COUNT(*) AS count${from}${where}`).bind(...values),
+      getD1().prepare(`${select} ORDER BY ${sort} ${direction},m.id ${direction} LIMIT ? OFFSET ?`)
+        .bind(...values, pageSize, (page - 1) * pageSize),
+    ]);
+    return {
+      rows: (rows.results ?? []).map((row) => withTelegramCandidates(tool, row as TelegramQueueRow)),
+      total: Number(count.results?.[0]?.count ?? 0),
+      hiddenNoiseCount: 0,
+      page,
+      pageSize,
+    };
+  }
+
+  const rows: TelegramQueueRow[] = [];
+  const pageStart = (page - 1) * pageSize;
+  let total = 0;
+  let hinted = 0;
+  let offset = 0;
+  const scanSize = 500;
+  while (true) {
+    const result = await getD1()
+      .prepare(`${select} ORDER BY ${sort} ${direction},m.id ${direction} LIMIT ? OFFSET ?`)
+      .bind(...values, scanSize, offset)
+      .all();
+    const chunk = (result.results ?? []) as TelegramQueueRow[];
+    for (const row of chunk) {
+      hinted += 1;
+      const body = String(row.body ?? "");
+      if (!input.includeCleaned && (String(row.body_deleted_at ?? "") || !body.trim())) continue;
+      const candidates = telegramQueueCandidates(tool, row);
+      if (!candidates.length) continue;
+      if (total >= pageStart && rows.length < pageSize) rows.push(withTelegramCandidates(tool, row, candidates));
+      total += 1;
+    }
+    if (chunk.length < scanSize) break;
+    offset += chunk.length;
+  }
   return {
-    rows: rows.results ?? [],
-    total: Number(count.results?.[0]?.count ?? 0),
+    rows,
+    total,
+    hiddenNoiseCount: Math.max(0, hinted - total),
     page,
     pageSize,
   };
@@ -964,6 +1057,8 @@ export async function resolveTelegramQueueSelection(input: {
   start?: string;
   end?: string;
   sourceIds?: string[];
+  includeCleaned?: boolean;
+  includeNoise?: boolean;
 }) {
   if (input.mode !== "all") {
     const requested = [
@@ -975,17 +1070,20 @@ export async function resolveTelegramQueueSelection(input: {
       const chunk = requested.slice(offset, offset + 80);
       const rows = await getD1()
         .prepare(
-          `SELECT q.id FROM telegram_tool_queue q
+          `SELECT q.id,m.message_id,m.body,m.body_deleted_at,s.name AS source_name FROM telegram_tool_queue q
            JOIN telegram_messages m ON m.id=q.telegram_message_id
            JOIN tool_source_bindings b ON b.source_id=m.source_id AND b.tool=q.tool
+           JOIN input_sources s ON s.id=m.source_id
            WHERE q.tool=? AND q.id IN (${chunk.map(() => "?").join(",")})`,
         )
         .bind(tool, ...chunk)
         .all();
-      for (const row of rows.results ?? []) allowed.add(String(row.id));
+      for (const row of rows.results ?? []) {
+        if (telegramQueueRowIsVisible(tool, row as TelegramQueueRow, input)) allowed.add(String(row.id));
+      }
     }
     if (allowed.size !== requested.length)
-      throw new Error("所选 Telegram 消息不属于当前工具或绑定已变化，请刷新后重试");
+      throw new Error("所选消息已被清理、没有当前工具可用结果，或绑定已变化，请刷新后重试");
     return requested;
   }
   const query = queueFilter(input);
@@ -995,13 +1093,15 @@ export async function resolveTelegramQueueSelection(input: {
   while (true) {
     const cursorSql = `${query.where} AND q.id>?`;
     const rows = await getD1()
-      .prepare(`SELECT q.id${query.from}${cursorSql} ORDER BY q.id LIMIT 5000`)
+      .prepare(`SELECT q.id,m.message_id,m.body,m.body_deleted_at,s.name AS source_name${query.from}${cursorSql} ORDER BY q.id LIMIT 5000`)
       .bind(...query.values, cursor)
       .all();
-    const chunk = (rows.results ?? []).map((row: Record<string, unknown>) =>
-      String(row.id),
-    );
-    ids.push(...chunk.filter((id) => !excluded.has(id)));
+    const resultRows = (rows.results ?? []) as TelegramQueueRow[];
+    const chunk = resultRows.map((row) => String(row.id));
+    ids.push(...resultRows
+      .filter((row) => telegramQueueRowIsVisible(query.tool, row, input))
+      .map((row) => String(row.id))
+      .filter((id) => !excluded.has(id)));
     if (chunk.length < 5000) break;
     cursor = chunk.at(-1) || "";
   }
@@ -1016,6 +1116,13 @@ export async function processTelegramQueue(input: {
   tool: string;
   queueIds: string[];
   deleteBody?: boolean;
+  onProgress?: (progress: {
+    phase: "preparing" | "processing" | "saving" | "updating" | "cleaning" | "completed";
+    label: string;
+    current: number;
+    total: number;
+    resultCount: number;
+  }) => void;
 }) {
   await ensureSchema();
   const tool = cleanTool(input.tool);
@@ -1041,13 +1148,23 @@ export async function processTelegramQueue(input: {
   if (rows.some((row) => String(row.status) === "deleted" || String(row.remote_deleted_at || ""))) {
     throw new Error("所选范围包含 Telegram 远端已删除消息；请取消选择后再处理。");
   }
+  const emitProgress = (
+    phase: "preparing" | "processing" | "saving" | "updating" | "cleaning" | "completed",
+    label: string,
+    current: number,
+    resultCount: number,
+  ) => input.onProgress?.({ phase, label, current, total: rows.length, resultCount });
+  emitProgress("preparing", "正在建立操作前恢复点", 0, 0);
   const snapshotId = await createTelegramQueueSnapshot(
     rows.map((row) => String(row.id)),
     `处理 ${tool} Telegram 队列前自动恢复点`,
   );
   const allResults = [];
   const counts = new Map<string, number>();
-  for (const row of rows) {
+  const progressStep = Math.max(1, Math.ceil(rows.length / 100));
+  emitProgress("processing", "正在按当前工具规则处理消息", 0, 0);
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
     const output = processDocuments(tool, [
       {
         name: `${String(row.source_name)}#${String(row.message_id)}`,
@@ -1056,19 +1173,29 @@ export async function processTelegramQueue(input: {
     ]);
     counts.set(String(row.id), output.results.length);
     allResults.push(...output.results);
+    if ((index + 1) % progressStep === 0 || index === rows.length - 1) {
+      emitProgress("processing", "正在按当前工具规则处理消息", index + 1, allResults.length);
+    }
   }
+  const uniqueResults = [...new Map(
+    allResults.map((item) => [String(item.resultKey).toLowerCase(), item]),
+  ).values()];
   let runId = "";
-  if (allResults.length) {
+  let resultCount = uniqueResults.length;
+  emitProgress("saving", uniqueResults.length ? "正在保存结果与处理历史" : "正在记录空结果状态", rows.length, resultCount);
+  if (uniqueResults.length) {
     const saved = await saveRun({
       tool,
       name: `Telegram · ${new Date().toLocaleString("zh-CN")}`,
       inputKind: "telegram_queue",
       sourceSummary: `${rows.length} 条所选消息`,
-      results: allResults,
+      results: uniqueResults,
     });
     runId = saved.runId;
+    resultCount = saved.resultCount;
   }
   const timestamp = nowIso();
+  emitProgress("updating", "正在更新消息处理状态", rows.length, resultCount);
   await getD1().batch(
     rows.map((row) => {
       const count = counts.get(String(row.id)) ?? 0;
@@ -1087,6 +1214,7 @@ export async function processTelegramQueue(input: {
     }),
   );
   if (input.deleteBody !== false) {
+    emitProgress("cleaning", "正在执行原始正文清理策略", rows.length, resultCount);
     for (const messageId of new Set(
       rows.map((row) => String(row.telegram_message_id)),
     )) {
@@ -1108,10 +1236,11 @@ export async function processTelegramQueue(input: {
   await writeLog("info", "telegram", "已处理所选 Telegram 消息", {
     tool,
     selected: rows.length,
-    resultCount: allResults.length,
+    resultCount,
     runId,
   });
-  return { selected: rows.length, resultCount: allResults.length, runId, snapshotId };
+  emitProgress("completed", "处理完成，结果已送入结果面板", rows.length, resultCount);
+  return { selected: rows.length, resultCount, runId, snapshotId, results: uniqueResults };
 }
 
 export async function updateTelegramQueue(

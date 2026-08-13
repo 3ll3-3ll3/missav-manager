@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
+import { loadModule } from "./helpers/bundle.mjs";
 
 const rulesUrl = new URL("../lib/rules.ts", import.meta.url);
 const transformed = ts.transpileModule(await readFile(rulesUrl, "utf8"), {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
 const rules = await import(`data:text/javascript;base64,${Buffer.from(transformed.outputText).toString("base64")}`);
+const telegram = await loadModule("lib/telegram.ts");
 
 const documents = (text) => [{ name: "sample.txt", text }];
 const primary = (tool, text) => rules.processDocuments(tool, documents(text)).results.map((row) => row.primaryValue);
@@ -20,6 +22,11 @@ test("复刻推特博主过滤：保持首次出现顺序并排除传送门、�
     "传送门 #chuansongmen520 博主： @m1stedoll",
     "机器人 @haha6693_bot",
   ].join("\n")), ["kechunyaoll", "Second_User", "Third3", "xxxxshe0", "m1stedoll"]);
+});
+
+test("推特规则不把常见成人主题标签和带数字变体当成账号", () => {
+  assert.deepEqual(primary("twitter", "Se #sex80000 #nsfw #porno2026"), []);
+  assert.deepEqual(primary("twitter", "#sex80000 但明确账号是 @real_creator"), ["real_creator"]);
 });
 
 test("只保留 Bad.news 主题链接并规范化去重", () => {
@@ -48,6 +55,39 @@ test("MissAV 番号规范化、降噪和可信 URL 行为与桌面基线一致",
   `), ["ABF-354", "SONE-314", "FC2-PPV-4625027", "OTIM-648"]);
 });
 
+test("123AV 只生成本地番号任务，可信详情链接仅来自实际输入", () => {
+  const output = rules.processDocuments("av123", documents("ABF-354 https://123av.com/cn/v/sone-314-chinese-subtitle PDF24 Office 365"));
+  assert.deepEqual(output.results.map((row) => ({ code: row.primaryValue, url: row.secondaryValue, status: row.status })), [
+    { code: "ABF-354", url: "", status: "task_ready" },
+    { code: "SONE-314", url: "https://123av.com/cn/v/sone-314-chinese-subtitle", status: "task_ready" },
+  ]);
+  assert.equal(output.results.some((row) => /queried|favorite|已查询|已收藏/i.test(String(row.status))), false);
+});
+
 test("Telegram UTC 偏移时间按桌面规则归一化", () => {
   assert.equal(rules.parseTelegramDate("01.07.2026 00:18:59 UTC+08:00").toISOString(), "2026-06-30T16:18:59.000Z");
+});
+
+test("Telegram 富文本、图片说明、按钮和网页预览中的隐藏链接都会进入工具规则", () => {
+  const botText = telegram.telegramMessageText({
+    caption: "点这里查看原帖",
+    caption_entities: [{ type: "text_link", url: "https://bad.news/t/6295976?from=bot" }],
+    reply_markup: { inline_keyboard: [[{ text: "备用入口", url: "https://bad.news/t/6295984" }]] },
+  });
+  assert.deepEqual(primary("badnews", botText), ["https://bad.news/t/6295976", "https://bad.news/t/6295984"]);
+
+  const personalText = telegram.telegramMessageText({
+    message: "海角正文",
+    entities: [{ url: "https://www.haijiaolove.xyz/hjsz/127766.html?tg=1" }],
+    replyMarkup: { rows: [{ buttons: [{ url: "https://bad.news/t/6295999" }] }] },
+    media: { webpage: { url: "https://bad.news/t/6296000" } },
+  });
+  assert.deepEqual(primary("badnews", personalText), ["https://bad.news/t/6295999", "https://bad.news/t/6296000"]);
+  assert.deepEqual(primary("haijiao", personalText), ["https://www.haijiaolove.xyz/hjsz/127766.html"]);
+});
+
+test("Bot 秒时间戳与毫秒时间戳都归一化，不再产生 Invalid Date", () => {
+  assert.equal(telegram.telegramDate("1786665600"), "2026-08-14T00:00:00.000Z");
+  assert.equal(telegram.telegramDate("1786665600000"), "2026-08-14T00:00:00.000Z");
+  assert.equal(telegram.telegramDate("not-a-date"), "");
 });

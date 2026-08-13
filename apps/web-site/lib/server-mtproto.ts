@@ -17,7 +17,7 @@ import {
 import { ensureSchema, nowIso } from "./server-store";
 import { writeErrorLog, writeLog } from "./server-audit";
 import { ingestTelegramMessages } from "./server-telegram";
-import { telegramSyncCheckpointPlan, type TelegramImportMessage } from "./telegram";
+import { telegramDate, telegramMessageText, telegramSyncCheckpointPlan, type TelegramImportMessage } from "./telegram";
 
 const OWNER_ID = "owner";
 const FLOW_TTL_MS = 10 * 60 * 1000;
@@ -402,15 +402,6 @@ export async function discoverPersonalSources() {
   }
 }
 
-function messageText(message: Record<string, unknown>) {
-  const text = String(message.message ?? message.text ?? message.caption ?? "");
-  const links = (Array.isArray(message.entities) ? message.entities : [])
-    .filter((entity): entity is Record<string, unknown> => Boolean(entity && typeof entity === "object"))
-    .map((entity) => String(entity.url ?? "").trim())
-    .filter((url) => /^https?:\/\//i.test(url) && !text.includes(url));
-  return [text, ...links].filter(Boolean).join("\n").slice(0, 100_000);
-}
-
 async function resolveEntity(client: TelegramClient, source: Record<string, unknown>) {
   const dynamic = dynamicClient(client);
   const username = String(source.username || "").trim();
@@ -468,7 +459,7 @@ export async function syncPersonalSources(input: { sourceIds?: string[]; mode?: 
         const message = (value ?? {}) as Record<string, unknown>;
         const id = String(message.id ?? "");
         if (!id) continue;
-        const date = message.date instanceof Date ? message.date.toISOString() : String(message.date ?? "");
+        const date = telegramDate(message.date);
         const messageTime = Date.parse(date);
         if (mode === "range" && Number.isFinite(startTime) && Number.isFinite(messageTime) && messageTime < startTime) continue;
         if (mode === "range" && Number.isFinite(endTime) && Number.isFinite(messageTime) && messageTime > endTime) continue;
@@ -481,7 +472,7 @@ export async function syncPersonalSources(input: { sourceIds?: string[]; mode?: 
           sourceName: String(source.name),
           messageId: id,
           messageDate: date,
-          text: messageText(message),
+          text: telegramMessageText(message),
           connectionId: "telegram-personal",
           chatType: String(source.chat_type || ""),
           username: String(source.username || ""),
