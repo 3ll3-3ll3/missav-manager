@@ -367,8 +367,8 @@ export async function restoreSnapshot(snapshotId: string) {
       getD1()
         .prepare(
           `INSERT OR REPLACE INTO content_runs
-      (id,tool,name,input_kind,start_at,end_at,source_summary,total_count,result_count,error_count,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id,tool,name,input_kind,start_at,end_at,source_summary,status,stats_json,options_json,total_count,result_count,error_count,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .bind(
           run.id,
@@ -378,6 +378,9 @@ export async function restoreSnapshot(snapshotId: string) {
           run.start_at,
           run.end_at,
           run.source_summary,
+          run.status || "completed",
+          run.stats_json || "{}",
+          run.options_json || "{}",
           run.total_count,
           run.result_count,
           run.error_count,
@@ -391,8 +394,8 @@ export async function restoreSnapshot(snapshotId: string) {
           return getD1()
             .prepare(
               `INSERT OR REPLACE INTO content_results
-        (id,run_id,tool,result_key,primary_value,secondary_value,status,tags_json,source,metadata_json,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (id,run_id,tool,result_key,primary_value,secondary_value,status,error_message,tags_json,source,metadata_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             )
             .bind(
               row.id,
@@ -402,6 +405,7 @@ export async function restoreSnapshot(snapshotId: string) {
               row.primary_value,
               row.secondary_value,
               row.status,
+              row.error_message || "",
               row.tags_json,
               row.source,
               row.metadata_json,
@@ -429,13 +433,14 @@ export async function restoreSnapshot(snapshotId: string) {
       return getD1()
         .prepare(
           `INSERT OR REPLACE INTO task_inbox
-          (id,tool,stage,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          (id,tool,stage,phase,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .bind(
           row.id,
           row.tool,
           row.stage,
+          row.phase || taskPhase(row.stage),
           row.title,
           row.run_id,
           row.record_id,
@@ -518,14 +523,32 @@ function taskPhase(value: unknown) {
   return Object.entries(TASK_PHASE_ALIASES).find(([, aliases]) => aliases.includes(raw))?.[0] || "review";
 }
 
+const TASK_PHASE_SQL = `CASE
+  WHEN phase='' OR (phase='received' AND stage NOT IN ('pending','new','queued')) THEN CASE
+    WHEN stage IN ('pending','new','queued') THEN 'received'
+    WHEN stage='filtered' THEN 'filtered'
+    WHEN stage IN ('running','website','processing','in_progress','paused','pause') THEN 'website'
+    WHEN stage IN ('needs_manual','review','needs_review','needs_attention','manual','partial_completed','partial','partially_completed','partial_success') THEN 'review'
+    WHEN stage IN ('retry_waiting','error','failed','retry','retrying','retry_pending','waiting_retry') THEN 'error'
+    WHEN stage IN ('completed','success','succeeded','done','complete','cancelled','canceled','aborted') THEN 'completed'
+    ELSE 'review' END
+  ELSE phase END`;
+
+function taskPhaseForStatus(status: TaskStatus) {
+  if (status === "pending") return "received";
+  if (status === "running" || status === "paused") return "website";
+  if (status === "retry_waiting") return "error";
+  if (status === "needs_manual" || status === "partial_completed") return "review";
+  return "completed";
+}
+
 function taskFilters(input: { phase?: string; stage?: string; tool?: string; search?: string }) {
   const clauses: string[] = [];
   const values: unknown[] = [];
   if (input.phase) {
-    const aliases = TASK_PHASE_ALIASES[String(input.phase)];
-    if (!aliases) throw new Error("任务阶段筛选无效");
-    clauses.push(`stage IN (${aliases.map(() => "?").join(",")})`);
-    values.push(...aliases);
+    if (!TASK_PHASE_ALIASES[String(input.phase)]) throw new Error("任务阶段筛选无效");
+    clauses.push(`${TASK_PHASE_SQL}=?`);
+    values.push(String(input.phase));
   }
   if (input.stage) {
     const canonical = normalizeTaskStatus(input.stage);
@@ -577,16 +600,16 @@ export async function listTasks(input: {
       .bind(...values),
     getD1()
       .prepare(
-        `SELECT * FROM task_inbox${where} ORDER BY ${sort} ${direction},id ${direction} LIMIT ? OFFSET ?`,
+        `SELECT *,${TASK_PHASE_SQL} AS resolved_phase FROM task_inbox${where} ORDER BY ${sort} ${direction},id ${direction} LIMIT ? OFFSET ?`,
       )
       .bind(...values, pageSize, (page - 1) * pageSize),
     getD1()
-      .prepare(`SELECT stage,COUNT(*) AS count FROM task_inbox${countWhere} GROUP BY stage`)
+      .prepare(`SELECT ${TASK_PHASE_SQL} AS phase,COUNT(*) AS count FROM task_inbox${countWhere} GROUP BY ${TASK_PHASE_SQL}`)
       .bind(...countScope.values),
   ]);
   const counts: Record<string, number> = {};
   for (const row of statusCounts.results ?? []) {
-    const phase = taskPhase(row.stage);
+    const phase = String(row.phase || taskPhase(row.stage));
     counts[phase] = (counts[phase] || 0) + Number(row.count || 0);
   }
   return {
@@ -607,21 +630,21 @@ export async function resolveTaskSelection(input: {
   if (input.mode !== "all") {
     return [...new Set((input.ids ?? []).map(String).filter(Boolean))].slice(
       0,
-      10_000,
+      100_000,
     );
   }
   const { clauses, values } = taskFilters(input.filters ?? {});
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
   const rows = await getD1()
-    .prepare(`SELECT id FROM task_inbox${where} ORDER BY id LIMIT 10001`)
+    .prepare(`SELECT id FROM task_inbox${where} ORDER BY id LIMIT 100001`)
     .bind(...values)
     .all();
   const excluded = new Set((input.excludeIds ?? []).map(String));
   const ids = (rows.results ?? [])
     .map((row: Record<string, unknown>) => String(row.id))
     .filter((id) => !excluded.has(id));
-  if (ids.length > 10_000)
-    throw new Error("当前任务操作超过 10,000 条，请先增加筛选条件");
+  if (ids.length > 100_000)
+    throw new Error("当前任务操作超过 100,000 条，请先增加筛选条件");
   return ids;
 }
 
@@ -677,9 +700,9 @@ export async function updateTasks(ids: string[], stage: string) {
     const chunk = unique.slice(offset, offset + 80);
     const result = await getD1()
       .prepare(
-        `UPDATE task_inbox SET stage=?,updated_at=? WHERE id IN (${chunk.map(() => "?").join(",")})`,
+        `UPDATE task_inbox SET stage=?,phase=?,updated_at=? WHERE id IN (${chunk.map(() => "?").join(",")})`,
       )
-      .bind(canonical, nowIso(), ...chunk)
+      .bind(canonical, taskPhaseForStatus(canonical), nowIso(), ...chunk)
       .run();
     changed += Number(result.meta?.changes ?? 0);
   }

@@ -41,13 +41,29 @@ export default function PlainOutputPanel({
     }
   }
 
+  function downloadField(fieldIndex: number, mode: "filtered" | "selected") {
+    const field = (mode === "selected" ? selectedFields : filteredFields)[fieldIndex];
+    const text = field?.values.join("\r\n") || "";
+    if (!field || !text) {
+      notice(mode === "selected" ? "所选范围在这个字段中没有可导出内容" : "当前筛选在这个字段中没有可导出内容");
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${tool}-${field.key}-${mode}.txt`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    notice(`已导出“${field.label}” ${field.values.length.toLocaleString()} 行，内容与文本框完全一致`);
+  }
+
   return <section className="card plain-output-panel" aria-label="纯文本输出">
     <div className="section-heading"><div><span className="eyebrow">纯文本输出 · 默认展开</span><h3>一行一个，可直接全选或分别复制</h3><p className="stage-purpose">当前筛选 {filtered.length.toLocaleString()} 条{selected.length ? `；已选 ${selected.length.toLocaleString()} 条` : "；当前未选择，后续操作默认使用当前筛选"}</p></div></div>
     <div className={`plain-output-grid ${filteredFields.length > 1 ? "two" : ""}`}>
       {filteredFields.map((field, index) => <article key={field.key} className={fallback === field.key ? "clipboard-fallback" : ""}>
         <div className="plain-output-heading"><strong>{field.label}</strong><span>{field.values.length.toLocaleString()} 行</span></div>
         <textarea ref={(node) => { textareas.current[field.key] = node; }} readOnly rows={9} value={field.values.join("\n")} aria-label={field.label} />
-        <div className="button-row"><button className="primary" onClick={() => void copy(index, "filtered")}>复制当前筛选</button><button disabled={!selected.length} onClick={() => void copy(index, "selected")}>复制所选{selected.length ? ` (${selected.length})` : ""}</button></div>
+        <div className="button-row"><button className="primary" onClick={() => void copy(index, "filtered")}>复制当前筛选</button><button disabled={!selected.length} onClick={() => void copy(index, "selected")}>复制所选{selected.length ? ` (${selected.length})` : ""}</button><button onClick={() => downloadField(index, selected.length ? "selected" : "filtered")}>下载 TXT</button></div>
         {fallback === field.key && <small className="clipboard-help">文本已全选；请按 Ctrl+C。也可以在文本框内右键复制。</small>}
       </article>)}
     </div>

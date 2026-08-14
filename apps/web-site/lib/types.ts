@@ -6,6 +6,8 @@ export type ToolResult = {
   primaryValue: string;
   secondaryValue?: string;
   status?: string;
+  error?: string;
+  remark?: string;
   tags?: string[];
   actressTags?: string[];
   genreTags?: string[];

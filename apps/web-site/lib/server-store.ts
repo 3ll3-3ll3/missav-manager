@@ -11,8 +11,11 @@ import type {
   RecordFilters,
   RecordRow,
   SanitizedImportRecord,
+  ToolId,
   ToolResult,
 } from "./types";
+import type { ProcessingStats } from "./rules";
+import { toolCsv, toolFieldText } from "./tool-export";
 import defaultReferenceTagsRaw from "../public/default-reference-tags.txt?raw";
 
 const TOOLS = new Set(["twitter", "badnews", "haijiao", "missav", "av123"]);
@@ -39,6 +42,10 @@ const SORT_FIELDS: Record<string, string> = {
 let schemaReady: Promise<void> | null = null;
 
 const TELEGRAM_HUB_COMPATIBILITY_COLUMNS: Array<[string, string]> = [
+  ["content_runs", "status TEXT NOT NULL DEFAULT 'completed'"],
+  ["content_runs", "stats_json TEXT NOT NULL DEFAULT '{}'"],
+  ["content_runs", "options_json TEXT NOT NULL DEFAULT '{}'"],
+  ["content_results", "error_message TEXT NOT NULL DEFAULT ''"],
   ["input_sources", "sync_cursor_message_id TEXT NOT NULL DEFAULT ''"],
   ["input_sources", "sync_target_message_id TEXT NOT NULL DEFAULT ''"],
   ["sync_transactions", "edited_count INTEGER NOT NULL DEFAULT 0"],
@@ -47,20 +54,31 @@ const TELEGRAM_HUB_COMPATIBILITY_COLUMNS: Array<[string, string]> = [
   ["telegram_bot_state", "webhook_status TEXT NOT NULL DEFAULT 'unknown'"],
   ["telegram_bot_state", "last_checked_at TEXT NOT NULL DEFAULT ''"],
   ["telegram_message_fingerprints", "content_hash TEXT NOT NULL DEFAULT ''"],
-  ["telegram_message_fingerprints", "event_kind TEXT NOT NULL DEFAULT 'message'"],
-  ["telegram_message_fingerprints", "last_remote_update_id TEXT NOT NULL DEFAULT ''"],
+  [
+    "telegram_message_fingerprints",
+    "event_kind TEXT NOT NULL DEFAULT 'message'",
+  ],
+  [
+    "telegram_message_fingerprints",
+    "last_remote_update_id TEXT NOT NULL DEFAULT ''",
+  ],
   ["telegram_message_fingerprints", "updated_at TEXT NOT NULL DEFAULT ''"],
   ["telegram_messages", "event_kind TEXT NOT NULL DEFAULT 'message'"],
   ["telegram_messages", "content_hash TEXT NOT NULL DEFAULT ''"],
   ["telegram_messages", "remote_edited_at TEXT NOT NULL DEFAULT ''"],
   ["telegram_messages", "remote_deleted_at TEXT NOT NULL DEFAULT ''"],
+  ["telegram_tool_queue", "candidate_preview TEXT NOT NULL DEFAULT ''"],
+  ["telegram_tool_queue", "message_date TEXT NOT NULL DEFAULT ''"],
   ["telegram_sync_runs", "edited_count INTEGER NOT NULL DEFAULT 0"],
   ["telegram_sync_runs", "deleted_count INTEGER NOT NULL DEFAULT 0"],
   ["telegram_sync_runs", "has_more INTEGER NOT NULL DEFAULT 0"],
+  ["task_inbox", "phase TEXT NOT NULL DEFAULT 'received'"],
 ];
 
 function schemaObjectMissing(error: unknown) {
-  return /no such table|no such column|has no column named/i.test(String(error));
+  return /no such table|no such column|has no column named/i.test(
+    String(error),
+  );
 }
 
 async function probeBaseSchema(db: D1Database) {
@@ -68,7 +86,9 @@ async function probeBaseSchema(db: D1Database) {
     db.prepare("SELECT key FROM app_settings LIMIT 1"),
     db.prepare("SELECT connection_id FROM telegram_connections LIMIT 1"),
     db.prepare("SELECT stage FROM telegram_auth_flows LIMIT 1"),
-    db.prepare("SELECT connection_id, external_chat_id FROM input_sources LIMIT 1"),
+    db.prepare(
+      "SELECT connection_id, external_chat_id FROM input_sources LIMIT 1",
+    ),
     db.prepare("SELECT history_mode FROM tool_source_bindings LIMIT 1"),
     db.prepare("SELECT next_update_offset FROM telegram_bot_state LIMIT 1"),
   ]);
@@ -82,7 +102,20 @@ async function applyTelegramHubSchemaCompatibility(db: D1Database) {
       if (!/duplicate column|already exists/i.test(String(error))) throw error;
     }
   }
-  await db.prepare("DELETE FROM telegram_auth_flows WHERE encrypted_challenge='' AND challenge_json<>'{}'").run();
+  await db.batch([
+    db.prepare(
+      "DELETE FROM telegram_auth_flows WHERE encrypted_challenge='' AND challenge_json<>'{}'",
+    ),
+    db.prepare(`UPDATE task_inbox SET phase=CASE
+      WHEN stage IN ('pending','new','queued') THEN 'received'
+      WHEN stage='filtered' THEN 'filtered'
+      WHEN stage IN ('running','website','processing','in_progress','paused','pause') THEN 'website'
+      WHEN stage IN ('needs_manual','review','needs_review','needs_attention','manual','partial_completed','partial','partially_completed','partial_success') THEN 'review'
+      WHEN stage IN ('retry_waiting','error','failed','retry','retrying','retry_pending','waiting_retry') THEN 'error'
+      WHEN stage IN ('completed','success','succeeded','done','complete','cancelled','canceled','aborted') THEN 'completed'
+      ELSE 'review' END
+      WHERE phase='' OR (phase='received' AND stage NOT IN ('pending','new','queued'))`),
+  ]);
 }
 
 async function probeCurrentSchema(db: D1Database) {
@@ -91,9 +124,21 @@ async function probeCurrentSchema(db: D1Database) {
     db.prepare("SELECT connection_id FROM telegram_connections LIMIT 1"),
     db.prepare("SELECT stage FROM telegram_auth_flows LIMIT 1"),
     db.prepare("SELECT encrypted_challenge FROM telegram_auth_flows LIMIT 1"),
-    db.prepare("SELECT connection_id, external_chat_id, sync_cursor_message_id, sync_target_message_id FROM input_sources LIMIT 1"),
+    db.prepare(
+      "SELECT connection_id, external_chat_id, sync_cursor_message_id, sync_target_message_id FROM input_sources LIMIT 1",
+    ),
     db.prepare("SELECT history_mode FROM tool_source_bindings LIMIT 1"),
-    db.prepare("SELECT event_kind, content_hash, remote_deleted_at FROM telegram_messages LIMIT 1"),
+    db.prepare(
+      "SELECT status,stats_json,options_json FROM content_runs LIMIT 1",
+    ),
+    db.prepare("SELECT error_message FROM content_results LIMIT 1"),
+    db.prepare(
+      "SELECT event_kind, content_hash, remote_deleted_at FROM telegram_messages LIMIT 1",
+    ),
+    db.prepare(
+      "SELECT candidate_preview,message_date FROM telegram_tool_queue LIMIT 1",
+    ),
+    db.prepare("SELECT phase FROM task_inbox LIMIT 1"),
     db.prepare("SELECT webhook_status FROM telegram_bot_state LIMIT 1"),
   ]);
 }
@@ -114,10 +159,10 @@ function parsed<T>(value: unknown, fallback: T): T {
   }
 }
 
-function cleanTool(value: unknown) {
+function cleanTool(value: unknown): ToolId {
   const tool = String(value ?? "");
   if (!TOOLS.has(tool)) throw new Error("未知工具");
-  return tool;
+  return tool as ToolId;
 }
 
 export async function ensureSchema() {
@@ -156,6 +201,7 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS content_runs (
         id TEXT PRIMARY KEY, tool TEXT NOT NULL, name TEXT NOT NULL, input_kind TEXT NOT NULL,
         start_at TEXT NOT NULL DEFAULT '', end_at TEXT NOT NULL DEFAULT '', source_summary TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'completed', stats_json TEXT NOT NULL DEFAULT '{}', options_json TEXT NOT NULL DEFAULT '{}',
         total_count INTEGER NOT NULL DEFAULT 0, result_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       )`,
@@ -163,7 +209,7 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS content_results (
         id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES content_runs(id) ON DELETE CASCADE,
         tool TEXT NOT NULL, result_key TEXT NOT NULL, primary_value TEXT NOT NULL, secondary_value TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'success', tags_json TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'success', error_message TEXT NOT NULL DEFAULT '', tags_json TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT '',
         metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(run_id, result_key)
       )`,
@@ -223,14 +269,17 @@ export async function ensureSchema() {
         UNIQUE(source_id, message_id)
       )`,
       `CREATE INDEX IF NOT EXISTS telegram_messages_date_idx ON telegram_messages(message_date, id)`,
+      `CREATE INDEX IF NOT EXISTS telegram_messages_source_date_id_idx ON telegram_messages(source_id, message_date, id)`,
       `CREATE TABLE IF NOT EXISTS telegram_tool_queue (
         id TEXT PRIMARY KEY, telegram_message_id TEXT NOT NULL REFERENCES telegram_messages(id) ON DELETE CASCADE,
-        tool TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', candidate_count INTEGER NOT NULL DEFAULT 0,
+        tool TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', message_date TEXT NOT NULL DEFAULT '', candidate_count INTEGER NOT NULL DEFAULT 0, candidate_preview TEXT NOT NULL DEFAULT '',
         run_id TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', selected_at TEXT NOT NULL DEFAULT '',
         processing_at TEXT NOT NULL DEFAULT '', processed_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(telegram_message_id, tool)
       )`,
       `CREATE INDEX IF NOT EXISTS telegram_tool_queue_tool_status_idx ON telegram_tool_queue(tool, status, updated_at)`,
+      `CREATE INDEX IF NOT EXISTS telegram_tool_queue_message_status_idx ON telegram_tool_queue(telegram_message_id, status)`,
+      `CREATE INDEX IF NOT EXISTS telegram_tool_queue_tool_status_date_id_idx ON telegram_tool_queue(tool, status, message_date, id)`,
       `CREATE TABLE IF NOT EXISTS telegram_message_fingerprints (
         id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES input_sources(id) ON DELETE CASCADE,
         message_id TEXT NOT NULL, content_hash TEXT NOT NULL DEFAULT '', event_kind TEXT NOT NULL DEFAULT 'message',
@@ -293,7 +342,7 @@ export async function ensureSchema() {
       )`,
       `CREATE INDEX IF NOT EXISTS sync_transactions_created_idx ON sync_transactions(created_at)`,
       `CREATE TABLE IF NOT EXISTS task_inbox (
-        id TEXT PRIMARY KEY, tool TEXT NOT NULL, stage TEXT NOT NULL, title TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+        id TEXT PRIMARY KEY, tool TEXT NOT NULL, stage TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'received', title TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
         record_id TEXT NOT NULL DEFAULT '', source_id TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       )`,
@@ -325,6 +374,10 @@ export async function ensureSchema() {
     // migrations are checked in as well, but this bounded compatibility step
     // lets an existing database adopt the new columns before the next request.
     const columns: Array<[string, string]> = [
+      ["content_runs", "status TEXT NOT NULL DEFAULT 'completed'"],
+      ["content_runs", "stats_json TEXT NOT NULL DEFAULT '{}'"],
+      ["content_runs", "options_json TEXT NOT NULL DEFAULT '{}'"],
+      ["content_results", "error_message TEXT NOT NULL DEFAULT ''"],
       ["input_sources", "connection_id TEXT NOT NULL DEFAULT ''"],
       ["input_sources", "external_chat_id TEXT NOT NULL DEFAULT ''"],
       ["input_sources", "chat_type TEXT NOT NULL DEFAULT ''"],
@@ -337,7 +390,10 @@ export async function ensureSchema() {
       ["input_sources", "sync_cursor_message_id TEXT NOT NULL DEFAULT ''"],
       ["input_sources", "sync_target_message_id TEXT NOT NULL DEFAULT ''"],
       ["input_sources", "last_error TEXT NOT NULL DEFAULT ''"],
-      ["tool_source_bindings", "history_mode TEXT NOT NULL DEFAULT 'since_now'"],
+      [
+        "tool_source_bindings",
+        "history_mode TEXT NOT NULL DEFAULT 'since_now'",
+      ],
       ["tool_source_bindings", "history_limit INTEGER NOT NULL DEFAULT 0"],
       ["tool_source_bindings", "history_from TEXT NOT NULL DEFAULT ''"],
       ["tool_source_bindings", "bound_at_message_id TEXT NOT NULL DEFAULT ''"],
@@ -348,13 +404,24 @@ export async function ensureSchema() {
       ["telegram_messages", "content_hash TEXT NOT NULL DEFAULT ''"],
       ["telegram_messages", "remote_edited_at TEXT NOT NULL DEFAULT ''"],
       ["telegram_messages", "remote_deleted_at TEXT NOT NULL DEFAULT ''"],
-      ["telegram_message_fingerprints", "content_hash TEXT NOT NULL DEFAULT ''"],
-      ["telegram_message_fingerprints", "event_kind TEXT NOT NULL DEFAULT 'message'"],
-      ["telegram_message_fingerprints", "last_remote_update_id TEXT NOT NULL DEFAULT ''"],
+      [
+        "telegram_message_fingerprints",
+        "content_hash TEXT NOT NULL DEFAULT ''",
+      ],
+      [
+        "telegram_message_fingerprints",
+        "event_kind TEXT NOT NULL DEFAULT 'message'",
+      ],
+      [
+        "telegram_message_fingerprints",
+        "last_remote_update_id TEXT NOT NULL DEFAULT ''",
+      ],
       ["telegram_message_fingerprints", "updated_at TEXT NOT NULL DEFAULT ''"],
       ["telegram_tool_queue", "error_message TEXT NOT NULL DEFAULT ''"],
       ["telegram_tool_queue", "selected_at TEXT NOT NULL DEFAULT ''"],
       ["telegram_tool_queue", "processing_at TEXT NOT NULL DEFAULT ''"],
+      ["telegram_tool_queue", "candidate_preview TEXT NOT NULL DEFAULT ''"],
+      ["telegram_tool_queue", "message_date TEXT NOT NULL DEFAULT ''"],
       ["telegram_bot_state", "webhook_status TEXT NOT NULL DEFAULT 'unknown'"],
       ["telegram_bot_state", "last_checked_at TEXT NOT NULL DEFAULT ''"],
       ["telegram_sync_runs", "edited_count INTEGER NOT NULL DEFAULT 0"],
@@ -363,30 +430,85 @@ export async function ensureSchema() {
       ["telegram_auth_flows", "encrypted_challenge TEXT NOT NULL DEFAULT ''"],
       ["sync_transactions", "edited_count INTEGER NOT NULL DEFAULT 0"],
       ["sync_transactions", "deleted_count INTEGER NOT NULL DEFAULT 0"],
+      ["task_inbox", "phase TEXT NOT NULL DEFAULT 'received'"],
     ];
     for (const [table, definition] of columns) {
       try {
         await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${definition}`).run();
       } catch (error) {
-        if (!/duplicate column|already exists/i.test(String(error))) throw error;
+        if (!/duplicate column|already exists/i.test(String(error)))
+          throw error;
       }
     }
     await db.batch([
-      db.prepare("UPDATE input_sources SET connection_id=CASE WHEN kind='telegram_bot' THEN 'telegram-bot' WHEN kind='telegram_personal' THEN 'telegram-personal' ELSE 'legacy-' || kind END WHERE connection_id=''"),
-      db.prepare("UPDATE input_sources SET external_chat_id=external_key WHERE external_chat_id=''"),
-      db.prepare("UPDATE telegram_messages SET connection_id=(SELECT connection_id FROM input_sources WHERE input_sources.id=telegram_messages.source_id), external_message_id=message_id WHERE external_message_id=''"),
-      db.prepare("DELETE FROM telegram_auth_flows WHERE encrypted_challenge='' AND challenge_json<>'{}'"),
-      db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS input_sources_connection_chat_uq ON input_sources(connection_id, external_chat_id)"),
-      db.prepare("CREATE INDEX IF NOT EXISTS input_sources_connection_status_idx ON input_sources(connection_id, access_status, updated_at)"),
-      db.prepare("INSERT OR IGNORE INTO telegram_connections(connection_id,kind,label,status,account_key,account_label,username,session_encrypted,network_status,last_connected_at,last_success_at,last_error,created_at,updated_at) SELECT 'telegram-personal','personal','Telegram 个人账号',status,account_key,account_label,'',encrypted_session,'unknown','',updated_at,'',created_at,updated_at FROM telegram_accounts"),
-      db.prepare("INSERT OR IGNORE INTO telegram_connections(connection_id,kind,label,status,created_at,updated_at) VALUES ('telegram-bot','bot','Telegram Bot','disconnected',datetime('now'),datetime('now'))"),
+      db.prepare(
+        "UPDATE input_sources SET connection_id=CASE WHEN kind='telegram_bot' THEN 'telegram-bot' WHEN kind='telegram_personal' THEN 'telegram-personal' ELSE 'legacy-' || kind END WHERE connection_id=''",
+      ),
+      db.prepare(
+        "UPDATE input_sources SET external_chat_id=external_key WHERE external_chat_id=''",
+      ),
+      db.prepare(
+        "UPDATE telegram_messages SET connection_id=(SELECT connection_id FROM input_sources WHERE input_sources.id=telegram_messages.source_id), external_message_id=message_id WHERE external_message_id=''",
+      ),
+      db.prepare(
+        "UPDATE telegram_tool_queue SET message_date=COALESCE((SELECT message_date FROM telegram_messages WHERE telegram_messages.id=telegram_tool_queue.telegram_message_id),'') WHERE message_date=''",
+      ),
+      db.prepare(
+        "DELETE FROM telegram_auth_flows WHERE encrypted_challenge='' AND challenge_json<>'{}'",
+      ),
+      db.prepare(`UPDATE task_inbox SET phase=CASE
+        WHEN stage IN ('pending','new','queued') THEN 'received'
+        WHEN stage='filtered' THEN 'filtered'
+        WHEN stage IN ('running','website','processing','in_progress','paused','pause') THEN 'website'
+        WHEN stage IN ('needs_manual','review','needs_review','needs_attention','manual','partial_completed','partial','partially_completed','partial_success') THEN 'review'
+        WHEN stage IN ('retry_waiting','error','failed','retry','retrying','retry_pending','waiting_retry') THEN 'error'
+        WHEN stage IN ('completed','success','succeeded','done','complete','cancelled','canceled','aborted') THEN 'completed'
+        ELSE 'review' END
+        WHERE phase='' OR (phase='received' AND stage NOT IN ('pending','new','queued'))`),
+      db.prepare(
+        "CREATE UNIQUE INDEX IF NOT EXISTS input_sources_connection_chat_uq ON input_sources(connection_id, external_chat_id)",
+      ),
+      db.prepare(
+        "CREATE INDEX IF NOT EXISTS input_sources_connection_status_idx ON input_sources(connection_id, access_status, updated_at)",
+      ),
+      db.prepare(
+        "CREATE INDEX IF NOT EXISTS telegram_messages_source_date_id_idx ON telegram_messages(source_id, message_date, id)",
+      ),
+      db.prepare(
+        "CREATE INDEX IF NOT EXISTS telegram_tool_queue_message_status_idx ON telegram_tool_queue(telegram_message_id, status)",
+      ),
+      db.prepare(
+        "CREATE INDEX IF NOT EXISTS telegram_tool_queue_tool_status_date_id_idx ON telegram_tool_queue(tool, status, message_date, id)",
+      ),
+      db.prepare(
+        "INSERT OR IGNORE INTO telegram_connections(connection_id,kind,label,status,account_key,account_label,username,session_encrypted,network_status,last_connected_at,last_success_at,last_error,created_at,updated_at) SELECT 'telegram-personal','personal','Telegram 个人账号',status,account_key,account_label,'',encrypted_session,'unknown','',updated_at,'',created_at,updated_at FROM telegram_accounts",
+      ),
+      db.prepare(
+        "INSERT OR IGNORE INTO telegram_connections(connection_id,kind,label,status,created_at,updated_at) VALUES ('telegram-bot','bot','Telegram Bot','disconnected',datetime('now'),datetime('now'))",
+      ),
     ]);
-    const legacyOffsetRow = await db.prepare("SELECT value_json FROM app_settings WHERE key='telegramBotOffset'").first<{ value_json: string }>();
+    const legacyOffsetRow = await db
+      .prepare(
+        "SELECT value_json FROM app_settings WHERE key='telegramBotOffset'",
+      )
+      .first<{ value_json: string }>();
     if (legacyOffsetRow) {
       let legacyOffset = 0;
-      try { legacyOffset = Math.max(0, Number(JSON.parse(legacyOffsetRow.value_json)) || 0); } catch { legacyOffset = 0; }
+      try {
+        legacyOffset = Math.max(
+          0,
+          Number(JSON.parse(legacyOffsetRow.value_json)) || 0,
+        );
+      } catch {
+        legacyOffset = 0;
+      }
       if (legacyOffset > 0) {
-        await db.prepare("UPDATE telegram_bot_state SET next_update_offset=MAX(next_update_offset,?),last_update_id=MAX(last_update_id,?),updated_at=? WHERE connection_id='telegram-bot'").bind(legacyOffset, legacyOffset - 1, nowIso()).run();
+        await db
+          .prepare(
+            "UPDATE telegram_bot_state SET next_update_offset=MAX(next_update_offset,?),last_update_id=MAX(last_update_id,?),updated_at=? WHERE connection_id='telegram-bot'",
+          )
+          .bind(legacyOffset, legacyOffset - 1, nowIso())
+          .run();
       }
     }
     await probeCurrentSchema(db);
@@ -491,7 +613,9 @@ export async function dashboardSummary() {
   const db = getD1();
   const [records, runs, migrations] = await db.batch([
     db.prepare("SELECT COUNT(*) AS count FROM permanent_records"),
-    db.prepare("SELECT COUNT(*) AS count FROM content_runs WHERE input_kind NOT LIKE '__building__:%'"),
+    db.prepare(
+      "SELECT COUNT(*) AS count FROM content_runs WHERE input_kind NOT LIKE '__building__:%'",
+    ),
     db.prepare(
       "SELECT COUNT(*) AS count FROM import_batches WHERE status='applied'",
     ),
@@ -510,6 +634,8 @@ export async function saveRun(input: {
   startAt?: string;
   endAt?: string;
   sourceSummary?: string;
+  stats?: Partial<ProcessingStats>;
+  options?: Record<string, unknown>;
   results: ToolResult[];
 }) {
   await ensureSchema();
@@ -542,7 +668,9 @@ export async function saveRun(input: {
   const values = [...unique.values()];
   const overwrittenIds: string[] = [];
   for (let offset = 0; offset < values.length; offset += 80) {
-    const keys = values.slice(offset, offset + 80).map((item) => item.resultKey);
+    const keys = values
+      .slice(offset, offset + 80)
+      .map((item) => item.resultKey);
     if (!keys.length) continue;
     const existing = await db
       .prepare(
@@ -557,47 +685,143 @@ export async function saveRun(input: {
     );
   }
   const overwriteSnapshotId = overwrittenIds.length
-    ? await createRecordSnapshot(
-        overwrittenIds,
-        `保存 ${name} 前自动恢复点`,
-      )
+    ? await createRecordSnapshot(overwrittenIds, `保存 ${name} 前自动恢复点`)
     : "";
   const inputKind = String(input.inputKind ?? "manual").slice(0, 45);
   const buildingKind = `__building__:${inputKind}`;
-  await db.prepare(`INSERT INTO content_runs
-    (id,tool,name,input_kind,start_at,end_at,source_summary,total_count,result_count,error_count,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(runId, tool, name, buildingKind, String(input.startAt ?? "").slice(0, 40), String(input.endAt ?? "").slice(0, 40), String(input.sourceSummary ?? "").slice(0, 2000), results.length, unique.size, 0, timestamp, timestamp)
+  const stats = {
+    inputFileCount: 0,
+    parsedFileCount: 0,
+    failedFileCount: 0,
+    parsedMessageCount: 0,
+    inRangeMessageCount: 0,
+    candidateCount: results.length,
+    duplicateCount: Math.max(0, results.length - unique.size),
+    ruleExcludedCount: 0,
+    errorCount: 0,
+    ...(input.stats || {}),
+    resultCount: unique.size,
+  };
+  const runStatus =
+    Number(stats.errorCount || 0) > 0
+      ? unique.size
+        ? "partial_completed"
+        : "error"
+      : "completed";
+  await db
+    .prepare(
+      `INSERT INTO content_runs
+    (id,tool,name,input_kind,start_at,end_at,source_summary,status,stats_json,options_json,total_count,result_count,error_count,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .bind(
+      runId,
+      tool,
+      name,
+      buildingKind,
+      String(input.startAt ?? "").slice(0, 40),
+      String(input.endAt ?? "").slice(0, 40),
+      String(input.sourceSummary ?? "").slice(0, 2000),
+      runStatus,
+      json(stats, {}),
+      json(input.options, {}),
+      Number(stats.inRangeMessageCount || results.length),
+      unique.size,
+      Number(stats.errorCount || 0),
+      timestamp,
+      timestamp,
+    )
     .run();
   try {
     // Large runs are staged in bounded batches. They stay invisible and cannot
     // modify permanent records until the final D1 transaction commits.
     for (let offset = 0; offset < values.length; offset += 40) {
       const chunk = values.slice(offset, offset + 40);
-      await db.batch(chunk.map((item, chunkIndex) => {
-        // The result id carries a stable zero-padded sequence because the
-        // existing schema has no ordinal column. All history readers order by
-        // created_at,id, so this preserves Windows first-seen output order.
-        const id = `${runId}:${String(offset + chunkIndex).padStart(6, "0")}`;
-        const status = String(item.status ?? (tool === "missav" ? "pending" : "success")).slice(0, 64);
-        const secondary = String(item.secondaryValue ?? "").slice(0, 4000);
-        const tags = Array.isArray(item.tags) ? item.tags.slice(0, 200) : [];
-        const actressTags = Array.isArray(item.actressTags) ? item.actressTags.slice(0, 200) : [];
-        const genreTags = Array.isArray(item.genreTags) ? item.genreTags.slice(0, 200) : [];
-        const source = String(item.source ?? "").slice(0, 1000);
-        const permanentSource = safeHttpUrl([source, secondary, item.primaryValue].find((value) => /^https?:\/\//i.test(String(value ?? ""))) || "");
-        const missavUrl = tool === "missav" && /\/\/(?:[^/]+\.)?missav\.(?:ai|ws)\//i.test(permanentSource) ? permanentSource : "";
-        const av123Url = tool === "av123" && /\/\/(?:[^/]+\.)?123av\.com\//i.test(permanentSource) ? permanentSource : "";
-        const baseMetadata = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata : {};
-        const metadata = json({ ...baseMetadata, __runStage: { actressTags, genreTags, permanentSource, missavUrl, av123Url } }, {});
-        return db.prepare(`INSERT INTO content_results
-          (id,run_id,tool,result_key,primary_value,secondary_value,status,tags_json,source,metadata_json,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .bind(id, runId, tool, item.resultKey, item.primaryValue, secondary, status, json(tags, []), source, metadata, timestamp, timestamp);
-      }));
+      await db.batch(
+        chunk.map((item, chunkIndex) => {
+          // The result id carries a stable zero-padded sequence because the
+          // existing schema has no ordinal column. All history readers order by
+          // created_at,id, so this preserves Windows first-seen output order.
+          const id = `${runId}:${String(offset + chunkIndex).padStart(6, "0")}`;
+          const status = String(
+            item.status ?? (tool === "missav" ? "pending" : "success"),
+          ).slice(0, 64);
+          const secondary = String(item.secondaryValue ?? "").slice(0, 4000);
+          const tags = Array.isArray(item.tags) ? item.tags.slice(0, 200) : [];
+          const actressTags = Array.isArray(item.actressTags)
+            ? item.actressTags.slice(0, 200)
+            : [];
+          const genreTags = Array.isArray(item.genreTags)
+            ? item.genreTags.slice(0, 200)
+            : [];
+          const source = String(item.source ?? "").slice(0, 1000);
+          const permanentSource = safeHttpUrl(
+            [source, secondary, item.primaryValue].find((value) =>
+              /^https?:\/\//i.test(String(value ?? "")),
+            ) || "",
+          );
+          const missavUrl =
+            tool === "missav" &&
+            /\/\/(?:[^/]+\.)?missav\.(?:ai|ws)\//i.test(permanentSource)
+              ? permanentSource
+              : "";
+          const av123Url =
+            tool === "av123" &&
+            /\/\/(?:[^/]+\.)?123av\.com\//i.test(permanentSource)
+              ? permanentSource
+              : "";
+          const baseMetadata =
+            item.metadata &&
+            typeof item.metadata === "object" &&
+            !Array.isArray(item.metadata)
+              ? item.metadata
+              : {};
+          const errorMessage = String(item.error || item.remark || "").slice(
+            0,
+            2_000,
+          );
+          const metadata = json(
+            {
+              ...baseMetadata,
+              error: errorMessage,
+              __runStage: {
+                actressTags,
+                genreTags,
+                permanentSource,
+                missavUrl,
+                av123Url,
+              },
+            },
+            {},
+          );
+          return db
+            .prepare(
+              `INSERT INTO content_results
+          (id,run_id,tool,result_key,primary_value,secondary_value,status,error_message,tags_json,source,metadata_json,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            )
+            .bind(
+              id,
+              runId,
+              tool,
+              item.resultKey,
+              item.primaryValue,
+              secondary,
+              status,
+              errorMessage,
+              json(tags, []),
+              source,
+              metadata,
+              timestamp,
+              timestamp,
+            );
+        }),
+      );
     }
     await db.batch([
-      db.prepare(`INSERT INTO permanent_records
+      db
+        .prepare(
+          `INSERT INTO permanent_records
         (id,tool,record_key,primary_value,secondary_value,status,tags_json,actress_tags_json,genre_tags_json,source_url,missav_url,av123_url,metadata_json,created_at,updated_at)
         SELECT id,tool,result_key,primary_value,secondary_value,status,tags_json,
           COALESCE(json_extract(metadata_json,'$.__runStage.actressTags'),'[]'),
@@ -614,16 +838,77 @@ export async function saveRun(input: {
           source_url=CASE WHEN excluded.source_url<>'' THEN excluded.source_url ELSE permanent_records.source_url END,
           missav_url=CASE WHEN excluded.missav_url<>'' THEN excluded.missav_url ELSE permanent_records.missav_url END,
           av123_url=CASE WHEN excluded.av123_url<>'' THEN excluded.av123_url ELSE permanent_records.av123_url END,
-          metadata_json=excluded.metadata_json,updated_at=excluded.updated_at`).bind(runId),
-      db.prepare("UPDATE content_results SET metadata_json=json_remove(metadata_json,'$.__runStage') WHERE run_id=?").bind(runId),
-      db.prepare(`INSERT INTO task_inbox(id,tool,stage,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), tool, tool === "av123" || tool === "missav" ? "pending" : "completed", name, runId, "", "", json({ total: unique.size, success: tool === "av123" || tool === "missav" ? 0 : unique.size, empty: 0, error: 0, actualSpeed: 0, etaSeconds: 0, lastActivityAt: timestamp, overwriteSnapshotId }, {}), timestamp, timestamp),
-      db.prepare("UPDATE content_runs SET input_kind=?,updated_at=? WHERE id=? AND input_kind=?").bind(inputKind, timestamp, runId, buildingKind),
+          metadata_json=excluded.metadata_json,updated_at=excluded.updated_at`,
+        )
+        .bind(runId),
+      db
+        .prepare(
+          "UPDATE content_results SET metadata_json=json_remove(metadata_json,'$.__runStage') WHERE run_id=?",
+        )
+        .bind(runId),
+      db
+        .prepare(
+          `INSERT INTO task_inbox(id,tool,stage,phase,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          tool,
+          Number(stats.errorCount || 0) > 0
+            ? "retry_waiting"
+            : tool === "av123" || tool === "missav"
+              ? "running"
+              : "completed",
+          Number(stats.errorCount || 0) > 0
+            ? "error"
+            : tool === "av123" || tool === "missav"
+              ? "website"
+              : "completed",
+          name,
+          runId,
+          "",
+          "",
+          json(
+            {
+              ...stats,
+              total: Number(stats.inRangeMessageCount || unique.size),
+              success: tool === "av123" || tool === "missav" ? 0 : unique.size,
+              empty: Math.max(
+                0,
+                Number(stats.inRangeMessageCount || 0) -
+                  Number(stats.candidateCount || 0),
+              ),
+              error: Number(stats.errorCount || 0),
+              actualSpeed: 0,
+              etaSeconds: 0,
+              lastActivityAt: timestamp,
+              overwriteSnapshotId,
+              sourceSummary: String(input.sourceSummary || ""),
+            },
+            {},
+          ),
+          timestamp,
+          timestamp,
+        ),
+      db
+        .prepare(
+          "UPDATE content_runs SET input_kind=?,updated_at=? WHERE id=? AND input_kind=?",
+        )
+        .bind(inputKind, timestamp, runId, buildingKind),
     ]);
   } catch (error) {
     // A failed stage is never listed as history. Best-effort cleanup removes
     // the run and its cascading staged rows without touching permanent data.
-    try { await db.prepare("DELETE FROM content_runs WHERE id=? AND input_kind LIKE '__building__:%'").bind(runId).run(); } catch { /* hidden orphan remains recoverable */ }
+    try {
+      await db
+        .prepare(
+          "DELETE FROM content_runs WHERE id=? AND input_kind LIKE '__building__:%'",
+        )
+        .bind(runId)
+        .run();
+    } catch {
+      /* hidden orphan remains recoverable */
+    }
     throw error;
   }
   await writeLog("info", "run", `已保存 ${tool} 处理历史`, {
@@ -733,7 +1018,9 @@ export async function exportSelectedRuns(
     const placeholders = chunk.map(() => "?").join(",");
     const [runRows, resultRows] = await getD1().batch([
       getD1()
-        .prepare(`SELECT * FROM content_runs WHERE input_kind NOT LIKE '__building__:%' AND id IN (${placeholders})`)
+        .prepare(
+          `SELECT * FROM content_runs WHERE input_kind NOT LIKE '__building__:%' AND id IN (${placeholders})`,
+        )
         .bind(...chunk),
       getD1()
         .prepare(
@@ -742,15 +1029,29 @@ export async function exportSelectedRuns(
         .bind(...chunk),
     ]);
     runs.push(...((runRows.results ?? []) as Array<Record<string, unknown>>));
-    results.push(...((resultRows.results ?? []) as Array<Record<string, unknown>>));
+    results.push(
+      ...((resultRows.results ?? []) as Array<Record<string, unknown>>),
+    );
   }
   if (results.length > 100_000)
     throw new Error("历史导出超过 100,000 条结果，请缩小筛选范围");
   const order = new Map(unique.map((id, index) => [id, index]));
   runs.sort(
-    (a, b) =>
-      (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0),
+    (a, b) => (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0),
   );
+  const resultModels = results.map((row) => {
+    const metadata = parsed<Record<string, unknown>>(row.metadata_json, {});
+    return {
+      resultKey: String(row.result_key || row.id || ""),
+      primaryValue: String(row.primary_value || ""),
+      secondaryValue: String(row.secondary_value || ""),
+      status: String(row.status || ""),
+      tags: parsed<string[]>(row.tags_json, []),
+      source: String(row.source || ""),
+      error: String(row.error_message || metadata.error || ""),
+      metadata,
+    } satisfies ToolResult;
+  });
   if (format === "json")
     return JSON.stringify(
       {
@@ -763,19 +1064,45 @@ export async function exportSelectedRuns(
     );
   if (format === "txt")
     return runs
-      .map(
-        (run) =>
-          `${run.tool}\t${run.name}\t${run.result_count}\t${run.created_at}`,
-      )
+      .flatMap((run) => {
+        const rows = results
+          .map((row, index) => ({ row, model: resultModels[index] }))
+          .filter(({ row }) => String(row.run_id) === String(run.id))
+          .map(({ model }) => model);
+        const text = toolFieldText(cleanTool(run.tool), rows, "primary");
+        return text ? text.split("\r\n") : [];
+      })
       .join("\r\n");
+  const tools = new Set(runs.map((run) => String(run.tool)));
+  if (format === "csv" && tools.size === 1) {
+    return toolCsv(cleanTool(runs[0]?.tool), resultModels);
+  }
   const byRun = new Map(runs.map((run) => [String(run.id), run]));
   return `\uFEFF${[
-    ["run_id", "tool", "run_name", "primary", "secondary", "status", "source", "created_at"]
+    [
+      "run_id",
+      "tool",
+      "run_name",
+      "primary",
+      "secondary",
+      "status",
+      "source",
+      "created_at",
+    ]
       .map(csvSafe)
       .join(","),
     ...results.map((row) => {
       const run = byRun.get(String(row.run_id)) || {};
-      return [row.run_id, row.tool, run.name, row.primary_value, row.secondary_value, row.status, row.source, row.created_at]
+      return [
+        row.run_id,
+        row.tool,
+        run.name,
+        row.primary_value,
+        row.secondary_value,
+        row.status,
+        row.source,
+        row.created_at,
+      ]
         .map(csvSafe)
         .join(",");
     }),
@@ -801,7 +1128,11 @@ export async function getRun(id: string, resultPage = 1, resultPageSize = 100) {
     Math.max(20, Math.trunc(Number(resultPageSize) || 100)),
   );
   const [run, count, results] = await db.batch([
-    db.prepare("SELECT * FROM content_runs WHERE id=? AND input_kind NOT LIKE '__building__:%'").bind(id),
+    db
+      .prepare(
+        "SELECT * FROM content_runs WHERE id=? AND input_kind NOT LIKE '__building__:%'",
+      )
+      .bind(id),
     db
       .prepare("SELECT COUNT(*) AS count FROM content_results WHERE run_id=?")
       .bind(id),
@@ -824,7 +1155,11 @@ export async function getRun(id: string, resultPage = 1, resultPageSize = 100) {
 export async function exportRunResults(id: string) {
   await ensureSchema();
   const [run, rows] = await getD1().batch([
-    getD1().prepare("SELECT * FROM content_runs WHERE id=? AND input_kind NOT LIKE '__building__:%'").bind(id),
+    getD1()
+      .prepare(
+        "SELECT * FROM content_runs WHERE id=? AND input_kind NOT LIKE '__building__:%'",
+      )
+      .bind(id),
     getD1()
       .prepare(
         "SELECT * FROM content_results WHERE run_id=? ORDER BY created_at,id LIMIT 100001",
