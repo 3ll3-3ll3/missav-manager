@@ -104,12 +104,12 @@ export function buildRaindropExport(records: RecordRow[], exportBlacklistValues:
       const audit = audits.find((item) => item.id === row.id)!;
       return `<DT><A HREF="${escapeHtml(audit.url)}" ADD_DATE="${Math.floor(new Date(row.createdAt).getTime() / 1000) || 0}" TAGS="${escapeHtml([...row.tags, ...row.actressTags, ...row.genreTags].join(","))}">${escapeHtml(row.primaryValue)}</A>`;
     }).join("\n");
-    return { content: `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n<TITLE>MissAV Manager</TITLE>\n<H1>MissAV Manager</H1>\n<DL><p>\n${links}\n</DL><p>`, included: included.length, excluded: records.length - included.length, audits };
+    return { content: `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n<TITLE>TG 内容工具箱</TITLE>\n<H1>TG 内容工具箱</H1>\n<DL><p>\n${links}\n</DL><p>`, included: included.length, excluded: records.length - included.length, audits };
   }
   const header = ["id", "title", "note", "excerpt", "url", "folder", "tags", "created", "cover", "highlights", "favorite"];
   const rows = included.map((row, index) => {
     const audit = audits.find((item) => item.id === row.id)!;
-    return [index + 1, row.primaryValue, row.status, "", audit.url, "MissAV Manager", [...row.tags, ...row.actressTags, ...row.genreTags].join(","), row.createdAt, "", "", "false"].map(csvSafe).join(",");
+    return [index + 1, row.primaryValue, row.status, "", audit.url, "TG 内容工具箱", [...row.tags, ...row.actressTags, ...row.genreTags].join(","), row.createdAt, "", "", "false"].map(csvSafe).join(",");
   });
   return { content: `\uFEFF${[header.map(csvSafe).join(","), ...rows].join("\r\n")}`, included: included.length, excluded: records.length - included.length, audits };
 }

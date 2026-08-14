@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ToolId, ToolResult } from "../../lib/types";
+import type { ProcessingStats } from "../../lib/rules";
+import {
+  isTableRowSelected,
+  selectedTableCount,
+  toggleTablePage,
+  toggleTableRow,
+  type TableSelection,
+} from "../../lib/table-selection";
+import ErrorNotice, { toUiError, type UiError } from "./error-notice";
+
 type Run = {
   id: string;
   tool: string;
@@ -16,53 +27,197 @@ type Detail = {
   page: number;
   pageSize: number;
 };
+
 async function api(url: string, options?: RequestInit) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, { cache: "no-store", ...options });
   const payload = await response.json().catch(() => ({ error: "请求失败" }));
   if (!response.ok) throw new Error(payload.error || "请求失败");
   return payload;
 }
 
-export default function HistoryPanel({ refreshKey }: { refreshKey: number }) {
+function download(name: string, content: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+export default function HistoryPanel({
+  refreshKey,
+  toolId,
+  onLoadRun,
+}: {
+  refreshKey: number;
+  toolId?: ToolId;
+  onLoadRun?: (detail: {
+    runId: string;
+    results: ToolResult[];
+    stats?: Partial<ProcessingStats>;
+    startAt?: string;
+    endAt?: string;
+  }) => void;
+}) {
   const [rows, setRows] = useState<Run[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
   const [search, setSearch] = useState("");
-  const [tool, setTool] = useState("");
+  const [tool, setTool] = useState(toolId || "");
+  const [sort, setSort] = useState("createdAt");
+  const [direction, setDirection] = useState<"asc" | "desc">("desc");
+  const [selection, setSelection] = useState<TableSelection>({
+    mode: "ids",
+    ids: new Set(),
+  });
+  const [focused, setFocused] = useState(0);
+  const [showSource, setShowSource] = useState(true);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [detailPage, setDetailPage] = useState(1);
   const [notice, setNotice] = useState("");
+  const [error, setError] = useState<UiError | null>(null);
   const [renameName, setRenameName] = useState("");
-  const load = useCallback(() => {
+  const anchor = useRef<number | null>(null);
+  const filters = useMemo(() => ({ search, tool }), [search, tool]);
+  const pageIds = rows.map((row) => row.id);
+  const selectedCount = selectedTableCount(selection, total);
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const detailPages = Math.max(1, Math.ceil((detail?.total || 0) / 100));
+
+  const load = useCallback(async () => {
     const params = new URLSearchParams({
       search,
       tool,
+      sort,
+      direction,
       page: String(page),
-      pageSize: "30",
+      pageSize: String(pageSize),
     });
-    api(`/api/runs?${params}`)
-      .then((payload) => {
-        setRows(payload.rows);
-        setTotal(payload.total);
-      })
-      .catch((error) => setNotice(error.message));
-  }, [search, tool, page]);
+    try {
+      const payload = await api(`/api/runs?${params}`);
+      setRows(payload.rows || []);
+      setTotal(Number(payload.total || 0));
+      setError(null);
+    } catch (reason) {
+      setError(toUiError(reason, "历史读取失败"));
+    }
+  }, [search, tool, sort, direction, page, pageSize]);
+
   useEffect(() => {
-    const timer = setTimeout(load, 200);
+    const timer = setTimeout(() => void load(), search ? 180 : 0);
     return () => clearTimeout(timer);
-  }, [load, refreshKey]);
+  }, [load, refreshKey, search]);
+
+  function resetSelection() {
+    setSelection({ mode: "ids", ids: new Set() });
+    anchor.current = null;
+  }
+  function selectionPayload() {
+    return selection.mode === "all"
+      ? { mode: "all", excludeIds: [...selection.excluded], filters }
+      : { mode: "ids", ids: [...selection.ids] };
+  }
+
   async function open(id: string, nextPage = 1) {
     try {
       const payload = await api(
-        `/api/runs?id=${id}&resultPage=${nextPage}&resultPageSize=100`,
+        `/api/runs?id=${encodeURIComponent(id)}&resultPage=${nextPage}&resultPageSize=100`,
       );
       setDetail(payload);
       setDetailPage(nextPage);
       setRenameName(payload.run.name);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "读取失败");
+      setError(null);
+    } catch (reason) {
+      setError(toUiError(reason, "历史详情读取失败"));
     }
   }
+
+  function parseJsonList(value: unknown) {
+    try {
+      const parsed = JSON.parse(String(value || "[]"));
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function parseJsonObject(value: unknown) {
+    try {
+      const parsed = JSON.parse(String(value || "{}"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  async function loadRunIntoWorkspace(id: string) {
+    if (!onLoadRun) return;
+    try {
+      const first = await api(
+        `/api/runs?id=${encodeURIComponent(id)}&resultPage=1&resultPageSize=100`,
+      );
+      const pages = Math.max(1, Math.ceil(Number(first.total || 0) / 100));
+      const all = [...(first.results || [])] as Array<Record<string, unknown>>;
+      for (let nextPage = 2; nextPage <= pages; nextPage += 1) {
+        const part = await api(
+          `/api/runs?id=${encodeURIComponent(id)}&resultPage=${nextPage}&resultPageSize=100`,
+        );
+        all.push(...(part.results || []));
+      }
+      onLoadRun({
+        runId: id,
+        stats: parseJsonObject(first.run?.stats_json) as Partial<ProcessingStats>,
+        startAt: String(first.run?.start_at || ""),
+        endAt: String(first.run?.end_at || ""),
+        results: all.map((row) => ({
+          resultKey: String(row.result_key || row.id || ""),
+          primaryValue: String(row.primary_value || ""),
+          secondaryValue: String(row.secondary_value || ""),
+          status: String(row.status || ""),
+          error: String(row.error_message || ""),
+          tags: parseJsonList(row.tags_json),
+          source: String(row.source || ""),
+          metadata: parseJsonObject(row.metadata_json),
+        })),
+      });
+    } catch (reason) {
+      setError(toUiError(reason, "历史任务载入失败"));
+    }
+  }
+
+  async function loadSelectedRun() {
+    if (selection.mode !== "ids" || selection.ids.size !== 1) return;
+    await loadRunIntoWorkspace([...selection.ids][0]);
+  }
+
+  function selectRow(index: number, event: React.MouseEvent) {
+    const next = toggleTableRow(
+      selection,
+      pageIds,
+      index,
+      anchor.current,
+      event,
+    );
+    anchor.current = next.anchor;
+    setSelection(next.selection);
+    setFocused(index);
+    void open(rows[index].id);
+  }
+
+  function sortBy(field: string) {
+    if (sort === field)
+      setDirection((value) => (value === "asc" ? "desc" : "asc"));
+    else {
+      setSort(field);
+      setDirection("asc");
+    }
+    setPage(1);
+    resetSelection();
+  }
+
   async function rename() {
     if (!detail || !renameName.trim()) return;
     try {
@@ -72,98 +227,294 @@ export default function HistoryPanel({ refreshKey }: { refreshKey: number }) {
         body: JSON.stringify({ id: detail.run.id, name: renameName }),
       });
       setNotice("历史名称已更新");
-      await open(detail.run.id, detailPage);
-      load();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "重命名失败");
+      await Promise.all([open(detail.run.id, detailPage), load()]);
+    } catch (reason) {
+      setError(toUiError(reason, "历史重命名失败"));
     }
   }
-  async function remove(run: Run) {
+
+  async function exportSelection(format: "txt" | "csv" | "json", copy = false) {
+    if (!selectedCount) return;
+    try {
+      const result = await api("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "selection-export",
+          format,
+          ...selectionPayload(),
+        }),
+      });
+      if (copy) {
+        await navigator.clipboard.writeText(result.content);
+        setNotice(`已复制 ${result.count} 个历史批次`);
+      } else
+        download(
+          `history.${format}`,
+          result.content,
+          format === "json"
+            ? "application/json"
+            : format === "csv"
+              ? "text/csv;charset=utf-8"
+              : "text/plain;charset=utf-8",
+        );
+    } catch (reason) {
+      setError(toUiError(reason, copy ? "历史复制失败" : "历史导出失败"));
+    }
+  }
+
+  async function removeSelected() {
+    if (!selectedCount) return;
     if (
       !window.confirm(
-        `删除历史“${run.name}”？系统会先建立恢复点，永久记录不会被删除。`,
+        `删除 ${selectedCount.toLocaleString()} 个历史批次？每个批次都会先建立恢复点，永久记录不会删除。`,
       )
     )
       return;
     try {
-      const result = await api(`/api/runs?id=${run.id}`, { method: "DELETE" });
-      if (detail?.run.id === run.id) setDetail(null);
+      const result = await api("/api/runs", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(selectionPayload()),
+      });
       setNotice(
-        result.snapshotId
-          ? `历史已删除；恢复点 ${result.snapshotId.slice(0, 8)}… 已保存`
-          : "历史已删除并已保存恢复点",
+        `已删除 ${result.deleted} 个历史批次，并建立 ${result.snapshotIds?.length || 0} 个恢复点`,
       );
-      load();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "删除失败");
+      if (
+        detail &&
+        (selection.mode === "all" ||
+          (selection.mode === "ids" && selection.ids.has(detail.run.id)))
+      )
+        setDetail(null);
+      resetSelection();
+      await load();
+    } catch (reason) {
+      setError(toUiError(reason, "历史删除失败"));
     }
   }
-  const pages = Math.max(1, Math.ceil(total / 30));
-  const detailPages = Math.max(1, Math.ceil((detail?.total || 0) / 100));
+
+  function keyboard(event: React.KeyboardEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement).closest("input,select,button,textarea"))
+      return;
+    const modifier = event.ctrlKey || event.metaKey;
+    if (modifier && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      setSelection({ mode: "all", excluded: new Set() });
+    } else if (modifier && event.key.toLowerCase() === "c") {
+      event.preventDefault();
+      void exportSelection("txt", true);
+    } else if (event.key === "Delete") {
+      event.preventDefault();
+      void removeSelected();
+    } else if (event.key === "Enter" && rows[focused]) {
+      event.preventDefault();
+      void open(rows[focused].id);
+    } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      event.preventDefault();
+      setFocused((value) =>
+        Math.max(
+          0,
+          Math.min(rows.length - 1, value + (event.key === "ArrowUp" ? -1 : 1)),
+        ),
+      );
+    }
+  }
+
   return (
-    <div className="history-layout">
-      <section className="card history-list">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">永久历史</span>
-            <h3>处理批次</h3>
-          </div>
-          <span className="count-chip">{total.toLocaleString()}</span>
-        </div>
-        <div className="filter-row">
+    <div
+      className="stack-md history-workspace"
+      tabIndex={0}
+      onKeyDown={keyboard}
+    >
+      <section className="data-toolbar card">
+        <div className="searchbox">
+          <span>⌕</span>
           <input
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);
               setPage(1);
+              resetSelection();
             }}
             placeholder="搜索历史名称"
           />
+        </div>
+        {!toolId && (
           <select
             value={tool}
             onChange={(event) => {
               setTool(event.target.value);
               setPage(1);
+              resetSelection();
             }}
           >
             <option value="">全部工具</option>
-            <option value="twitter">推特</option>
+            <option value="twitter">Twitter</option>
             <option value="badnews">Bad.news</option>
             <option value="haijiao">海角</option>
             <option value="missav">MissAV</option>
             <option value="av123">123AV</option>
           </select>
+        )}
+        {onLoadRun && (
+          <button
+            className="primary"
+            disabled={selection.mode !== "ids" || selection.ids.size !== 1}
+            onClick={() => void loadSelectedRun()}
+          >
+            载入所选任务
+          </button>
+        )}
+        <button
+          onClick={() => setSelection(toggleTablePage(selection, pageIds))}
+        >
+          全选本页
+        </button>
+        <button
+          onClick={() => setSelection({ mode: "all", excluded: new Set() })}
+        >
+          全选筛选结果
+        </button>
+        <button onClick={() => setShowSource((value) => !value)}>列设置</button>
+        <button onClick={() => void load()}>刷新</button>
+      </section>
+      {notice && <div className="notice">{notice}</div>}
+      {error && <ErrorNotice error={error} retry={() => void load()} />}
+      {selectedCount > 0 && (
+        <section className="bulkbar">
+          <strong>已选 {selectedCount.toLocaleString()} 个批次</strong>
+          <button onClick={() => void exportSelection("txt", true)}>
+            复制
+          </button>
+          <button onClick={() => void exportSelection("txt")}>TXT</button>
+          <button onClick={() => void exportSelection("csv")}>CSV</button>
+          <button onClick={() => void exportSelection("json")}>JSON</button>
+          <button className="danger" onClick={() => void removeSelected()}>
+            删除并建恢复点
+          </button>
+          <button onClick={resetSelection}>清除选择</button>
+        </section>
+      )}
+      <section className="table-card history-table-card">
+        <div className="table-scroll desktop-only">
+          <table className="sheet">
+            <thead>
+              <tr>
+                <th
+                  className="check"
+                  onClick={() =>
+                    setSelection(toggleTablePage(selection, pageIds))
+                  }
+                >
+                  <input
+                    readOnly
+                    type="checkbox"
+                    checked={
+                      rows.length > 0 &&
+                      rows.every((row) => isTableRowSelected(selection, row.id))
+                    }
+                  />
+                </th>
+                <th onClick={() => sortBy("tool")}>工具</th>
+                <th onClick={() => sortBy("name")}>历史名称</th>
+                <th onClick={() => sortBy("resultCount")}>结果量</th>
+                {showSource && <th>来源</th>}
+                <th onClick={() => sortBy("createdAt")}>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((run, index) => (
+                <tr
+                  key={run.id}
+                  className={`${isTableRowSelected(selection, run.id) ? "selected" : ""} ${detail?.run.id === run.id ? "focused-row" : ""}`}
+                  onClick={(event) => selectRow(index, event)}
+                >
+                  <td className="check">
+                    <input
+                      readOnly
+                      type="checkbox"
+                      checked={isTableRowSelected(selection, run.id)}
+                    />
+                  </td>
+                  <td>
+                    <span className={`tool-chip ${run.tool}`}>{run.tool}</span>
+                  </td>
+                  <td>
+                    <strong>{run.name}</strong>
+                  </td>
+                  <td>{run.result_count.toLocaleString()}</td>
+                  {showSource && <td>{run.source_summary || "—"}</td>}
+                  <td>{new Date(run.created_at).toLocaleString("zh-CN")}</td>
+                  <td>
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void open(run.id);
+                      }}
+                    >
+                      查看 / 编辑
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-        {notice && <div className="notice">{notice}</div>}
-        <div className="run-list">
-          {rows.map((run) => (
-            <button
+        <div className="mobile-history-list mobile-only">
+          {rows.map((run, index) => (
+            <article
               key={run.id}
-              className={detail?.run.id === run.id ? "active" : ""}
-              onClick={() => open(run.id)}
+              className={`mobile-table-card ${isTableRowSelected(selection, run.id) ? "selected" : ""}`}
+              onClick={(event) => selectRow(index, event)}
             >
-              <span className={`tool-chip ${run.tool}`}>{run.tool}</span>
-              <div>
-                <strong>{run.name}</strong>
-                <small>
-                  {run.result_count.toLocaleString()} 条 ·{" "}
-                  {new Date(run.created_at).toLocaleString("zh-CN")}
-                </small>
+              <div className="mobile-card-heading">
+                <input
+                  readOnly
+                  type="checkbox"
+                  checked={isTableRowSelected(selection, run.id)}
+                />
+                <span className={`tool-chip ${run.tool}`}>{run.tool}</span>
+                <span>
+                  {new Date(run.created_at).toLocaleDateString("zh-CN")}
+                </span>
               </div>
-              <span>›</span>
-            </button>
+              <strong>{run.name}</strong>
+              <p>{run.source_summary || "无来源摘要"}</p>
+              <small>{run.result_count.toLocaleString()} 条结果</small>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void open(run.id);
+                }}
+              >
+                查看 / 编辑
+              </button>
+            </article>
           ))}
-          {!rows.length && (
-            <div className="empty compact">
-              <strong>暂无历史</strong>
-              <p>内容处理结果保存后会出现在这里。</p>
-            </div>
-          )}
         </div>
+        {!rows.length && (
+          <div className="empty compact">
+            <strong>暂无历史</strong>
+            <p>处理结果保存后会出现在这里。</p>
+          </div>
+        )}
         <footer className="pagination">
           <span>
-            第 {page} / {pages} 页
+            共 {total.toLocaleString()} 个 · 第 {page} / {pages} 页
           </span>
+          <select
+            value={pageSize}
+            onChange={(event) => {
+              setPageSize(Number(event.target.value));
+              setPage(1);
+              resetSelection();
+            }}
+          >
+            <option value="20">20 / 页</option>
+            <option value="30">30 / 页</option>
+            <option value="50">50 / 页</option>
+          </select>
           <button
             disabled={page <= 1}
             onClick={() => setPage((value) => value - 1)}
@@ -183,10 +534,18 @@ export default function HistoryPanel({ refreshKey }: { refreshKey: number }) {
           <>
             <div className="section-heading">
               <div>
-                <span className="eyebrow">批次详情</span>
+                <span className="eyebrow">历史详情</span>
                 <h3>{detail.run.name}</h3>
               </div>
               <div className="button-row">
+                {onLoadRun && (
+                  <button
+                    className="primary"
+                    onClick={() => void loadRunIntoWorkspace(detail.run.id)}
+                  >
+                    载入到结果页
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     window.location.href = `/api/export?runId=${detail.run.id}`;
@@ -194,18 +553,15 @@ export default function HistoryPanel({ refreshKey }: { refreshKey: number }) {
                 >
                   导出完整 JSON
                 </button>
-                <button className="danger" onClick={() => remove(detail.run)}>
-                  删除并建恢复点
-                </button>
               </div>
             </div>
             <div className="rename-row">
               <input
                 value={renameName}
                 onChange={(event) => setRenameName(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && rename()}
+                onKeyDown={(event) => event.key === "Enter" && void rename()}
               />
-              <button onClick={rename}>保存名称</button>
+              <button onClick={() => void rename()}>保存名称</button>
             </div>
             <dl className="detail-meta">
               <div>
@@ -238,23 +594,25 @@ export default function HistoryPanel({ refreshKey }: { refreshKey: number }) {
               </span>
               <button
                 disabled={detailPage <= 1}
-                onClick={() => open(detail.run.id, detailPage - 1)}
+                onClick={() => void open(detail.run.id, detailPage - 1)}
               >
                 上一页
               </button>
               <button
                 disabled={detailPage >= detailPages}
-                onClick={() => open(detail.run.id, detailPage + 1)}
+                onClick={() => void open(detail.run.id, detailPage + 1)}
               >
                 下一页
               </button>
             </footer>
           </>
         ) : (
-          <div className="empty">
-            <span>◷</span>
-            <strong>选择一条处理历史</strong>
-            <p>批次详情和结果均使用服务端分页，不会一次载入整批。</p>
+          <div className="empty compact">
+            <strong>选择一条历史查看详情</strong>
+            <p>
+              单击替换选择，Ctrl 切换，Shift 连选；Ctrl+A/C、方向键、Enter 和
+              Delete 可用。
+            </p>
           </div>
         )}
       </section>

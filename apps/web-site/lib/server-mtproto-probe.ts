@@ -1,4 +1,4 @@
-import { connect } from "node:net";
+import { connect } from "cloudflare:sockets";
 
 import { writeLog } from "./server-audit";
 
@@ -17,21 +17,12 @@ export type MtprotoRuntimeProbe = {
 
 async function probeTcp() {
   const started = Date.now();
-  const tcpReachable = await new Promise<boolean>((resolve) => {
-    let settled = false;
-    const socket = connect(TELEGRAM_DC.port, TELEGRAM_DC.host);
-    const finish = (value: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(value);
-    };
-    const timer = setTimeout(() => finish(false), 8_000);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("timeout", () => finish(false));
-  });
+  const socket = connect({ hostname: TELEGRAM_DC.host, port: TELEGRAM_DC.port }, { allowHalfOpen: false, secureTransport: "off" });
+  const tcpReachable = await Promise.race([
+    socket.opened.then(() => true, () => false),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 8_000)),
+  ]);
+  try { socket.close(); } catch { /* Probe cleanup is best effort. */ }
   return { reachable: tcpReachable, elapsedMs: Date.now() - started };
 }
 

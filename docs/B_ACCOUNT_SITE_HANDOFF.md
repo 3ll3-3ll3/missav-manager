@@ -207,6 +207,8 @@ GitHub 用户名（可选）：
 - `MTPROTO_BACKEND_TOKEN`（仅在实测需要私有后端时）
 - 其他：
 
+`TELEGRAM_SESSION_ENCRYPTION_KEY` 是网站个人账号 Session 的独立 AES-GCM 加密密钥，必须作为 Secret 保存，值至少 32 个随机字符；它不能与 Bot Token、API Hash 或 Windows Session 共用。没有该项时网站必须禁用个人账号登录，不能降级为明文保存。
+
 ### 18. 是否同意以下账号安全边界？
 
 - [x] A 不获取 B 密码、验证码和登录会话（必须）

@@ -6,6 +6,8 @@ export type ToolResult = {
   primaryValue: string;
   secondaryValue?: string;
   status?: string;
+  error?: string;
+  remark?: string;
   tags?: string[];
   actressTags?: string[];
   genreTags?: string[];
@@ -13,8 +15,8 @@ export type ToolResult = {
   metadata?: Record<string, unknown>;
 };
 
-export const TASK_STAGES = ["new", "filtered", "website", "review", "error", "completed"] as const;
-export type TaskStage = (typeof TASK_STAGES)[number];
+export { TASK_STATUSES as TASK_STAGES } from "./task-status";
+export type { TaskStatus as TaskStage } from "./task-status";
 
 export type RecordRow = {
   id: string;

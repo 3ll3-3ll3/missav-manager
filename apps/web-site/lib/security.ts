@@ -32,9 +32,10 @@ export function safeHttpUrl(value: unknown) {
 
 export function redact(value: unknown) {
   return String(value ?? "")
+    .replace(/tg:\/\/login\?token=[A-Za-z0-9_+=/%-]+/gi, "tg://login?token=[REDACTED]")
     .replace(/bot\d{6,}:[A-Za-z0-9_-]{20,}/gi, "bot[REDACTED]")
     .replace(/\b\d{6,12}:[A-Za-z0-9_-]{20,}\b/g, "[TELEGRAM_TOKEN_REDACTED]")
-    .replace(/(api[_ -]?hash|token|password|验证码|两步验证密码)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .replace(/((?:api[_ -]?id|api[_ -]?hash|auth[_ -]?key|phone[_ -]?code[_ -]?hash|token|password|session|验证码|两步验证密码)["']?\s*[:=]\s*["']?)[^"'\s,;}]+/gi, "$1[REDACTED]")
     .replace(/\+?\d[\d -]{7,}\d/g, "[PHONE_REDACTED]")
     .slice(0, 8_000);
 }
@@ -47,4 +48,3 @@ export async function sha256Hex(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
 }
-

@@ -1,5 +1,12 @@
 import { getD1 } from "../db";
-import { redact, safeJson } from "./security";
+import { csvSafe, redact, safeJson } from "./security";
+import {
+  normalizeTaskStatus,
+  taskStatusLabel,
+  taskStatusAliases,
+  TASK_STATUSES,
+  type TaskStatus,
+} from "./task-status";
 
 const nowIso = () => new Date().toISOString();
 
@@ -23,6 +30,56 @@ export async function writeLog(
       timestamp,
     )
     .run();
+}
+
+/**
+ * Persist an already-sanitized operational failure and mirror the same safe
+ * envelope to Worker observability. D1 and Worker logs are deliberately
+ * independent so a database write failure cannot erase the only diagnostic.
+ */
+export async function writeErrorLog(
+  category: string,
+  message: unknown,
+  detail: unknown = {},
+) {
+  const safeCategory = redact(category).slice(0, 80);
+  const safeMessage = redact(message);
+  const safeDetail = redact(safeJson(detail, {}));
+  const timestamp = nowIso();
+  let persisted = true;
+  try {
+    await getD1()
+      .prepare(
+        "INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)",
+      )
+      .bind(
+        crypto.randomUUID(),
+        "error",
+        safeCategory,
+        safeMessage,
+        safeDetail,
+        timestamp,
+      )
+      .run();
+  } catch (error) {
+    persisted = false;
+    console.error(JSON.stringify({
+      level: "error",
+      category: safeCategory,
+      message: "应用错误日志写入 D1 失败",
+      detail: redact(error instanceof Error ? error.message : error),
+      timestamp,
+    }));
+  }
+  console.error(JSON.stringify({
+    level: "error",
+    category: safeCategory,
+    message: safeMessage,
+    detail: safeDetail,
+    persisted,
+    timestamp,
+  }));
+  return { persisted, timestamp };
 }
 
 export async function listLogs(input: {
@@ -200,6 +257,45 @@ export async function createSettingsSnapshot(keys: string[], reason: string) {
   return snapshotId;
 }
 
+async function createTaskSnapshot(ids: string[], reason: string) {
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const rows: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `SELECT * FROM task_inbox WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .all();
+    rows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
+  }
+  const snapshotId = crypto.randomUUID();
+  await getD1().batch([
+    getD1()
+      .prepare(
+        "INSERT INTO data_snapshots(id,reason,entity,item_count,status,created_at,restored_at) VALUES (?,?,?,?,?,?,?)",
+      )
+      .bind(
+        snapshotId,
+        reason.slice(0, 240),
+        "task_inbox",
+        rows.length,
+        "ready",
+        nowIso(),
+        "",
+      ),
+    ...rows.map((row) =>
+      getD1()
+        .prepare(
+          "INSERT INTO data_snapshot_items(snapshot_id,entity_key,previous_json) VALUES (?,?,?)",
+        )
+        .bind(snapshotId, String(row.id), safeJson(row, {})),
+    ),
+  ]);
+  return snapshotId;
+}
+
 export async function listSnapshots(limit = 50) {
   const rows = await getD1()
     .prepare("SELECT * FROM data_snapshots ORDER BY created_at DESC LIMIT ?")
@@ -271,8 +367,8 @@ export async function restoreSnapshot(snapshotId: string) {
       getD1()
         .prepare(
           `INSERT OR REPLACE INTO content_runs
-      (id,tool,name,input_kind,start_at,end_at,source_summary,total_count,result_count,error_count,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id,tool,name,input_kind,start_at,end_at,source_summary,status,stats_json,options_json,total_count,result_count,error_count,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .bind(
           run.id,
@@ -282,6 +378,9 @@ export async function restoreSnapshot(snapshotId: string) {
           run.start_at,
           run.end_at,
           run.source_summary,
+          run.status || "completed",
+          run.stats_json || "{}",
+          run.options_json || "{}",
           run.total_count,
           run.result_count,
           run.error_count,
@@ -295,8 +394,8 @@ export async function restoreSnapshot(snapshotId: string) {
           return getD1()
             .prepare(
               `INSERT OR REPLACE INTO content_results
-        (id,run_id,tool,result_key,primary_value,secondary_value,status,tags_json,source,metadata_json,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (id,run_id,tool,result_key,primary_value,secondary_value,status,error_message,tags_json,source,metadata_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             )
             .bind(
               row.id,
@@ -306,6 +405,7 @@ export async function restoreSnapshot(snapshotId: string) {
               row.primary_value,
               row.secondary_value,
               row.status,
+              row.error_message || "",
               row.tags_json,
               row.source,
               row.metadata_json,
@@ -327,6 +427,71 @@ export async function restoreSnapshot(snapshotId: string) {
             .bind(item.row.key, item.row.value_json, item.row.updated_at),
     );
     if (statements.length) await getD1().batch(statements);
+  } else if (snapshot.entity === "task_inbox") {
+    const statements = parsed.map((item) => {
+      const row = item.row;
+      return getD1()
+        .prepare(
+          `INSERT OR REPLACE INTO task_inbox
+          (id,tool,stage,phase,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .bind(
+          row.id,
+          row.tool,
+          row.stage,
+          row.phase || taskPhase(row.stage),
+          row.title,
+          row.run_id,
+          row.record_id,
+          row.source_id,
+          row.metadata_json,
+          row.created_at,
+          row.updated_at,
+        );
+    });
+    for (let offset = 0; offset < statements.length; offset += 80)
+      await getD1().batch(statements.slice(offset, offset + 80));
+  } else if (
+    snapshot.entity === "telegram_migration" ||
+    snapshot.entity === "telegram_queue"
+  ) {
+    const primaryKeys: Record<string, string> = {
+      telegram_connections: "connection_id",
+      telegram_bot_state: "connection_id",
+      input_sources: "id",
+      tool_source_bindings: "id",
+      telegram_messages: "id",
+      telegram_message_fingerprints: "id",
+      telegram_tool_queue: "id",
+      telegram_read_states: "source_id",
+      telegram_sync_runs: "id",
+      telegram_accounts: "id",
+      telegram_auth_flows: "id",
+    };
+    const tableOrder = Object.keys(primaryKeys);
+    if (snapshot.entity === "telegram_migration") {
+      for (const table of [...tableOrder].reverse())
+        await getD1().prepare(`DELETE FROM ${table}`).run();
+    }
+    for (const table of tableOrder) {
+      const tableRows = parsed.filter((item) => item.key.startsWith(`${table}:`));
+      for (let offset = 0; offset < tableRows.length; offset += 50) {
+        const statements = tableRows.slice(offset, offset + 50).map((item) => {
+          const columns = Object.keys(item.row).filter((key) => /^[a-z][a-z0-9_]*$/i.test(key));
+          const primaryKey = primaryKeys[table];
+          if (!columns.length || !columns.includes(primaryKey))
+            throw new Error("Telegram 恢复点内容无效");
+          const updates = columns.filter((column) => column !== primaryKey);
+          return getD1()
+            .prepare(
+              `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")}) ON CONFLICT(${primaryKey}) ${updates.length ? `DO UPDATE SET ${updates.map((column) => `${column}=excluded.${column}`).join(",")}` : "DO NOTHING"}`,
+            )
+            .bind(...columns.map((column) => item.row[column]));
+        });
+        if (statements.length) await getD1().batch(statements);
+      }
+    }
   } else throw new Error("暂不支持该恢复点类型");
   const restoredAt = nowIso();
   await getD1()
@@ -344,23 +509,52 @@ export async function restoreSnapshot(snapshotId: string) {
   return { restored: parsed.length };
 }
 
-export async function listTasks(input: {
-  page?: number;
-  pageSize?: number;
-  stage?: string;
-  tool?: string;
-  search?: string;
-}) {
-  const page = Math.max(1, Math.trunc(Number(input.page) || 1));
-  const pageSize = Math.min(
-    200,
-    Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
-  );
+const TASK_PHASE_ALIASES: Record<string, string[]> = {
+  received: ["pending", "new", "queued"],
+  filtered: ["filtered"],
+  website: ["running", "website", "processing", "in_progress", "paused", "pause"],
+  review: ["needs_manual", "review", "needs_review", "needs_attention", "manual", "partial_completed", "partial", "partially_completed", "partial_success"],
+  error: ["retry_waiting", "error", "failed", "retry", "retrying", "retry_pending", "waiting_retry"],
+  completed: ["completed", "success", "succeeded", "done", "complete", "cancelled", "canceled", "aborted"],
+};
+
+function taskPhase(value: unknown) {
+  const raw = String(value || "");
+  return Object.entries(TASK_PHASE_ALIASES).find(([, aliases]) => aliases.includes(raw))?.[0] || "review";
+}
+
+const TASK_PHASE_SQL = `CASE
+  WHEN phase='' OR (phase='received' AND stage NOT IN ('pending','new','queued')) THEN CASE
+    WHEN stage IN ('pending','new','queued') THEN 'received'
+    WHEN stage='filtered' THEN 'filtered'
+    WHEN stage IN ('running','website','processing','in_progress','paused','pause') THEN 'website'
+    WHEN stage IN ('needs_manual','review','needs_review','needs_attention','manual','partial_completed','partial','partially_completed','partial_success') THEN 'review'
+    WHEN stage IN ('retry_waiting','error','failed','retry','retrying','retry_pending','waiting_retry') THEN 'error'
+    WHEN stage IN ('completed','success','succeeded','done','complete','cancelled','canceled','aborted') THEN 'completed'
+    ELSE 'review' END
+  ELSE phase END`;
+
+function taskPhaseForStatus(status: TaskStatus) {
+  if (status === "pending") return "received";
+  if (status === "running" || status === "paused") return "website";
+  if (status === "retry_waiting") return "error";
+  if (status === "needs_manual" || status === "partial_completed") return "review";
+  return "completed";
+}
+
+function taskFilters(input: { phase?: string; stage?: string; tool?: string; search?: string }) {
   const clauses: string[] = [];
   const values: unknown[] = [];
+  if (input.phase) {
+    if (!TASK_PHASE_ALIASES[String(input.phase)]) throw new Error("任务阶段筛选无效");
+    clauses.push(`${TASK_PHASE_SQL}=?`);
+    values.push(String(input.phase));
+  }
   if (input.stage) {
-    clauses.push("stage=?");
-    values.push(String(input.stage).slice(0, 32));
+    const canonical = normalizeTaskStatus(input.stage);
+    const aliases = taskStatusAliases(canonical);
+    clauses.push(`stage IN (${aliases.map(() => "?").join(",")})`);
+    values.push(...aliases);
   }
   if (input.tool) {
     clauses.push("tool=?");
@@ -370,46 +564,147 @@ export async function listTasks(input: {
     clauses.push("title LIKE ?");
     values.push(`%${input.search.trim().slice(0, 160)}%`);
   }
+  return { clauses, values };
+}
+
+export async function listTasks(input: {
+  page?: number;
+  pageSize?: number;
+  phase?: string;
+  stage?: string;
+  tool?: string;
+  search?: string;
+  sort?: string;
+  direction?: "asc" | "desc";
+}) {
+  const page = Math.max(1, Math.trunc(Number(input.page) || 1));
+  const pageSize = Math.min(
+    200,
+    Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
+  );
+  const { clauses, values } = taskFilters(input);
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const [count, rows] = await getD1().batch([
+  const countScope = taskFilters({ tool: input.tool, search: input.search });
+  const countWhere = countScope.clauses.length ? ` WHERE ${countScope.clauses.join(" AND ")}` : "";
+  const sortFields: Record<string, string> = {
+    tool: "tool",
+    stage: "stage",
+    title: "title",
+    updatedAt: "updated_at",
+  };
+  const sort = sortFields[String(input.sort || "updatedAt")] || "updated_at";
+  const direction = input.direction === "asc" ? "ASC" : "DESC";
+  const [count, rows, statusCounts] = await getD1().batch([
     getD1()
       .prepare(`SELECT COUNT(*) AS count FROM task_inbox${where}`)
       .bind(...values),
     getD1()
       .prepare(
-        `SELECT * FROM task_inbox${where} ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`,
+        `SELECT *,${TASK_PHASE_SQL} AS resolved_phase FROM task_inbox${where} ORDER BY ${sort} ${direction},id ${direction} LIMIT ? OFFSET ?`,
       )
       .bind(...values, pageSize, (page - 1) * pageSize),
+    getD1()
+      .prepare(`SELECT ${TASK_PHASE_SQL} AS phase,COUNT(*) AS count FROM task_inbox${countWhere} GROUP BY ${TASK_PHASE_SQL}`)
+      .bind(...countScope.values),
   ]);
+  const counts: Record<string, number> = {};
+  for (const row of statusCounts.results ?? []) {
+    const phase = String(row.phase || taskPhase(row.stage));
+    counts[phase] = (counts[phase] || 0) + Number(row.count || 0);
+  }
   return {
     rows: rows.results ?? [],
     total: Number(count.results?.[0]?.count ?? 0),
     page,
     pageSize,
+    counts,
   };
 }
 
-export async function updateTasks(ids: string[], stage: string) {
-  const valid = new Set([
-    "new",
-    "filtered",
-    "website",
-    "review",
-    "error",
-    "completed",
-  ]);
-  if (!valid.has(stage)) throw new Error("任务阶段无效");
+export async function resolveTaskSelection(input: {
+  mode?: "ids" | "all";
+  ids?: string[];
+  excludeIds?: string[];
+  filters?: { phase?: string; stage?: string; tool?: string; search?: string };
+}) {
+  if (input.mode !== "all") {
+    return [...new Set((input.ids ?? []).map(String).filter(Boolean))].slice(
+      0,
+      100_000,
+    );
+  }
+  const { clauses, values } = taskFilters(input.filters ?? {});
+  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const rows = await getD1()
+    .prepare(`SELECT id FROM task_inbox${where} ORDER BY id LIMIT 100001`)
+    .bind(...values)
+    .all();
+  const excluded = new Set((input.excludeIds ?? []).map(String));
+  const ids = (rows.results ?? [])
+    .map((row: Record<string, unknown>) => String(row.id))
+    .filter((id) => !excluded.has(id));
+  if (ids.length > 100_000)
+    throw new Error("当前任务操作超过 100,000 条，请先增加筛选条件");
+  return ids;
+}
+
+export async function exportTasks(ids: string[], format: "csv" | "txt") {
   const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const rows: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `SELECT * FROM task_inbox WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .all();
+    rows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
+  }
+  const order = new Map(unique.map((id, index) => [id, index]));
+  rows.sort(
+    (a, b) =>
+      (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0),
+  );
+  if (format === "txt")
+    return rows
+      .map(
+        (row) =>
+          `${row.tool}\t${taskStatusLabel(row.stage)}\t${row.title}\t${row.updated_at}`,
+      )
+      .join("\r\n");
+  return `\uFEFF${[
+    ["tool", "status", "title", "updated_at"].map(csvSafe).join(","),
+    ...rows.map((row) =>
+      [row.tool, normalizeTaskStatus(row.stage), row.title, row.updated_at]
+        .map(csvSafe)
+        .join(","),
+    ),
+  ].join("\r\n")}`;
+}
+
+export async function updateTasks(ids: string[], stage: string) {
+  const requested = String(stage || "");
+  const valid = new Set<string>(TASK_STATUSES.flatMap(taskStatusAliases));
+  if (!valid.has(requested)) throw new Error("任务状态无效");
+  const canonical: TaskStatus = normalizeTaskStatus(requested);
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const snapshotId = unique.length
+    ? await createTaskSnapshot(
+        unique,
+        `批量修改任务为${taskStatusLabel(canonical)}前自动恢复点`,
+      )
+    : "";
   let changed = 0;
   for (let offset = 0; offset < unique.length; offset += 80) {
     const chunk = unique.slice(offset, offset + 80);
     const result = await getD1()
       .prepare(
-        `UPDATE task_inbox SET stage=?,updated_at=? WHERE id IN (${chunk.map(() => "?").join(",")})`,
+        `UPDATE task_inbox SET stage=?,phase=?,updated_at=? WHERE id IN (${chunk.map(() => "?").join(",")})`,
       )
-      .bind(stage, nowIso(), ...chunk)
+      .bind(canonical, taskPhaseForStatus(canonical), nowIso(), ...chunk)
       .run();
     changed += Number(result.meta?.changes ?? 0);
   }
-  return { changed };
+  return { changed, snapshotId };
 }
