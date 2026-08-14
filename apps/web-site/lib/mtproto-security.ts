@@ -148,6 +148,17 @@ function rawMtprotoError(error: unknown) {
 
 export function classifyMtprotoError(error: unknown): SafeMtprotoFailure {
   const raw = rawMtprotoError(error);
+  if (raw.includes("TELEGRAM_SESSION_BUSY")) return { code: "TELEGRAM_SESSION_BUSY", message: "上一项 Telegram 个人账号操作仍在安全收尾，请稍后重试；系统已阻止重复连接" };
+  if (
+    raw.includes("AUTH_KEY_DUPLICATED") ||
+    raw.includes("CONCURRENT USAGE OF THE CURRENT SESSION") ||
+    raw.includes("CURRENT SESSION WAS INVALIDATED BY THE SERVER")
+  )
+    return {
+      code: "SESSION_CONCURRENT_INVALIDATED",
+      message:
+        "Telegram 检测到同一 Session 被重复连接，当前 Session 已失效。请到全局 Telegram 中心重新登录一次",
+    };
   if (raw.includes("AUTH_TOKEN_EXPIRED") || raw.includes("AUTH_TOKEN_INVALID") || raw.includes("AUTH_TOKEN_ALREADY_ACCEPTED")) return { code: "QR_TOKEN_EXPIRED", message: "二维码已失效，请重新生成" };
   if (raw.includes("PHONE_CODE_INVALID")) return { code: "PHONE_CODE_INVALID", message: "验证码不正确，请重试" };
   if (raw.includes("PHONE_CODE_EXPIRED")) return { code: "PHONE_CODE_EXPIRED", message: "验证码已过期，请重新发送" };

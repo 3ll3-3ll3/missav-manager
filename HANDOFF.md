@@ -2,6 +2,15 @@
 
 更新日期：2026-08-14
 
+## 2026-08-14 Telegram Session 并发失效修复
+
+- 已确认生产截图中的 `Concurrent usage of the current session...` 不是 Bad.news 规则错误，而是同一个网站个人账号 StringSession 被两个请求级连接同时恢复；Telegram 因安全策略使该 Session 失效。
+- 所有会创建 MTProto 连接的路径（来源发现、工具/全局同步、手动已读、二维码/手机号登录、Session 恢复和注销）现在先取得 D1 原子独占租约。租约按操作显示、定时续期、连接断开后在 `finally` 释放；Worker 异常退出后会自动过期。第二个请求只收到中文“正在安全收尾”提示，不会再创建第二条连接。
+- 工具页“安全停止”不再在浏览器终止流后立刻解锁按钮，而是读取轻量租约状态，确认服务端连接已经释放后自动刷新来源和队列。租约仍在时，界面明确说明系统继续阻止重复连接。
+- `AUTH_KEY_DUPLICATED`、同 Session 并发失效和 `SESSION_REVOKED` 分开识别；页面默认只显示中文摘要。并发失效会把个人连接标记为“需要重新登录”，并在全局 Telegram 中心提供重新登录说明。
+- 租约复用现有 `app_settings` 表的内部键，不新增 D1 表或迁移，不改消息、来源、绑定、结果、offset、checkpoint、已读位置或任何 Secret；内部租约键不会进入普通设置 API。
+- 已被 Telegram 使失效的旧 Session 无法由代码复活。修复上线后，所有者需要在全局 Telegram 中心重新扫码或用手机号登录一次；此项仍属于待用户 E2E。
+
 ## 1. 源码与发布状态
 
 - 工作分支：`codex/cloud/web-ux-parity-v0513`。

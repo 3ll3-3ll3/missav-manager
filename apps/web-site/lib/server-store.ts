@@ -1524,7 +1524,9 @@ export async function bulkRecords(input: {
 export async function getSettings() {
   await ensureSchema();
   const rows = await getD1()
-    .prepare("SELECT key,value_json,updated_at FROM app_settings ORDER BY key")
+    .prepare(
+      "SELECT key,value_json,updated_at FROM app_settings WHERE key NOT LIKE '__internal.%' ORDER BY key",
+    )
     .all();
   const settings: Record<string, unknown> = Object.fromEntries(
     (rows.results ?? []).map((row) => [

@@ -4,6 +4,9 @@
 
 ## 2026-08-14 当前实现补充（优先于旧分支说明）
 
+- 请求级 MTProto 新增跨 Worker 的个人 Session 原子独占租约，覆盖来源发现、同步、已读、登录、恢复和注销。工具页安全停止会等待服务端释放租约后再允许重试；同一 Session 并发失效统一显示中文并把连接标记为需要重新登录。实现复用现有 `app_settings` 内部键，无新增 D1 迁移，普通设置 API 不返回该键。
+- Telegram 已经使旧 Session 失效时，部署代码只能阻止再次发生，不能恢复该旧 Session；所有者必须在全局 Telegram 中心重新登录一次，并继续将真实 Session 恢复、增量和已读策略标记为“待用户 E2E”。
+
 - 当前网站工作分支已经迁移到 `codex/cloud/web-ux-parity-v0513`，GitHub 交付入口为 PR #4；下文仍出现的 `codex/sites-private-web` 是历史阶段名称，不是本轮提交目标。
 - 当前生产 Sites v26 对应 Git 提交 `124e80b491eb4b7a3dee5f3e8eb44aeffc317f9e`。本轮 Telegram 工具页整改只提交 GitHub 和私人预览，不部署生产、不执行正式 D1 迁移、不修改 Secrets。
 - 每个工具的 Telegram 输入页必须保持四个独立动作：日常增量同步、加载历史、仅刷新本地队列、处理消息。个人来源模式为 `incremental/recent/range/history`；Bot 仅通过账号级单一 `getUpdates` offset 做增量，不能把 Bot 增量伪装成历史回拉。

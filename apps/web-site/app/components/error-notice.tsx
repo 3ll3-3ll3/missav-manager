@@ -11,12 +11,23 @@ export function toUiError(error: unknown, fallback = "操作失败"): UiError {
   return { summary: technical || fallback };
 }
 
-export default function ErrorNotice({ error, retry }: { error: UiError; retry?: () => void }) {
+export default function ErrorNotice({
+  error,
+  retry,
+  action,
+}: {
+  error: UiError;
+  retry?: () => void;
+  action?: { label: string; onClick: () => void };
+}) {
   return (
     <div className="notice error-notice" role="alert">
       <div className="error-notice-heading">
         <strong>{error.summary}</strong>
-        {retry && <button onClick={retry}>刷新重试</button>}
+        <div className="button-row">
+          {action && <button onClick={action.onClick}>{action.label}</button>}
+          {retry && <button onClick={retry}>刷新重试</button>}
+        </div>
       </div>
       {error.detail && error.detail !== error.summary && (
         <details>

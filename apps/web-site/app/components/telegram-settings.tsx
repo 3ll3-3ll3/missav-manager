@@ -98,12 +98,14 @@ type MtprotoStatus = {
   apiConfigured: boolean;
   encryptionConfigured: boolean;
   authorized: boolean;
+  reauthRequired: boolean;
   accountLabel: string;
   stage:
     | "idle"
     | "waiting_qr"
     | "waiting_code"
     | "waiting_password"
+    | "reauth_required"
     | "authorized";
   mode: "" | "qr" | "phone";
   expiresAt: string;
@@ -122,6 +124,7 @@ const EMPTY_MTPROTO: MtprotoStatus = {
   apiConfigured: false,
   encryptionConfigured: false,
   authorized: false,
+  reauthRequired: false,
   accountLabel: "",
   stage: "idle",
   mode: "",
@@ -403,6 +406,8 @@ export default function TelegramSettingsPanel({
           ...current,
           ...result,
           authorized: result.stage === "authorized" ? true : current.authorized,
+          reauthRequired:
+            result.stage === "authorized" ? false : current.reauthRequired,
         }));
       if (result.stage === "authorized") {
         setPhone("");
@@ -436,7 +441,9 @@ export default function TelegramSettingsPanel({
         );
       await refreshParts(["connections"]);
     } catch (error) {
-      if (action === "poll-qr") {
+      const message =
+        error instanceof Error ? error.message : "Telegram 登录操作失败";
+      if (action === "poll-qr" && !message.includes("安全收尾")) {
         setQrImage("");
         setQrExpiresAt("");
         setMtproto((current) => ({
@@ -446,9 +453,7 @@ export default function TelegramSettingsPanel({
           expiresAt: "",
         }));
       }
-      setNotice(
-        error instanceof Error ? error.message : "Telegram 登录操作失败",
-      );
+      setNotice(message);
       await refreshParts(["connections"]);
     } finally {
       setBusyArea("connection", false);
@@ -1039,6 +1044,8 @@ export default function TelegramSettingsPanel({
                 <h3>
                   {mtproto.authorized
                     ? "个人账号 Session 已就绪"
+                    : mtproto.reauthRequired
+                      ? "个人账号需要重新登录"
                     : "个人账号 MTProto"}
                 </h3>
               </div>
@@ -1047,6 +1054,8 @@ export default function TelegramSettingsPanel({
               >
                 {mtproto.authorized
                   ? "Session 可按需恢复"
+                  : mtproto.reauthRequired
+                    ? "Session 已失效"
                   : mtprotoLoadState === "loading"
                     ? "正在检测"
                     : mtprotoLoadState === "error"
@@ -1091,6 +1100,11 @@ export default function TelegramSettingsPanel({
                 请求级 TCP → WebSocket 回退
               </span>
             </div>
+            {mtproto.reauthRequired && (
+              <div className="notice error-notice" role="alert">
+                Telegram 已使旧 Session 失效。系统已启用跨请求独占保护；请在下方重新生成二维码或发送验证码登录一次。
+              </div>
+            )}
             {mtproto.authorized ? (
               <div className="mtproto-account">
                 <div>
@@ -1229,7 +1243,9 @@ export default function TelegramSettingsPanel({
                 </div>
               </div>
             )}
-            {!mtproto.authorized && mtproto.stage !== "idle" && (
+            {!mtproto.authorized &&
+              mtproto.stage !== "idle" &&
+              mtproto.stage !== "reauth_required" && (
               <div className="button-row mtproto-cancel-row">
                 <span className="subtle">当前阶段：{mtproto.stage}</span>
                 <button

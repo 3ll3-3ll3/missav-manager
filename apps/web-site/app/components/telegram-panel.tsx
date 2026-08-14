@@ -143,6 +143,22 @@ async function api(url: string, options?: RequestInit) {
   return payload;
 }
 
+async function waitForPersonalSessionIdle(maxWaitMs = 125_000) {
+  const started = Date.now();
+  while (Date.now() - started < maxWaitMs) {
+    try {
+      const status = await api(
+        "/api/telegram?view=personal-session-lease",
+      );
+      if (!status.active) return true;
+    } catch {
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  return false;
+}
+
 async function streamTelegramProcess(
   payload: Record<string, unknown>,
   onProgress: (progress: Omit<OperationProgress, "kind" | "status">) => void,
@@ -664,17 +680,54 @@ export default function TelegramPanel({
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === "AbortError") {
         setNotice(
-          "安全停止请求已发送：服务端会在当前 Telegram 分页与 D1 事务边界停止；已提交的 offset、检查点和消息不会回退。请稍后点击“仅刷新本地队列”。",
+          "安全停止请求已发送：正在等待服务端完成当前 Telegram 分页与 D1 事务；已提交的 offset、检查点和消息不会回退。",
         );
         setOperation((current) => ({
           kind: "sync",
-          status: "completed",
+          status: "running",
           phase: "stopping",
           label: "正在安全停止；已提交批次已保留",
           current: current?.current || 0,
           total: current?.total || selectedSources.size,
           resultCount: current?.resultCount || 0,
         }));
+        const hasPersonalSource = selectedSourceRows.some(
+          (source) => source.connection_id === "telegram-personal",
+        );
+        const released = hasPersonalSource
+          ? await waitForPersonalSessionIdle()
+          : (await new Promise<boolean>((resolve) =>
+              setTimeout(() => resolve(true), 1_000),
+            ));
+        if (released) {
+          await Promise.all([loadSources(), loadQueue()]);
+          setNotice(
+            "安全停止完成：服务端连接已释放，已提交的消息、offset 和检查点全部保留；现在可以继续同步。",
+          );
+          setOperation((current) => ({
+            kind: "sync",
+            status: "completed",
+            phase: "stopped",
+            label: "安全停止完成，连接已释放",
+            current: current?.current || 0,
+            total: current?.total || selectedSources.size,
+            resultCount: current?.resultCount || 0,
+          }));
+        } else {
+          setError({
+            summary:
+              "上一同步仍在安全收尾，系统会继续阻止重复连接；请稍后仅刷新本地队列",
+          });
+          setOperation((current) => ({
+            kind: "sync",
+            status: "failed",
+            phase: "stopping",
+            label: "安全停止仍在收尾",
+            current: current?.current || 0,
+            total: current?.total || selectedSources.size,
+            resultCount: current?.resultCount || 0,
+          }));
+        }
       } else {
         setError(toUiError(reason, "工具内远端拉取失败"));
         setOperation({
@@ -1564,6 +1617,14 @@ export default function TelegramPanel({
         <ErrorNotice
           error={error}
           retry={() => void Promise.all([loadSources(), loadQueue()])}
+          action={
+            /重新登录|Session 已失效|Session 被重复连接/.test(error.summary)
+              ? {
+                  label: "去全局 Telegram 重新登录",
+                  onClick: onOpenTelegramSettings,
+                }
+              : undefined
+          }
         />
       )}
       {notice && <div className="notice">{notice}</div>}

@@ -18,6 +18,11 @@ import { ensureSchema, nowIso } from "./server-store";
 import { writeErrorLog, writeLog } from "./server-audit";
 import { ingestTelegramMessages } from "./server-telegram";
 import {
+  acquirePersonalSessionLease,
+  personalSessionLeaseStatus,
+  type PersonalSessionLeaseHandle,
+} from "./mtproto-lease";
+import {
   runAdaptiveTelegramSourceQueue,
   telegramDate,
   telegramFloodWaitError,
@@ -29,6 +34,7 @@ import {
 
 const OWNER_ID = "owner";
 const FLOW_TTL_MS = 10 * 60 * 1000;
+const SESSION_LEASE_HEARTBEAT_MS = 30 * 1000;
 const MTPROTO_TRANSPORT = "cloudflare_tcp_with_websocket_fallback";
 const TRANSPORT_ATTEMPTS = [
   { name: "cloudflare_tcp", socket: CloudflareTelegramSocket },
@@ -70,6 +76,14 @@ type ConnectedClient = {
   transport: string;
   clientLog: ClientDiagnostic[];
 };
+
+type ClientLeaseRuntime = {
+  lease: PersonalSessionLeaseHandle;
+  timer: ReturnType<typeof setInterval>;
+  renewal: Promise<unknown>;
+};
+
+const clientLeases = new WeakMap<TelegramClient, ClientLeaseRuntime>();
 
 function dynamicClient(client: TelegramClient) {
   return client as unknown as DynamicClient;
@@ -395,53 +409,130 @@ async function connectedClient(
   }
 }
 
-async function newClient(encryptedSession = "") {
-  const sessionText = encryptedSession
-    ? await decryptMtprotoSession(encryptedSession, encryptionSecret())
-    : "";
-  let lastError: unknown;
-  const attempted: string[] = [];
-  const attemptDiagnostics: Array<Record<string, unknown>> = [];
-  for (const attempt of TRANSPORT_ATTEMPTS) {
-    attempted.push(attempt.name);
-    try {
-      return await connectedClient(sessionText, attempt);
-    } catch (error) {
-      lastError = error;
-      const failure = classifyMtprotoError(error);
-      const tagged = error as { mtprotoClientLog?: unknown } | null;
-      attemptDiagnostics.push({
-        transport: attempt.name,
-        failureCode: failure.code,
-        diagnostic: describeMtprotoError(error),
-        clientLog: Array.isArray(tagged?.mtprotoClientLog)
-          ? tagged.mtprotoClientLog
-          : [],
-      });
-      if (
-        ["API_ID_INVALID", "API_ID_PUBLISHED", "SESSION_REVOKED"].includes(
-          failure.code,
+function attachSessionLease(
+  client: TelegramClient,
+  lease: PersonalSessionLeaseHandle,
+) {
+  const runtime: ClientLeaseRuntime = {
+    lease,
+    timer: 0 as unknown as ReturnType<typeof setInterval>,
+    renewal: Promise.resolve(),
+  };
+  runtime.timer = setInterval(() => {
+    runtime.renewal = runtime.renewal
+      .then(() => lease.renew())
+      .catch(() => false);
+  }, SESSION_LEASE_HEARTBEAT_MS);
+  clientLeases.set(client, runtime);
+}
+
+async function newClient(
+  encryptedSession = "",
+  operation = "个人账号操作",
+) {
+  await ensureSchema();
+  const lease = await acquirePersonalSessionLease(getD1(), operation);
+  try {
+    const sessionText = encryptedSession
+      ? await decryptMtprotoSession(encryptedSession, encryptionSecret())
+      : "";
+    let lastError: unknown;
+    const attempted: string[] = [];
+    const attemptDiagnostics: Array<Record<string, unknown>> = [];
+    for (const attempt of TRANSPORT_ATTEMPTS) {
+      attempted.push(attempt.name);
+      try {
+        const connection = await connectedClient(sessionText, attempt);
+        attachSessionLease(connection.client, lease);
+        return connection;
+      } catch (error) {
+        lastError = error;
+        const failure = classifyMtprotoError(error);
+        const tagged = error as { mtprotoClientLog?: unknown } | null;
+        attemptDiagnostics.push({
+          transport: attempt.name,
+          failureCode: failure.code,
+          diagnostic: describeMtprotoError(error),
+          clientLog: Array.isArray(tagged?.mtprotoClientLog)
+            ? tagged.mtprotoClientLog
+            : [],
+        });
+        if (
+          [
+            "API_ID_INVALID",
+            "API_ID_PUBLISHED",
+            "SESSION_REVOKED",
+            "SESSION_CONCURRENT_INVALIDATED",
+          ].includes(failure.code)
         )
-      )
-        throw error;
+          throw error;
+      }
     }
+    const finalError = transportFailure(lastError, attempted.join("->"));
+    if (finalError && typeof finalError === "object") {
+      Object.assign(finalError, { mtprotoAttempts: attemptDiagnostics });
+    }
+    throw finalError;
+  } catch (error) {
+    await lease.release().catch(() => false);
+    throw error;
   }
-  const finalError = transportFailure(lastError, attempted.join("->"));
-  if (finalError && typeof finalError === "object") {
-    Object.assign(finalError, { mtprotoAttempts: attemptDiagnostics });
-  }
-  throw finalError;
 }
 
 async function disconnect(client: TelegramClient) {
+  const runtime = clientLeases.get(client);
   try {
     await client.disconnect();
   } catch {
     // The request is already complete; never leak transport errors into logs.
+  } finally {
+    if (runtime) {
+      clearInterval(runtime.timer);
+      await runtime.renewal.catch(() => undefined);
+      await runtime.lease.release().catch(() => false);
+      clientLeases.delete(client);
+    }
   }
 }
 
-async function authorizedClient() {
+const SESSION_REAUTH_CODES = new Set([
+  "SESSION_REVOKED",
+  "SESSION_CONCURRENT_INVALIDATED",
+]);
+
+function classifiedMtprotoError(error: unknown) {
+  const failure = classifyMtprotoError(error);
+  const existing = error as { code?: unknown; message?: unknown } | null;
+  if (
+    failure.code === "TELEGRAM_SESSION_BUSY" &&
+    error instanceof Error &&
+    String(existing?.message || "").includes("安全收尾")
+  )
+    return error;
+  return Object.assign(new Error(failure.message), { code: failure.code });
+}
+
+async function markSessionReauthRequired(error: unknown) {
+  const failure = classifyMtprotoError(error);
+  if (!SESSION_REAUTH_CODES.has(failure.code)) return;
+  const timestamp = nowIso();
+  await getD1()
+    .batch([
+      getD1()
+        .prepare(
+          "UPDATE telegram_accounts SET status='reauth_required',updated_at=? WHERE id=?",
+        )
+        .bind(timestamp, OWNER_ID),
+      getD1()
+        .prepare(
+          "UPDATE telegram_connections SET status='reauth_required',network_status='unknown',last_error=?,updated_at=? WHERE connection_id='telegram-personal'",
+        )
+        .bind(failure.message, timestamp),
+    ])
+    .catch(() => undefined);
+}
+
+async function authorizedClient(operation = "个人账号操作") {
   await ensureSchema();
   credentials();
   encryptionSecret();
@@ -450,12 +541,21 @@ async function authorizedClient() {
     .bind(OWNER_ID)
     .first<{ encrypted_session: string }>();
   if (!row) throw new Error("请先在 Telegram 设置中完成个人账号登录");
-  const { client, session } = await newClient(row.encrypted_session);
-  if (!(await client.checkAuthorization())) {
-    await disconnect(client);
-    throw new Error("Telegram 登录 Session 已失效，请重新登录");
+  let client: TelegramClient | null = null;
+  try {
+    const connection = await newClient(row.encrypted_session, operation);
+    client = connection.client;
+    if (!(await client.checkAuthorization())) {
+      throw Object.assign(new Error("AUTH_KEY_UNREGISTERED"), {
+        code: "SESSION_REVOKED",
+      });
+    }
+    return { client, session: connection.session };
+  } catch (error) {
+    if (client) await disconnect(client);
+    await markSessionReauthRequired(error);
+    throw classifiedMtprotoError(error);
   }
-  return { client, session };
 }
 
 function dialogRows(value: unknown): Array<Record<string, unknown>> {
@@ -490,7 +590,7 @@ function dialogLatestMessageId(dialog: Record<string, unknown>) {
 }
 
 export async function discoverPersonalSources() {
-  const { client } = await authorizedClient();
+  const { client } = await authorizedClient("发现群组/频道");
   try {
     const dynamic = dynamicClient(client);
     if (!dynamic.getDialogs)
@@ -582,7 +682,8 @@ export async function discoverPersonalSources() {
     });
     return { discovered, total: candidateRows.length, truncated };
   } catch (error) {
-    throw new Error(safeMtprotoError(error));
+    await markSessionReauthRequired(error);
+    throw classifiedMtprotoError(error);
   } finally {
     await disconnect(client);
   }
@@ -684,7 +785,7 @@ export async function syncPersonalSources(
     current: 0,
     total: totalSources,
   });
-  const { client } = await authorizedClient();
+  const { client } = await authorizedClient("同步 Telegram 来源");
   const connectionMs = performance.now() - connectionStarted;
   const totals = {
     scanned: 0,
@@ -984,6 +1085,7 @@ export async function syncPersonalSources(
           totalMs: performance.now() - sourceStarted,
         };
         } catch (error) {
+          const failure = classifyMtprotoError(error);
           const safeError = safeMtprotoError(error);
           await getD1()
             .prepare(
@@ -991,6 +1093,10 @@ export async function syncPersonalSources(
             )
             .bind(safeError.slice(0, 500), nowIso(), sourceId)
             .run();
+          if (SESSION_REAUTH_CODES.has(failure.code)) {
+            await markSessionReauthRequired(error);
+            throw classifiedMtprotoError(error);
+          }
           if (telegramFloodWaitError(error)) throw error;
           totals.errors += 1;
           completedSources += 1;
@@ -1061,7 +1167,8 @@ export async function syncPersonalSources(
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error);
     if (message.includes("远端已读")) throw new Error(message);
-    throw new Error(safeMtprotoError(error));
+    await markSessionReauthRequired(error);
+    throw classifiedMtprotoError(error);
   } finally {
     await disconnect(client);
   }
@@ -1093,7 +1200,7 @@ export async function markTelegramSourceRead(
   )
     throw new Error("只能标记到已完成增量同步的安全位置");
   const maxId = requestedId;
-  const { client } = await authorizedClient();
+  const { client } = await authorizedClient("标记 Telegram 已读");
   try {
     await markReadWithClient(client, source, maxId);
     try {
@@ -1112,7 +1219,8 @@ export async function markTelegramSourceRead(
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error);
     if (message.includes("远端已读")) throw new Error(message);
-    throw new Error(safeMtprotoError(error));
+    await markSessionReauthRequired(error);
+    throw classifiedMtprotoError(error);
   } finally {
     await disconnect(client);
   }
@@ -1128,6 +1236,9 @@ async function safeOperation<T>(
     return await operation();
   } catch (error) {
     const failure = classifyMtprotoError(error);
+    if (failure.code === "TELEGRAM_SESSION_BUSY") {
+      throw classifiedMtprotoError(error);
+    }
     const message = failure.message;
     const tagged = error as {
       mtprotoAttempts?: unknown;
@@ -1156,15 +1267,29 @@ async function safeOperation<T>(
     );
     try {
       const timestamp = nowIso();
-      await getD1()
-        .prepare(
-          "UPDATE telegram_connections SET status='error',network_status='unknown',last_error=?,updated_at=? WHERE connection_id='telegram-personal'",
-        )
-        .bind(
-          `${message}（错误码：${failure.code}；追踪 ID：${traceId}）`,
-          timestamp,
-        )
-        .run();
+      const status = SESSION_REAUTH_CODES.has(failure.code)
+        ? "reauth_required"
+        : "error";
+      const statements = [
+        getD1()
+          .prepare(
+            "UPDATE telegram_connections SET status=?,network_status='unknown',last_error=?,updated_at=? WHERE connection_id='telegram-personal'",
+          )
+          .bind(
+            status,
+            `${message}（错误码：${failure.code}；追踪 ID：${traceId}）`,
+            timestamp,
+          ),
+      ];
+      if (status === "reauth_required")
+        statements.push(
+          getD1()
+            .prepare(
+              "UPDATE telegram_accounts SET status='reauth_required',updated_at=? WHERE id=?",
+            )
+            .bind(timestamp, OWNER_ID),
+        );
+      await getD1().batch(statements);
     } catch {
       // The independent app/Worker diagnostic above is already available.
     }
@@ -1199,6 +1324,9 @@ export async function mtprotoStatus() {
   const authorized = Boolean(
     accountRow && String(accountRow.status || "") === "authorized",
   );
+  const reauthRequired = Boolean(
+    accountRow && String(accountRow.status || "") === "reauth_required",
+  );
   return {
     apiConfigured:
       Number(env.TELEGRAM_API_ID || 0) > 0 &&
@@ -1209,15 +1337,28 @@ export async function mtprotoStatus() {
     executionModel: "request_scoped" as const,
     liveConnection: false,
     authorized,
+    reauthRequired,
     accountLabel: accountRow
       ? String(accountRow.account_label || "Telegram 账号")
       : "",
     stage: expired
       ? "idle"
-      : String(flowValue?.stage || (authorized ? "authorized" : "idle")),
+      : String(
+          flowValue?.stage ||
+            (authorized
+              ? "authorized"
+              : reauthRequired
+                ? "reauth_required"
+                : "idle"),
+        ),
     mode: expired ? "" : String(flowValue?.mode || ""),
     expiresAt: expired ? "" : String(flowValue?.expires_at || ""),
   };
+}
+
+export async function mtprotoSessionLeaseStatus() {
+  await ensureSchema();
+  return personalSessionLeaseStatus(getD1());
 }
 
 export async function startPhoneLogin(phoneValue: unknown) {
@@ -1234,7 +1375,7 @@ export async function startPhoneLogin(phoneValue: unknown) {
   await deleteFlow();
   return safeOperation(
     async () => {
-      const connection = await newClient();
+      const connection = await newClient("", "手机号登录：发送验证码");
       const { client, session } = connection;
       try {
         const sent = await client.sendCode(credentials(), phone);
@@ -1279,7 +1420,10 @@ export async function submitPhoneCode(phoneValue: unknown, codeValue: unknown) {
   if (!challenge.phoneCodeHash) throw new Error("验证码挑战已损坏，请重新发送");
   return safeOperation(
     async () => {
-      const connection = await newClient(flow.encrypted_session);
+      const connection = await newClient(
+        flow.encrypted_session,
+        "手机号登录：提交验证码",
+      );
       const { client, session } = connection;
       try {
         let result: Api.auth.TypeAuthorization;
@@ -1324,7 +1468,10 @@ export async function submitTwoFactorPassword(passwordValue: unknown) {
   const flow = await requireFlow(["waiting_password"]);
   return safeOperation(
     async () => {
-      const connection = await newClient(flow.encrypted_session);
+      const connection = await newClient(
+        flow.encrypted_session,
+        "Telegram 两步验证",
+      );
       const { client, session } = connection;
       let passwordError: unknown;
       try {
@@ -1351,7 +1498,7 @@ export async function submitTwoFactorPassword(passwordValue: unknown) {
 }
 
 async function qrStep(encryptedSession = "") {
-  const connection = await newClient(encryptedSession);
+  const connection = await newClient(encryptedSession, "Telegram 二维码登录");
   const { client, session } = connection;
   try {
     let result = await client.invoke(
@@ -1458,7 +1605,10 @@ export async function restoreMtprotoSession() {
   if (!row) throw new Error("网站端没有已保存的 Telegram Session");
   return safeOperation(
     async () => {
-      const connection = await newClient(row.encrypted_session);
+      const connection = await newClient(
+        row.encrypted_session,
+        "恢复已保存 Session",
+      );
       const { client, session } = connection;
       try {
         if (!(await client.checkAuthorization()))
@@ -1492,13 +1642,18 @@ export async function logoutMtproto() {
   let remoteLoggedOut = false;
   if (row) {
     try {
-      const { client } = await newClient(row.encrypted_session);
+      const { client } = await newClient(
+        row.encrypted_session,
+        "退出并删除个人账号 Session",
+      );
       try {
         remoteLoggedOut = await client.logOut();
       } finally {
         await disconnect(client);
       }
-    } catch {
+    } catch (error) {
+      if (classifyMtprotoError(error).code === "TELEGRAM_SESSION_BUSY")
+        throw classifiedMtprotoError(error);
       remoteLoggedOut = false;
     }
   }

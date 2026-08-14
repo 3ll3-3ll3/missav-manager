@@ -51,6 +51,29 @@ test("Telegram 登录错误只返回安全枚举，不回显原始敏感内容",
     code: "MTPROTO_RETRY_EXHAUSTED",
     message: "Telegram 在切换数据中心或初始化连接后仍未完成请求",
   });
+  assert.deepEqual(
+    security.classifyMtprotoError(
+      new Error(
+        "Concurrent usage of the current session from multiple connections was detected, the current session was invalidated by the server for security reasons! (caused by InvokeWithLayer)",
+      ),
+    ),
+    {
+      code: "SESSION_CONCURRENT_INVALIDATED",
+      message:
+        "Telegram 检测到同一 Session 被重复连接，当前 Session 已失效。请到全局 Telegram 中心重新登录一次",
+    },
+  );
+  assert.deepEqual(
+    security.classifyMtprotoError({
+      code: "TELEGRAM_SESSION_BUSY",
+      message: "opaque worker detail",
+    }),
+    {
+      code: "TELEGRAM_SESSION_BUSY",
+      message:
+        "上一项 Telegram 个人账号操作仍在安全收尾，请稍后重试；系统已阻止重复连接",
+    },
+  );
   const safe = security.safeMtprotoError(new Error("phone +6591234567 password=hunter2 session=secret"));
   assert.equal(safe, "Telegram 登录请求失败");
   assert.doesNotMatch(safe, /6591234567|hunter2|session=secret/);

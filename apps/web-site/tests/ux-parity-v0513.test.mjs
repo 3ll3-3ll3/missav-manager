@@ -719,3 +719,36 @@ test("Telegram 和任务写接口继续强制身份校验", async () => {
   assert.match(telegram, /WHERE q\.tool=\? AND q\.id IN/);
   assert.match(telegram, /不属于当前工具或绑定已变化/);
 });
+
+test("个人 Session 使用跨 Worker 独占租约，安全停止等待连接释放后才允许重试", async () => {
+  const server = await readFile(
+    projectFile("lib/server-mtproto.ts"),
+    "utf8",
+  );
+  const lease = await readFile(projectFile("lib/mtproto-lease.ts"), "utf8");
+  const route = await readFile(
+    projectFile("app/api/telegram/route.ts"),
+    "utf8",
+  );
+  const panel = await readFile(
+    projectFile("app/components/telegram-panel.tsx"),
+    "utf8",
+  );
+  const store = await readFile(projectFile("lib/server-store.ts"), "utf8");
+  assert.ok(
+    server.indexOf("acquirePersonalSessionLease") <
+      server.indexOf("connectedClient(sessionText, attempt)"),
+    "lease must be acquired before restoring a Telegram connection",
+  );
+  assert.match(server, /clientLeases/);
+  assert.match(server, /runtime\.lease\.release/);
+  assert.match(server, /SESSION_CONCURRENT_INVALIDATED/);
+  assert.match(lease, /ON CONFLICT\(key\) DO UPDATE/);
+  assert.match(lease, /WHERE app_settings\.updated_at<=\?/);
+  assert.match(lease, /DELETE FROM app_settings WHERE key=\? AND value_json=\?/);
+  assert.match(route, /view"\) === "personal-session-lease"/);
+  assert.match(panel, /waitForPersonalSessionIdle/);
+  assert.match(panel, /安全停止完成：服务端连接已释放/);
+  assert.match(panel, /去全局 Telegram 重新登录/);
+  assert.match(store, /key NOT LIKE '__internal\.%'/);
+});

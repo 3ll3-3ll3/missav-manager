@@ -33,6 +33,7 @@ import {
   discoverPersonalSources,
   logoutMtproto,
   markTelegramSourceRead,
+  mtprotoSessionLeaseStatus,
   mtprotoStatus,
   syncPersonalSources,
 } from "../../../lib/server-mtproto";
@@ -307,6 +308,11 @@ export async function GET(request: Request) {
     if (params.get("view") === "tool") {
       const tool = String(params.get("tool") || "");
       return Response.json(await telegramToolStatus(tool), {
+        headers: { "cache-control": "private, no-store" },
+      });
+    }
+    if (params.get("view") === "personal-session-lease") {
+      return Response.json(await mtprotoSessionLeaseStatus(), {
         headers: { "cache-control": "private, no-store" },
       });
     }
