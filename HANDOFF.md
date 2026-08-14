@@ -7,13 +7,23 @@
 - 工作分支：`codex/cloud/web-ux-parity-v0513`。
 - 本轮真实源码基线：生产 Sites v26 对应提交 `124e80b491eb4b7a3dee5f3e8eb44aeffc317f9e`，不是按部署编号推测。
 - Telegram 云端参考：PR #3 的 `codex/cloud/tg-session-center-handoff`，核对时 HEAD 为 `17fe8e2ac1a4d930d215d2cebb87916bc31c1fce`。
-- GitHub PR #4 是同名网站分支；本轮开始时远端 HEAD 为 `218ce95914b9db9d3205eedf6d52d4d2422e92d7`，最终以本文件所在提交为准。
+- GitHub PR #4 是同名网站分支；本轮开始时远端 HEAD 为 `05c46a19a5db443db46f66de0009dc319ec46504`，最终以本文件所在提交为准。
 - 当前生产继续为 Sites v26；本轮只保留私人 Agent Preview，未创建 Sites checkpoint，未部署 v22 或其他生产版本。
 - 未修改 `codex/v0.5.13-desktop-stable`、`v0.5.13-desktop-baseline`、Windows 标签、Release、EXE、正式 D1 或任何 Secret。
 
 开始前已完整阅读 `AGENTS.md`、本文件、`docs/CHATGPT_WORK_SITE_HANDOFF.md`，并核对 `apps/desktop-v05` 的 App、HomeView、ToolWorkspace、TelegramToolWorkspace、SpreadsheetTable、TaskCenterView 和规则实现。
 
 ## 2. 本轮关闭的问题
+
+### Telegram 工具页的真实动作与性能边界
+
+- 每个工具的 Telegram 输入已拆成三个真实动作：`日常增量同步`、`加载历史`、`仅刷新本地队列`；处理所选消息是第四个独立忙碌状态。`loadMode`、每来源上限 1～100,000 和可选起止分钟进入同一服务端验证契约，结束分钟覆盖 `:59.999`。
+- `incremental` 使用各个人来源连续检查点；`recent` 拉最近 N 条但不推进日常检查点；`range` 接受开始/结束任意一端；`history` 从本地最早消息继续向前。Bot 只在 `incremental` 消费账号级唯一 `getUpdates` offset，历史三模式明确跳过 Bot，不伪装成历史回拉。
+- 工具页只引用全局连接、Session、Bot offset、统一消息池和来源检查点；来源卡显示连接类型、会话类型、Telegram ID、检查点、待处理/异常、上次同步/错误和本地安全/远端已读位置。绑定抽屉支持搜索并一次提交当前工具新增/移除差异，其他工具绑定不受影响。
+- 远端同步、D1 入库、队列刷新、文本处理、导出和绑定分别使用独立忙碌状态。安全停止只在个人来源 200 条边界、来源并发批次边界或 Bot 已提交页边界生效，已提交 offset/checkpoint 不回退。
+- 消息表默认 200 条/页，可选 50/100/200/500；支持来源、关键词、状态、起止时间、有候选和异常筛选，以及跨页选择、任务/错误列、真实候选预览、复制/TXT/CSV、忽略、恢复、异常重跑、本地测试消息和带恢复点删除。
+- 默认待处理视图隐藏已清理正文、已处理空结果和无候选噪声；审计状态仍可显式查看。远端删除状态不可恢复成待处理。工具切换和刷新不会在来源加载完成前覆盖各工具保存在浏览器内的本次来源选择。
+- 个人多来源仍复用一个授权客户端并保持 3 路有界并发；FloodWait 动态降到 1。单来源失败写入脱敏 `last_error` 并返回失败来源/阶段，不阻塞已安全提交的其他来源。
 
 ### Telegram 同步后 0 条可处理
 
@@ -69,7 +79,7 @@
 cd apps/web-site
 npm run lint          # 通过
 npx tsc --noEmit      # 通过
-npm test              # 通过，74/74；命令内先完成生产构建和 Sites 产物校验
+npm test              # 通过，78/78；命令内先完成生产构建和 Sites 产物校验
 npm run build         # 通过
 npm run db:generate   # 通过；No schema changes
 cd ../..
@@ -78,29 +88,31 @@ git diff --check      # 通过
 
 测试覆盖五工具规则夹具、富文本 Telegram 链接与时间戳、跨工具一次入池/独立队列、事务提交与失败回滚、字段级纯文本范围、独立路由和状态恢复、历史、多格式导出、表格键盘选择、处理中心打开任务、123AV 导入预览、MissAV 两层黑名单与三目录，以及所有者权限和 Secret 边界。
 
-Agent Preview 已在运行时提供的 1363×936 视口完成操作验收：
+Agent Preview 已在运行时提供的约 1366×936 视口完成操作验收：
 
 - Bad.news 输入混合 `/app`、其他域名、带参数主题链接和重复主题链接，只得到一条规范链接；复制当前筛选实际得到 `https://bad.news/t/6295976` 一行。
 - 推特的博主名与主页分别输出；MissAV 显示完整脚本文本；123AV 显示本地任务交接和稳定 CSV 字段。
 - 工具切换及页面刷新后，已保存 Bad.news 任务与结果仍能恢复。
 - 处理中心可打开该任务并显示相同字段级纯文本，再回到 Bad.news 结果页完整恢复该 run。应用页面未产生运行时错误；云浏览器自身扩展有与网站无关的 metadata 日志。
 - Telegram 工具输入只显示全局连接复用说明、当前工具绑定来源和严格空状态，不再显示已清理噪声行。
+- 工具内 Telegram 工作区实际显示三种独立动作、1～100,000 扫描上限、范围分钟、候选/异常筛选、200 条默认分页和大表格区域；无绑定来源时“仅刷新本地队列”返回 `读取 0 条，本次没有访问 Telegram`。
+- 本轮 Bad.news 混合 `/app`、其他域名、带参数主题链接和重复链接，规范结果及剪贴板均严格为 `https://bad.news/t/918273` 一行。
 
 预览运行时未提供可设置为 390×844 的视口接口，因此没有伪报真机截图；响应式断点、移动卡片、选择与导出由源码和自动测试验证，仍需所有者用真实移动端验收。
 
 ### 合成性能基准（Node + SQLite D1 模拟器）
 
 ```text
-100 / 1,000 / 10,000 同来源分组 p95：0.067 / 0.197 / 3.392 ms
-1,000 条 Bad.news 纯规则：p50 2.673 ms，p95 3.456 ms
-1,000 条一次服务端导入、一个来源绑定五工具：140.296 ms
+100 / 1,000 / 10,000 同来源分组 p95：0.311 / 0.335 / 4.775 ms
+1,000 条 Bad.news 纯规则：p50 2.144 ms，p95 4.088 ms
+1,000 条一次服务端导入、一个来源绑定五工具：507.988 ms
   D1 模拟请求 110，batch 107，SQL 语句 7,041；消息 1,000，队列 5,000，聚合任务 5
 重复导入同一 1,000 条：D1 模拟请求 11，batch 8，SQL 语句 49
-1,000 条缓存消息过滤并保存：108.082 ms
-  读取与恢复点 34.030 ms；规则 6.239 ms；保存 34.563 ms；状态更新与集合清理 19.047 ms
+1,000 条缓存消息过滤并保存：102.199 ms
+  读取与恢复点 29.091 ms；规则 4.308 ms；保存 29.126 ms；状态更新与集合清理 21.953 ms
 ```
 
-旧前端每 10 条一次请求，1,000 条会产生 100 次完整 HTTP 导入；现为一次上传、服务端按 100 条受控块处理。旧提交没有可重复的 D1 调用计数探针，因此不伪造“优化前 SQL 次数”；本轮测试新增了优化后请求、batch 和语句计数。三条查询计划分别命中 `telegram_tool_queue_tool_status_date_id_idx`、`telegram_messages_source_date_id_idx`、`telegram_tool_queue_message_status_idx`。
+旧前端每 10 条一次请求，1,000 条会产生 100 次完整 HTTP 导入；现为一次上传、服务端受控分块处理。旧提交没有可重复的 D1 调用计数探针，因此不伪造“优化前 SQL 次数或耗时”；当前请求、batch 和语句计数由自动测试直接记录。三条查询计划分别命中 `telegram_tool_queue_tool_status_date_id_idx`、`telegram_messages_source_date_id_idx`、`telegram_tool_queue_message_status_idx`。合成墙钟时间会受共享运行时抖动影响，本轮多次导入落在约 189～508 ms，均低于 2 秒目标；不把该值冒充 Sites D1 p50/p95。
 
 这些是合成数据，不代表 Sites D1 p50/p95。真实 Bot 100 条、个人 API 200 条及 Sites D1 网络/数据库分段耗时仍为待用户 E2E。
 

@@ -19,6 +19,55 @@ export type TelegramDeliveryRule = {
   boundAtMessageId: string;
 };
 
+export type TelegramRemoteLoadMode =
+  | "incremental"
+  | "recent"
+  | "range"
+  | "history";
+
+export function normalizeTelegramToolSyncRequest(input: {
+  tool: string;
+  sourceIds: unknown[];
+  mode?: unknown;
+  limit?: unknown;
+  start?: unknown;
+  end?: unknown;
+}) {
+  const requestedMode = String(input.mode || "incremental");
+  const mode: TelegramRemoteLoadMode = [
+    "incremental",
+    "recent",
+    "range",
+    "history",
+  ].includes(requestedMode)
+    ? (requestedMode as TelegramRemoteLoadMode)
+    : "incremental";
+  return {
+    tool: String(input.tool || ""),
+    sourceIds: [
+      ...new Set(input.sourceIds.map(String).map((value) => value.trim()).filter(Boolean)),
+    ].slice(0, 100),
+    mode,
+    limit: Math.min(
+      100_000,
+      Math.max(1, Math.trunc(Number(input.limit) || 1_000)),
+    ),
+    start: String(input.start || "").slice(0, 40),
+    end: String(input.end || "").slice(0, 40),
+  };
+}
+
+/** datetime-local ends at the end of the selected minute, not its first ms. */
+export function telegramRangeMilliseconds(startValue: unknown, endValue: unknown) {
+  const startText = String(startValue || "").trim();
+  const endText = String(endValue || "").trim();
+  const start = startText ? Date.parse(startText) : Number.NaN;
+  let end = endText ? Date.parse(endText) : Number.NaN;
+  if (Number.isFinite(end) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(endText))
+    end += 59_999;
+  return { start, end };
+}
+
 const TELEGRAM_BADNEWS_HINT = /https?:\/\/(?:www\.)?bad\.news\/t\/\d+/i;
 const TELEGRAM_HAIJIAO_HINT =
   /https?:\/\/(?:www\.)?haijiaolove\.xyz\/(?:hjjd|hjmz|hjyc|hjfn|hjsz|hjrq|hjhj)\/\d+\.html/i;
@@ -104,6 +153,7 @@ export async function runAdaptiveTelegramSourceQueue<T, R>(
   items: T[],
   worker: (item: T, index: number) => Promise<R>,
   requestedConcurrency = 3,
+  shouldStop: () => boolean = () => false,
 ) {
   const initialConcurrency = Math.max(
     1,
@@ -113,7 +163,12 @@ export async function runAdaptiveTelegramSourceQueue<T, R>(
   let reducedByFlood = false;
   const results = new Array<R>(items.length);
   let offset = 0;
+  let stopped = false;
   while (offset < items.length) {
+    if (shouldStop()) {
+      stopped = true;
+      break;
+    }
     const indexes = Array.from(
       { length: Math.min(concurrency, items.length - offset) },
       (_, index) => offset + index,
@@ -138,10 +193,12 @@ export async function runAdaptiveTelegramSourceQueue<T, R>(
     offset += indexes.length;
   }
   return {
-    results,
+    results: results.slice(0, offset),
     initialConcurrency,
     finalConcurrency: concurrency,
     reducedByFlood,
+    stopped,
+    completed: offset,
   };
 }
 

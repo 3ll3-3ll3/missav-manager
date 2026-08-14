@@ -183,3 +183,21 @@ test("个人来源并发遇到 FloodWait 后降为 1，只重试受影响来源"
     6,
   );
 });
+
+test("安全停止只在来源并发批次边界生效，已完成结果不会回退", async () => {
+  let completed = 0;
+  let stop = false;
+  const queue = await telegram.runAdaptiveTelegramSourceQueue(
+    ["a", "b", "c", "d", "e", "f"],
+    async (source) => {
+      completed += 1;
+      if (completed === 3) stop = true;
+      return source;
+    },
+    3,
+    () => stop,
+  );
+  assert.equal(queue.stopped, true);
+  assert.equal(queue.completed, 3);
+  assert.deepEqual(queue.results, ["a", "b", "c"]);
+});

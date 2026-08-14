@@ -8,7 +8,9 @@ import {
   bindTelegramSource,
   checkTelegramBotConnection,
   createTelegramSnapshot,
+  createTelegramLocalQueueMessage,
   deleteTelegramBotConnection,
+  deleteTelegramQueueRows,
   exportTelegramQueue,
   importTelegramMessages,
   listTelegramQueue,
@@ -35,7 +37,10 @@ import {
   syncPersonalSources,
 } from "../../../lib/server-mtproto";
 import { redact } from "../../../lib/security";
-import type { TelegramImportMessage } from "../../../lib/telegram";
+import {
+  normalizeTelegramToolSyncRequest,
+  type TelegramImportMessage,
+} from "../../../lib/telegram";
 
 function processTelegramStream(
   tool: string,
@@ -92,10 +97,17 @@ type ToolSyncInput = {
 async function runToolSourceSync(
   input: ToolSyncInput,
   onProgress?: (progress: Record<string, unknown>) => void,
+  shouldStop: () => boolean = () => false,
 ) {
-  const requestedSourceIds = Array.isArray(input.sourceIds)
-    ? input.sourceIds.map(String)
-    : [];
+  const normalized = normalizeTelegramToolSyncRequest({
+    tool: String(input.tool || ""),
+    sourceIds: Array.isArray(input.sourceIds) ? input.sourceIds : [],
+    mode: input.mode,
+    limit: input.limit,
+    start: input.start,
+    end: input.end,
+  });
+  const requestedSourceIds = normalized.sourceIds;
   onProgress?.({
     phase: "scope",
     label: "正在核对当前工具绑定来源",
@@ -107,11 +119,7 @@ async function runToolSourceSync(
     tool: String(input.tool || ""),
     sourceIds: requestedSourceIds,
   });
-  const mode = ["incremental", "recent", "range", "history"].includes(
-    String(input.mode),
-  )
-    ? (input.mode as "incremental" | "recent" | "range" | "history")
-    : "incremental";
+  const mode = normalized.mode;
   let inserted = 0;
   let personalProgressInserted = 0;
   const personal = scope.personalSourceIds.length
@@ -119,9 +127,9 @@ async function runToolSourceSync(
         {
           sourceIds: scope.personalSourceIds,
           mode,
-          limit: Number(input.limit || 200),
-          start: String(input.start || ""),
-          end: String(input.end || ""),
+          limit: normalized.limit,
+          start: normalized.start,
+          end: normalized.end,
         },
         (progress) => {
           if (progress.phase === "source_completed")
@@ -132,43 +140,77 @@ async function runToolSourceSync(
             resultCount: personalProgressInserted,
           });
         },
+        shouldStop,
       )
     : null;
   inserted = Number(personal?.inserted || 0);
   // Bot owns one account-wide getUpdates cursor; pages commit independently.
-  const bot = scope.botSourceIds.length
-    ? await pullTelegramBot((progress) =>
-        onProgress?.({
-          ...progress,
-          current: scope.personalSourceIds.length,
-          total: requestedSourceIds.length,
-          resultCount: inserted + progress.inserted,
+  const bot =
+    scope.botSourceIds.length && mode === "incremental"
+      ? await pullTelegramBot(
+        (progress) =>
+          onProgress?.({
+            ...progress,
+            current: scope.personalSourceIds.length,
+            total: requestedSourceIds.length,
+            resultCount: inserted + progress.inserted,
         }),
+        { limit: normalized.limit, shouldStop },
       )
-    : null;
+      : scope.botSourceIds.length
+        ? {
+            skipped: true,
+            reason:
+              "Bot API 不提供历史分页；历史模式只读取所选个人 API 来源，Bot 仍保留全局 getUpdates 单游标",
+            inserted: 0,
+            stopped: false,
+          }
+        : null;
   inserted += Number(bot?.inserted || 0);
+  const stopped = Boolean(personal?.stopped || bot?.stopped || shouldStop());
   onProgress?.({
     phase: "completed",
-    label: "同步完成，offset 与检查点已安全提交",
+    label: stopped
+      ? "已在安全批次边界停止，已提交的 offset 与检查点已保留"
+      : "同步完成，offset 与检查点已安全提交",
     current: requestedSourceIds.length,
     total: requestedSourceIds.length,
     resultCount: inserted,
   });
-  return { scope, personal, bot, reusedGlobalCursor: true };
+  return {
+    scope,
+    request: normalized,
+    personal,
+    bot,
+    stopped,
+    reusedGlobalCursor: true,
+  };
 }
 
 function syncToolSourcesStream(input: ToolSyncInput) {
   const encoder = new TextEncoder();
+  let stopRequested = false;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const send = (payload: Record<string, unknown>) =>
-        controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
-      void runToolSourceSync(input, (progress) =>
-        send({ type: "progress", progress }),
+      const send = (payload: Record<string, unknown>) => {
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+        } catch {
+          stopRequested = true;
+        }
+      };
+      void runToolSourceSync(
+        input,
+        (progress) => send({ type: "progress", progress }),
+        () => stopRequested,
       )
         .then((result) => {
           send({ type: "complete", result });
-          controller.close();
+          try {
+            controller.close();
+          } catch {
+            // The browser may have requested a safe stop after a committed batch.
+          }
         })
         .catch((error) => {
           send({
@@ -179,8 +221,15 @@ function syncToolSourcesStream(input: ToolSyncInput) {
                 : String(error || "Telegram 同步失败"),
             ),
           });
-          controller.close();
+          try {
+            controller.close();
+          } catch {
+            // A cancelled stream already closed its controller.
+          }
         });
+    },
+    cancel() {
+      stopRequested = true;
     },
   });
   return new Response(stream, {
@@ -238,7 +287,7 @@ export async function GET(request: Request) {
         await listTelegramQueue({
           tool: params.get("tool") || "",
           page: Number(params.get("page") || 1),
-          pageSize: Number(params.get("pageSize") || 50),
+          pageSize: Number(params.get("pageSize") || 200),
           status: params.get("status") || "",
           search: params.get("search") || "",
           start: params.get("start") || "",
@@ -251,6 +300,7 @@ export async function GET(request: Request) {
             .filter(Boolean),
           includeCleaned: params.get("includeCleaned") === "1",
           includeNoise: params.get("includeNoise") === "1",
+          errorOnly: params.get("errorOnly") === "1",
         }),
         { headers: { "cache-control": "private, no-store" } },
       );
@@ -447,6 +497,23 @@ export async function POST(request: Request) {
           queueIds,
           input.status === "ignored" ? "ignored" : "pending",
         ),
+      );
+    }
+    if (input.action === "queue-create-local")
+      return Response.json(
+        await createTelegramLocalQueueMessage({
+          tool: String(input.tool || ""),
+          sourceId: String(input.sourceId || ""),
+          text: String(input.text || ""),
+          messageDate: String(input.messageDate || ""),
+        }),
+      );
+    if (input.action === "queue-delete") {
+      const queueIds = await resolveTelegramQueueSelection(
+        input as Parameters<typeof resolveTelegramQueueSelection>[0],
+      );
+      return Response.json(
+        await deleteTelegramQueueRows(String(input.tool || ""), queueIds),
       );
     }
     if (input.action === "export") {

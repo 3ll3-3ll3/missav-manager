@@ -6,6 +6,7 @@ import { loadModule, projectFile } from "./helpers/bundle.mjs";
 const selection = await loadModule("lib/table-selection.ts");
 const taskStatus = await loadModule("lib/task-status.ts");
 const bindingFilter = await loadModule("lib/telegram-binding-filter.ts");
+const telegram = await loadModule("lib/telegram.ts");
 
 test("一级导航严格保留六项，历史、规则、迁移、恢复点和 Windows 说明进入二级页面", async () => {
   const source = await readFile(projectFile("app/workbench.tsx"), "utf8");
@@ -84,10 +85,110 @@ test("工具内刷新同步只接受当前工具已绑定来源并复用全局�
     /JOIN tool_source_bindings b ON b\.source_id=s\.id AND b\.tool=\?/,
   );
   assert.match(panel, /复用全局连接、Bot offset、统一消息池与来源检查点/);
+  assert.match(route, /scope\.botSourceIds\.length && mode === "incremental"/);
+  assert.match(route, /Bot API 不提供历史分页/);
   assert.doesNotMatch(
     panel,
     /start-phone|start-qr|TELEGRAM_BOT_TOKEN|fetch\([^)]*getUpdates/,
   );
+});
+
+test("工具页把远端拉取、本地队列刷新和消息处理拆成三个真实动作", async () => {
+  const panel = await readFile(
+    projectFile("app/components/telegram-panel.tsx"),
+    "utf8",
+  );
+  const route = await readFile(
+    projectFile("app/api/telegram/route.ts"),
+    "utf8",
+  );
+  for (const label of [
+    "日常增量同步",
+    "加载历史",
+    "安全停止",
+    "仅刷新本地队列",
+    "处理所选",
+  ])
+    assert.match(panel, new RegExp(label));
+  const localRefresh =
+    panel.match(/async function refreshLocalQueue\(\)[\s\S]*?\n  }/)?.[0] ||
+    "";
+  assert.match(localRefresh, /loadQueue\(\)/);
+  assert.doesNotMatch(localRefresh, /streamTelegramSync|sync-tool-sources/);
+  assert.match(panel, /pullRemoteMessages\("incremental"\)/);
+  assert.match(panel, /pullRemoteMessages\(historyMode\)/);
+  assert.match(route, /cancel\(\)\s*\{\s*stopRequested = true/);
+  assert.match(route, /shouldStop/);
+  assert.match(panel, /restoredSelectionTool\.current !== tool/);
+});
+
+test("四种远端模式、数量和可选时间范围进入同一受验证请求契约", () => {
+  for (const mode of ["incremental", "recent", "range", "history"]) {
+    const request = telegram.normalizeTelegramToolSyncRequest({
+      tool: "badnews",
+      sourceIds: ["source-1", "source-1", "source-2"],
+      mode,
+      limit: 100_000,
+      start: "2026-08-14T09:30",
+      end: "2026-08-14T10:45",
+    });
+    assert.deepEqual(request, {
+      tool: "badnews",
+      sourceIds: ["source-1", "source-2"],
+      mode,
+      limit: 100_000,
+      start: "2026-08-14T09:30",
+      end: "2026-08-14T10:45",
+    });
+  }
+  const fallback = telegram.normalizeTelegramToolSyncRequest({
+    tool: "badnews",
+    sourceIds: ["source-1"],
+    mode: "cached",
+    limit: 0,
+  });
+  assert.equal(fallback.mode, "incremental");
+  assert.equal(fallback.limit, 1_000);
+  const bounds = telegram.telegramRangeMilliseconds(
+    "2026-08-14T09:30",
+    "2026-08-14T10:45",
+  );
+  assert.equal(bounds.end - Date.parse("2026-08-14T10:45"), 59_999);
+});
+
+test("工具来源卡、候选筛选、任务错误列和 200 条默认分页完整可用", async () => {
+  const panel = await readFile(
+    projectFile("app/components/telegram-panel.tsx"),
+    "utf8",
+  );
+  const server = await readFile(projectFile("lib/server-telegram.ts"), "utf8");
+  const mtproto = await readFile(projectFile("lib/server-mtproto.ts"), "utf8");
+  const route = await readFile(
+    projectFile("app/api/telegram/route.ts"),
+    "utf8",
+  );
+  for (const label of [
+    "本地检查点",
+    "待处理 / 异常",
+    "本站确认远端已读",
+    "本地安全位置",
+    "只看有候选",
+    "只看异常",
+    "任务 ID / 错误备注",
+    "新增本地消息",
+    "删除本地所选记录",
+  ])
+    assert.match(panel, new RegExp(label.replace("/", "\\/")));
+  assert.match(panel, /useState\(200\)/);
+  for (const size of [50, 100, 200, 500])
+    assert.match(panel, new RegExp(`<option value="${size}">${size} \/ 页`));
+  assert.match(server, /Math\.min\(\s*500,/);
+  assert.match(server, /candidateSummary\([\s\S]*sourceName/);
+  assert.match(mtproto, /phase: "source_error"/);
+  assert.match(mtproto, /UPDATE input_sources SET last_error=/);
+  assert.doesNotMatch(server, /const clauses = \[\s*"q\.tool=\?",\s*"EXISTS/);
+  assert.match(route, /queue-create-local/);
+  assert.match(route, /queue-delete/);
 });
 
 test("默认绑定编辑器突出当前工具、待新增待移除及其他工具绑定，高级入口保留五列矩阵", async () => {

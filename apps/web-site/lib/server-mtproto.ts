@@ -20,7 +20,9 @@ import { ingestTelegramMessages } from "./server-telegram";
 import {
   runAdaptiveTelegramSourceQueue,
   telegramDate,
+  telegramFloodWaitError,
   telegramMessageText,
+  telegramRangeMilliseconds,
   telegramSyncCheckpointPlan,
   type TelegramImportMessage,
 } from "./telegram";
@@ -641,6 +643,7 @@ export async function syncPersonalSources(
     end?: string;
   },
   onProgress?: (progress: PersonalSyncProgress) => void,
+  shouldStop: () => boolean = () => false,
 ) {
   const requested = [
     ...new Set((input.sourceIds ?? []).map(String).filter(Boolean)),
@@ -648,11 +651,13 @@ export async function syncPersonalSources(
   if (!requested.length) throw new Error("请先在会话库选择要同步的来源");
   const mode = input.mode || "incremental";
   const limit = Math.min(
-    20_000,
-    Math.max(1, Math.trunc(Number(input.limit) || 200)),
+    100_000,
+    Math.max(1, Math.trunc(Number(input.limit) || 1_000)),
   );
-  const startTime = input.start ? Date.parse(input.start) : Number.NaN;
-  const endTime = input.end ? Date.parse(input.end) : Number.NaN;
+  const { start: startTime, end: endTime } = telegramRangeMilliseconds(
+    input.start,
+    input.end,
+  );
   if (mode === "range" && input.start && !Number.isFinite(startTime))
     throw new Error("同步开始时间无效");
   if (mode === "range" && input.end && !Number.isFinite(endTime))
@@ -689,7 +694,9 @@ export async function syncPersonalSources(
     duplicates: 0,
     queues: 0,
     sources: 0,
+    errors: 0,
     hasMore: false,
+    stopped: false,
   };
   try {
     const dynamic = dynamicClient(client);
@@ -703,6 +710,7 @@ export async function syncPersonalSources(
         const sourceName = String(
           source.name || source.external_chat_id || sourceId,
         );
+        try {
         onProgress?.({
           phase: "resolving",
           label: `正在解析来源：${sourceName}`,
@@ -736,6 +744,7 @@ export async function syncPersonalSources(
         const entityMs = performance.now() - entityStarted;
         const messages: TelegramImportMessage[] = [];
         let scannedRemote = 0;
+        let sourceStopped = false;
         const remoteStarted = performance.now();
         onProgress?.({
           phase: "pulling",
@@ -746,6 +755,10 @@ export async function syncPersonalSources(
         });
         for await (const value of dynamic.iterMessages(entity, options)) {
           scannedRemote += 1;
+          if (messages.length > 0 && messages.length % 200 === 0 && shouldStop()) {
+            sourceStopped = true;
+            break;
+          }
           const message = (value ?? {}) as Record<string, unknown>;
           const id = String(message.id ?? "");
           if (!id) continue;
@@ -789,7 +802,7 @@ export async function syncPersonalSources(
           });
         }
         const remoteMs = performance.now() - remoteStarted;
-        const hasMore = scannedRemote > limit;
+        const hasMore = scannedRemote > limit || sourceStopped;
         const databaseStarted = performance.now();
         onProgress?.({
           phase: "saving",
@@ -811,6 +824,7 @@ export async function syncPersonalSources(
         totals.queues += commit.queues;
         totals.sources += 1;
         totals.hasMore ||= hasMore;
+        totals.stopped ||= sourceStopped;
         const checkpointPlan = telegramSyncCheckpointPlan({
           mode,
           checkpoint,
@@ -824,7 +838,7 @@ export async function syncPersonalSources(
         await getD1().batch([
           getD1()
             .prepare(
-              `UPDATE input_sources SET last_sync_at=?,
+          `UPDATE input_sources SET last_sync_at=?,last_error='',
           incremental_checkpoint_id=CASE WHEN ?='incremental' AND ?>CAST(incremental_checkpoint_id AS INTEGER) THEN CAST(? AS TEXT) ELSE incremental_checkpoint_id END,
           sync_cursor_message_id=CASE WHEN ?='history' AND ?>0 THEN CAST(? AS TEXT) WHEN ?='incremental' AND ?=1 THEN CAST(? AS TEXT) WHEN ?='incremental' THEN '' ELSE sync_cursor_message_id END,
           sync_target_message_id=CASE WHEN ?='incremental' AND ?=1 THEN CAST(? AS TEXT) WHEN ?='incremental' THEN '' ELSE sync_target_message_id END,
@@ -969,13 +983,61 @@ export async function syncPersonalSources(
           databaseMs: performance.now() - databaseStarted,
           totalMs: performance.now() - sourceStarted,
         };
+        } catch (error) {
+          const safeError = safeMtprotoError(error);
+          await getD1()
+            .prepare(
+              "UPDATE input_sources SET last_error=?,updated_at=? WHERE id=?",
+            )
+            .bind(safeError.slice(0, 500), nowIso(), sourceId)
+            .run();
+          if (telegramFloodWaitError(error)) throw error;
+          totals.errors += 1;
+          completedSources += 1;
+          onProgress?.({
+            phase: "source_error",
+            label: `${sourceName} 拉取失败，可单独重试`,
+            current: completedSources,
+            total: totalSources,
+            sourceName,
+          });
+          return {
+            sourceId,
+            sourceName,
+            error: safeError,
+            totalMs: performance.now() - sourceStarted,
+          };
+        }
       },
       3,
+      shouldStop,
     );
+    totals.stopped ||= sourceQueue.stopped;
+    const completedTimings = sourceQueue.results.filter(Boolean) as Array<{
+      sourceId?: string;
+      sourceName?: string;
+      error?: string;
+      entityMs?: number;
+      remoteMs?: number;
+      databaseMs?: number;
+      totalMs?: number;
+    }>;
     const timings = {
       connectionMs,
+      entityMs: completedTimings.reduce(
+        (sum, item) => sum + Number(item.entityMs || 0),
+        0,
+      ),
+      remoteMs: completedTimings.reduce(
+        (sum, item) => sum + Number(item.remoteMs || 0),
+        0,
+      ),
+      databaseMs: completedTimings.reduce(
+        (sum, item) => sum + Number(item.databaseMs || 0),
+        0,
+      ),
       totalMs: performance.now() - totalStarted,
-      sources: sourceQueue.results,
+      sources: completedTimings,
     };
     const result = {
       ...totals,
@@ -984,6 +1046,14 @@ export async function syncPersonalSources(
         final: sourceQueue.finalConcurrency,
         reducedByFlood: sourceQueue.reducedByFlood,
       },
+      failures: completedTimings
+        .filter((item) => item.error)
+        .map((item) => ({
+          sourceId: item.sourceId,
+          sourceName: item.sourceName,
+          stage: "source_sync",
+          error: item.error,
+        })),
       timings,
     };
     await writeLog("info", "telegram_mtproto", "个人账号来源同步完成", result);

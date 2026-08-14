@@ -8,7 +8,8 @@ import {
   groupTelegramImportMessages,
   telegramBindingAcceptsMessage,
   telegramBotUpdates,
-  telegramCandidateHint,
+  telegramDate,
+  telegramRangeMilliseconds,
   type TelegramImportMessage,
 } from "./telegram";
 import type { ToolId } from "./types";
@@ -602,7 +603,11 @@ async function commitMessages(
           const summary =
             lifecycle === "deleted"
               ? { count: 0, preview: "" }
-              : telegramCandidateHint(binding.tool, body);
+              : candidateSummary(
+                  binding.tool as ToolId,
+                  body,
+                  sourceName || "Telegram",
+                );
           if (existingQueues.has(queueKey)) {
             if (existing)
               messageStatements.push(
@@ -1028,13 +1033,17 @@ export async function telegramToolStatus(toolValue: string) {
   const [sources, bindings] = await getD1().batch([
     getD1()
       .prepare(
-        `SELECT s.*,
+        `SELECT s.*,r.policy AS read_policy,r.safe_read_message_id,r.last_marked_read_message_id,r.read_baseline_message_id,
       (SELECT COUNT(*) FROM telegram_messages m WHERE m.source_id=s.id) AS message_count,
-      (SELECT COUNT(*) FROM telegram_tool_queue q JOIN telegram_messages qm ON qm.id=q.telegram_message_id WHERE qm.source_id=s.id AND q.tool=? AND q.status='pending') AS pending_count
+      (SELECT COUNT(*) FROM telegram_tool_queue q JOIN telegram_messages qm ON qm.id=q.telegram_message_id WHERE qm.source_id=s.id AND q.tool=? AND q.status='pending') AS pending_count,
+      (SELECT COUNT(*) FROM telegram_tool_queue q JOIN telegram_messages qm ON qm.id=q.telegram_message_id WHERE qm.source_id=s.id AND q.tool=? AND q.status='error') AS error_count,
+      (SELECT status FROM telegram_sync_runs sr WHERE sr.source_id=s.id ORDER BY sr.started_at DESC,sr.id DESC LIMIT 1) AS last_sync_status,
+      (SELECT error_message FROM telegram_sync_runs sr WHERE sr.source_id=s.id ORDER BY sr.started_at DESC,sr.id DESC LIMIT 1) AS last_sync_error
       FROM input_sources s JOIN tool_source_bindings b ON b.source_id=s.id AND b.tool=?
+      LEFT JOIN telegram_read_states r ON r.source_id=s.id
       WHERE s.archived=0 ORDER BY s.updated_at DESC`,
       )
-      .bind(tool, tool),
+      .bind(tool, tool, tool),
     getD1()
       .prepare(
         "SELECT source_id,tool,history_mode,history_limit,history_from,bound_at_message_id,created_at FROM tool_source_bindings WHERE tool=? ORDER BY source_id",
@@ -1235,6 +1244,7 @@ export type BotSyncProgress = {
 
 export async function pullTelegramBot(
   onProgress?: (progress: BotSyncProgress) => void,
+  options: { limit?: number; shouldStop?: () => boolean } = {},
 ) {
   await ensureSchema();
   const secret = token();
@@ -1286,9 +1296,25 @@ export async function pullTelegramBot(
   let hashMs = 0;
   let databaseMs = 0;
   let hasMore = false;
+  let stopped = false;
+  const requestedLimit = Math.min(
+    100_000,
+    Math.max(1, Math.trunc(Number(options.limit) || 1_000)),
+  );
+  const maxPages = Math.min(1_000, Math.ceil(requestedLimit / 100));
   const deadline = Date.now() + 12_000;
   try {
-    for (let page = 1; page <= 10; page += 1) {
+    for (let page = 1; page <= maxPages; page += 1) {
+      if (options.shouldStop?.()) {
+        stopped = true;
+        await getD1()
+          .prepare(
+            "UPDATE telegram_bot_state SET lock_until='',updated_at=? WHERE connection_id='telegram-bot'",
+          )
+          .bind(nowIso())
+          .run();
+        break;
+      }
       onProgress?.({
         phase: "pulling",
         label: `正在拉取 Bot 第 ${page} 页`,
@@ -1298,9 +1324,10 @@ export async function pullTelegramBot(
         inserted: totals.inserted,
       });
       const remoteStarted = performance.now();
+      const pageLimit = Math.min(100, requestedLimit - totals.remoteUpdates);
       const payload = await telegramBotApi(secret, "getUpdates", {
         offset: String(offset),
-        limit: "100",
+        limit: String(pageLimit),
         timeout: "0",
         allowed_updates: JSON.stringify([
           "message",
@@ -1317,9 +1344,12 @@ export async function pullTelegramBot(
       totals.remoteUpdates += rawCount;
       const parsed = telegramBotUpdates(payload);
       const nextOffset = parsed.nextOffset || offset;
-      const capped = page >= 10 || Date.now() >= deadline;
-      hasMore = rawCount === 100;
-      const releaseLock = !hasMore || capped;
+      const reachedLimit = totals.remoteUpdates >= requestedLimit;
+      const stopAfterPage = Boolean(options.shouldStop?.());
+      const capped = page >= maxPages || Date.now() >= deadline || reachedLimit;
+      hasMore = rawCount === pageLimit;
+      stopped ||= stopAfterPage;
+      const releaseLock = !hasMore || capped || stopAfterPage;
       const commit = await commitMessages(
         parsed.messages,
         "telegram_bot",
@@ -1345,12 +1375,13 @@ export async function pullTelegramBot(
         received: totals.remoteUpdates,
         inserted: totals.inserted,
       });
-      if (!hasMore || capped || nextOffset <= 0) break;
+      if (!hasMore || capped || stopAfterPage || nextOffset <= 0) break;
     }
     return {
       ...totals,
       pages,
       hasMore,
+      stopped,
       nextOffset: offset,
       webhookCheck: webhook.cached ? "cached" : "fresh",
       timings: {
@@ -2008,6 +2039,7 @@ type QueueFilters = {
   sourceIds?: string[];
   includeCleaned?: boolean;
   includeNoise?: boolean;
+  errorOnly?: boolean;
 };
 
 type TelegramQueueRow = Record<string, unknown>;
@@ -2068,10 +2100,7 @@ function telegramQueueRowIsVisible(
 
 function queueFilter(input: QueueFilters) {
   const tool = cleanTool(input.tool);
-  const clauses = [
-    "q.tool=?",
-    "EXISTS (SELECT 1 FROM tool_source_bindings auth_binding WHERE auth_binding.source_id=m.source_id AND auth_binding.tool=q.tool)",
-  ];
+  const clauses = ["q.tool=?"];
   const values: unknown[] = [tool];
   const sourceIds = [
     ...new Set((input.sourceIds ?? []).map(String).filter(Boolean)),
@@ -2080,22 +2109,27 @@ function queueFilter(input: QueueFilters) {
     clauses.push(`m.source_id IN (${sourceIds.map(() => "?").join(",")})`);
     values.push(...sourceIds);
   }
-  if (input.status) {
+  if (input.errorOnly) {
+    clauses.push("q.status='error'");
+  } else if (input.status) {
     clauses.push("q.status=?");
     values.push(String(input.status).slice(0, 32));
   }
   if (input.search?.trim()) {
-    clauses.push("(m.body LIKE ? OR s.name LIKE ? OR m.message_id LIKE ?)");
+    clauses.push(
+      "(m.body LIKE ? OR s.name LIKE ? OR m.message_id LIKE ? OR q.candidate_preview LIKE ? OR q.error_message LIKE ? OR q.run_id LIKE ?)",
+    );
     const like = `%${input.search.trim().slice(0, 160)}%`;
-    values.push(like, like, like);
+    values.push(like, like, like, like, like, like);
   }
-  if (input.start) {
+  const range = telegramRangeMilliseconds(input.start, input.end);
+  if (Number.isFinite(range.start)) {
     clauses.push("q.message_date>=?");
-    values.push(String(input.start).slice(0, 40));
+    values.push(new Date(range.start).toISOString());
   }
-  if (input.end) {
+  if (Number.isFinite(range.end)) {
     clauses.push("q.message_date<=?");
-    values.push(String(input.end).slice(0, 40));
+    values.push(new Date(range.end).toISOString());
   }
   if (!input.includeCleaned) {
     clauses.push(
@@ -2115,6 +2149,25 @@ function queueFilter(input: QueueFilters) {
   };
 }
 
+async function boundTelegramQueueSources(toolValue: string, requested: string[]) {
+  const tool = cleanTool(toolValue);
+  const sourceIds = [...new Set(requested.map(String).filter(Boolean))].slice(0, 100);
+  const rows = await getD1()
+    .prepare(
+      `SELECT source_id FROM tool_source_bindings WHERE tool=?${
+        sourceIds.length
+          ? ` AND source_id IN (${sourceIds.map(() => "?").join(",")})`
+          : ""
+      } ORDER BY source_id`,
+    )
+    .bind(tool, ...sourceIds)
+    .all();
+  const bound = (rows.results ?? []).map((row) => String(row.source_id));
+  if (sourceIds.length && bound.length !== sourceIds.length)
+    throw new Error("队列范围包含未绑定到当前工具的来源，请刷新绑定后重试");
+  return { tool, sourceIds: bound };
+}
+
 export async function listTelegramQueue(input: {
   tool: string;
   page?: number;
@@ -2126,16 +2179,24 @@ export async function listTelegramQueue(input: {
   sourceIds?: string[];
   includeCleaned?: boolean;
   includeNoise?: boolean;
+  errorOnly?: boolean;
   sort?: string;
   direction?: "asc" | "desc";
 }) {
   await ensureSchema();
   const page = Math.max(1, Math.trunc(Number(input.page) || 1));
   const pageSize = Math.min(
-    200,
-    Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
+    500,
+    Math.max(50, Math.trunc(Number(input.pageSize) || 200)),
   );
-  const { tool, where, from, values } = queueFilter(input);
+  const scope = await boundTelegramQueueSources(input.tool, input.sourceIds ?? []);
+  if (!scope.sourceIds.length)
+    return { rows: [], total: 0, hiddenNoiseCount: 0, page, pageSize };
+  const { tool, where, from, values } = queueFilter({
+    ...input,
+    tool: scope.tool,
+    sourceIds: scope.sourceIds,
+  });
   const sortFields: Record<string, string> = {
     messageDate: "q.message_date",
     source: "s.name",
@@ -2145,7 +2206,7 @@ export async function listTelegramQueue(input: {
   const sort =
     sortFields[String(input.sort || "messageDate")] || "q.message_date";
   const direction = input.direction === "asc" ? "ASC" : "DESC";
-  const select = `SELECT q.*,m.message_id,m.message_date,m.body,m.event_kind,m.remote_edited_at,m.remote_deleted_at,m.body_deleted_at,s.id AS source_id,s.name AS source_name${from}${where}`;
+  const select = `SELECT q.*,m.message_id,m.message_date,m.body,m.event_kind,m.remote_edited_at,m.remote_deleted_at,m.body_deleted_at,s.id AS source_id,s.name AS source_name,s.chat_type AS source_type,s.connection_id${from}${where}`;
   const unknown = input.includeNoise
     ? 0
     : Number(
@@ -2254,6 +2315,7 @@ export async function resolveTelegramQueueSelection(input: {
   sourceIds?: string[];
   includeCleaned?: boolean;
   includeNoise?: boolean;
+  errorOnly?: boolean;
 }) {
   if (input.mode !== "all") {
     const requested = [
@@ -2272,18 +2334,22 @@ export async function resolveTelegramQueueSelection(input: {
         )
         .bind(tool, ...chunk)
         .all();
-      for (const row of rows.results ?? []) {
-        if (telegramQueueRowIsVisible(tool, row as TelegramQueueRow, input))
-          allowed.add(String(row.id));
-      }
+      for (const row of rows.results ?? []) allowed.add(String(row.id));
     }
     if (allowed.size !== requested.length)
       throw new Error(
-        "所选消息已被清理、没有当前工具可用结果，或绑定已变化，请刷新后重试",
+        "所选消息不属于当前工具，或绑定已变化，请刷新后重试",
       );
     return requested;
   }
-  const query = queueFilter(input);
+  await ensureSchema();
+  const scope = await boundTelegramQueueSources(input.tool, input.sourceIds ?? []);
+  if (!scope.sourceIds.length) return [];
+  const query = queueFilter({
+    ...input,
+    tool: scope.tool,
+    sourceIds: scope.sourceIds,
+  });
   const excluded = new Set((input.excludeIds ?? []).map(String));
   const ids: string[] = [];
   let cursor = "";
@@ -2366,6 +2432,12 @@ export async function processTelegramQueue(input: {
       "所选范围包含 Telegram 远端已删除消息；请取消选择后再处理。",
     );
   }
+  if (
+    rows.some((row) => !["pending", "error"].includes(String(row.status)))
+  )
+    throw new Error(
+      "所选范围包含已处理或已忽略消息；请只选择待处理消息，异常消息可使用“重跑异常”。",
+    );
   const emitProgress = (
     phase:
       | "preparing"
@@ -2581,6 +2653,17 @@ export async function updateTelegramQueue(
   const unique = [...new Set(ids.map(String).filter(Boolean))];
   if (unique.length > 100_000)
     throw new Error("单次 Telegram 状态修改最多 100,000 条，请缩小筛选范围。 ");
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const deleted = await getD1()
+      .prepare(
+        `SELECT COUNT(*) AS count FROM telegram_tool_queue WHERE status='deleted' AND id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .first();
+    if (Number(deleted?.count ?? 0) > 0)
+      throw new Error("远端已删除消息只保留审计，不能恢复为待处理或改为已忽略");
+  }
   const snapshotId = unique.length
     ? await createTelegramQueueSnapshot(
         unique,
@@ -2599,6 +2682,166 @@ export async function updateTelegramQueue(
     changed += Number(result.meta?.changes ?? 0);
   }
   return { changed, snapshotId };
+}
+
+export async function createTelegramLocalQueueMessage(input: {
+  tool: string;
+  sourceId: string;
+  text: string;
+  messageDate?: string;
+}) {
+  await ensureSchema();
+  const tool = cleanTool(input.tool);
+  const sourceId = String(input.sourceId || "");
+  const body = String(input.text || "").trim().slice(0, 100_000);
+  if (!sourceId || !body) throw new Error("请选择来源并填写本地测试消息正文");
+  const source = await getD1()
+    .prepare(
+      `SELECT s.* FROM input_sources s JOIN tool_source_bindings b ON b.source_id=s.id AND b.tool=? WHERE s.id=? AND s.archived=0`,
+    )
+    .bind(tool, sourceId)
+    .first();
+  if (!source) throw new Error("本地消息来源未绑定到当前工具");
+  const timestamp = nowIso();
+  const messageDate = telegramDate(input.messageDate) || timestamp;
+  const messageId = `local-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  const messageRowId = crypto.randomUUID();
+  const queueId = crypto.randomUUID();
+  const hash = await sha256Hex(safeJson(["message", body, ""], []));
+  const candidate = candidateSummary(
+    tool,
+    body,
+    String(source.name || "本地测试消息"),
+  );
+  await getD1().batch([
+    getD1()
+      .prepare(
+        `INSERT INTO telegram_message_fingerprints(id,source_id,message_id,content_hash,event_kind,last_remote_update_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        sourceId,
+        messageId,
+        hash,
+        "message",
+        "local",
+        timestamp,
+        timestamp,
+      ),
+    getD1()
+      .prepare(
+        `INSERT INTO telegram_messages(id,source_id,message_id,connection_id,external_message_id,remote_update_id,message_date,body,event_kind,content_hash,remote_edited_at,remote_deleted_at,body_deleted_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .bind(
+        messageRowId,
+        sourceId,
+        messageId,
+        String(source.connection_id || "local"),
+        messageId,
+        "local",
+        messageDate,
+        body,
+        "message",
+        hash,
+        "",
+        "",
+        "",
+        timestamp,
+        timestamp,
+      ),
+    getD1()
+      .prepare(
+        `INSERT INTO telegram_tool_queue(id,telegram_message_id,tool,status,message_date,candidate_count,candidate_preview,run_id,error_message,selected_at,processing_at,processed_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .bind(
+        queueId,
+        messageRowId,
+        tool,
+        "pending",
+        messageDate,
+        candidate.count,
+        candidate.preview.slice(0, 1_000),
+        "",
+        "",
+        "",
+        "",
+        "",
+        timestamp,
+        timestamp,
+      ),
+    getD1()
+      .prepare(
+        `INSERT INTO task_inbox(id,tool,stage,phase,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        tool,
+        "pending",
+        "received",
+        `${TELEGRAM_TOOL_LABELS[tool]} · 本地测试消息`,
+        "",
+        queueId,
+        sourceId,
+        safeJson(
+          {
+            sourceName: String(source.name || ""),
+            pendingCount: 1,
+            total: 1,
+            summary: "1 条本地测试消息待处理",
+          },
+          {},
+        ),
+        timestamp,
+        timestamp,
+      ),
+  ]);
+  await writeLog("info", "telegram", "已新增当前工具本地测试消息", {
+    tool,
+    sourceId,
+    queueId,
+    candidateCount: candidate.count,
+  });
+  return {
+    queueId,
+    messageId,
+    candidateCount: candidate.count,
+    candidatePreview: candidate.preview,
+  };
+}
+
+export async function deleteTelegramQueueRows(toolValue: string, ids: string[]) {
+  await ensureSchema();
+  const tool = cleanTool(toolValue);
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  if (!unique.length) throw new Error("请先选择要删除的本地队列记录");
+  if (unique.length > 100_000)
+    throw new Error("单次最多删除 100,000 条队列记录，请缩小筛选范围");
+  const snapshotId = await createTelegramQueueSnapshot(
+    unique,
+    `删除 ${tool} 本地 Telegram 队列记录前自动恢复点`,
+  );
+  let deleted = 0;
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `DELETE FROM telegram_tool_queue WHERE tool=? AND id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(tool, ...chunk)
+      .run();
+    deleted += Number(result.meta?.changes ?? 0);
+  }
+  if (deleted !== unique.length)
+    throw new Error("部分队列记录在删除前已变化；恢复点已保留，请刷新后核对");
+  await writeLog("warning", "telegram", "已删除当前工具本地队列记录", {
+    tool,
+    deleted,
+    snapshotId,
+  });
+  return { deleted, snapshotId };
 }
 
 export async function exportTelegramQueue(

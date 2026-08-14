@@ -320,6 +320,39 @@ test("一个来源只落一份消息，并向两个工具生成独立队列；�
     2,
   );
 
+  const local = await server.createTelegramLocalQueueMessage({
+    tool: "twitter",
+    sourceId: source.id,
+    text: "本地测试 #Alice_Dev",
+    messageDate: "2026-08-12T00:00:30.000Z",
+  });
+  assert.equal(local.candidateCount, 1);
+  assert.match(local.candidatePreview, /Alice_Dev/);
+  assert.equal(
+    database
+      .prepare("SELECT COUNT(*) AS count FROM telegram_tool_queue WHERE id=?")
+      .get(local.queueId).count,
+    1,
+  );
+  const localDelete = await server.deleteTelegramQueueRows("twitter", [
+    local.queueId,
+  ]);
+  assert.equal(localDelete.deleted, 1);
+  assert.ok(localDelete.snapshotId);
+  assert.equal(
+    database
+      .prepare("SELECT COUNT(*) AS count FROM telegram_tool_queue WHERE id=?")
+      .get(local.queueId).count,
+    0,
+  );
+  assert.equal((await audit.restoreSnapshot(localDelete.snapshotId)).restored, 2);
+  assert.equal(
+    database
+      .prepare("SELECT COUNT(*) AS count FROM telegram_tool_queue WHERE id=?")
+      .get(local.queueId).count,
+    1,
+  );
+
   const edited = await server.ingestTelegramMessages([
     {
       ...base,
@@ -375,6 +408,10 @@ test("一个来源只落一份消息，并向两个工具生成独立队列；�
       .all(message.id)
       .map((row) => ({ ...row })),
     [{ status: "deleted" }],
+  );
+  await assert.rejects(
+    () => server.updateTelegramQueue([twitterQueue.id], "pending"),
+    /远端已删除消息只保留审计/,
   );
 
   const duplicateDelete = await server.ingestTelegramMessages([
@@ -462,6 +499,8 @@ test("Telegram 处理返回实际进度和结果，正文清理后的记录默�
   });
   assert.equal(before.total, 1);
   assert.equal(before.rows[0].message_id, "2");
+  assert.equal(before.rows[0].candidate_count, 1);
+  assert.match(before.rows[0].candidate_preview, /https:\/\/bad\.news\/t\/123456/);
   assert.deepEqual(
     await server.resolveTelegramQueueSelection({
       tool: "badnews",
@@ -471,14 +510,13 @@ test("Telegram 处理返回实际进度和结果，正文清理后的记录默�
     }),
     [queue.id],
   );
-  await assert.rejects(
-    () =>
-      server.resolveTelegramQueueSelection({
-        tool: "badnews",
-        mode: "ids",
-        queueIds: [noiseQueue.id],
-      }),
-    /没有当前工具可用结果/,
+  assert.deepEqual(
+    await server.resolveTelegramQueueSelection({
+      tool: "badnews",
+      mode: "ids",
+      queueIds: [noiseQueue.id],
+    }),
+    [noiseQueue.id],
   );
   const progress = [];
   const result = await server.processTelegramQueue({
@@ -507,6 +545,14 @@ test("Telegram 处理返回实际进度和结果，正文清理后的记录默�
       .get().body,
     "",
   );
+  assert.deepEqual(
+    await server.resolveTelegramQueueSelection({
+      tool: "badnews",
+      mode: "ids",
+      queueIds: [queue.id],
+    }),
+    [queue.id],
+  );
 
   await server.updateTelegramQueue([queue.id], "pending");
   database
@@ -528,6 +574,19 @@ test("Telegram 处理返回实际进度和结果，正文清理后的记录默�
     includeNoise: true,
   });
   assert.equal(audit.total, 2);
+  database
+    .prepare("UPDATE telegram_tool_queue SET status='error' WHERE id=?")
+    .run(noiseQueue.id);
+  const errors = await server.listTelegramQueue({
+    tool: "badnews",
+    sourceIds: [source.id],
+    status: "pending",
+    errorOnly: true,
+    includeCleaned: true,
+    includeNoise: true,
+  });
+  assert.equal(errors.total, 1);
+  assert.equal(errors.rows[0].id, noiseQueue.id);
 
   delete globalThis.__TELEGRAM_TEST_ENV__;
   database.close();
