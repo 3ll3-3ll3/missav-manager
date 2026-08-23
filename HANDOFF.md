@@ -51,13 +51,18 @@
 12. 根据第三轮云端复核，修复 Pull 后续分页失败的成功时间语义：
     - `applyPulledPage()` 现在只原子提交业务数据和 `last_pulled_sequence`，不再逐页更新 `last_success_at`；最近成功时间只在整个 Push/Pull 真正结束的统一出口写入。
     - 新增真实网关回归：第一页 50 条成功落库、第二页模拟网络失败后，已完成断点和 50 条数据保留，`last_success_at` 保持执行前原值，`last_error` 记录失败。
+13. Windows 同步执行器完成失败恢复与协议防卡死加固：
+    - 任一 Push/Pull/预览校验失败都会持久化脱敏、限长的 `last_error`，保留既有成功时间、Pull 游标和已完成分批，同时作废旧预览；UI 明确要求重新预览后继续。
+    - Push 要求网关对本批每个 `operationId` 恰好确认一次；空确认、漏确认、重复确认或批外确认会立即停止，不再无限重复同一批。
+    - Pull 校验操作序列、`next_sequence`、`latest_sequence` 与 `has_more` 的一致性；有后续页但游标未前进会立即停止，不再无限请求同一页。
+    - 仅 Push 且本地无待上传项时不再把已知远端序列误写回 `0`；成功后完整清除预览 ID、哈希、远端序列和预览时间。
 
 ### 本轮最终自动验证
 
 - 网站：TypeScript、ESLint、Vinext 生产构建通过，`90/90` 项测试通过；新增真实网关分块、显式续跑、Pull 后续分页失败、来源复用及消息写入后租约失效回归，构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
 - 同步 Worker：语法检查、`7/7` 项 Miniflare+D1 测试、Wrangler dry-run 通过；未执行正式部署。
 - 仓库总回归：`242/242` 项测试通过，根目录语法检查通过。
-- Windows 统一版：Vue/TypeScript/Vite 构建通过；Rust `cargo check` 通过，`30/30` 项测试通过。
+- Windows 统一版：Vue/TypeScript/Vite 构建通过；Rust `cargo check` 通过，`33/33` 项测试通过，其中新增失败状态、Push 全量确认和 Pull 游标前进回归。
 - `git diff --check` 通过；凭据模式扫描只命中既有安全测试中的明确假 Token 夹具，未发现正式 Secret。
 
 ### 尚未完成，不得提前宣称
@@ -66,6 +71,7 @@
 - `0006_spicy_omega_sentinel.sql` 尚未在正式 D1 执行，未导入或改写任何正式数据。
 - 真实两端首次汇合、断网续传、十万条正式数据与 Telegram 登录/收发 E2E 尚未验收。
 - 当前只是源码、模拟 D1、实际 Worker 代码和构建产物通过，不能描述成“已经上线”。
+- 云端 Work 当前没有可用的 Cloudflare 管理插件，Wrangler 又被其执行环境网络权限层拦截，因此正式 Worker/D1 创建、备份、迁移和部署仍被基础设施权限阻断；这不是 Windows 源码阻断。
 
 ### 下一步交给云端
 

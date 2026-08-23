@@ -730,6 +730,21 @@ impl CloudSyncRuntime {
         database_path: &Path,
         input: SyncRunInput,
     ) -> Result<CloudSyncReport, String> {
+        let result = self.run_sync_inner(database_path, input).await;
+        if let Err(error) = &result {
+            // The original error remains the command result. Persist only a bounded,
+            // redacted summary and invalidate the preview so a retry cannot silently
+            // reuse a view of data that may have partially changed.
+            let _ = record_sync_failure(database_path, error);
+        }
+        result
+    }
+
+    async fn run_sync_inner(
+        &self,
+        database_path: &Path,
+        input: SyncRunInput,
+    ) -> Result<CloudSyncReport, String> {
         let status = self.status(database_path)?;
         if !status.configured {
             return Err("尚未配置云同步".to_string());
@@ -752,7 +767,9 @@ impl CloudSyncRuntime {
                 .await?;
             report.pushed += pushed.pushed;
             report.conflicts += pushed.conflicts;
-            report.latest_remote_sequence = pushed.latest_remote_sequence;
+            report.latest_remote_sequence = report
+                .latest_remote_sequence
+                .max(pushed.latest_remote_sequence);
         }
         if matches!(input.direction, SyncDirection::Pull | SyncDirection::Both) {
             loop {
@@ -762,7 +779,9 @@ impl CloudSyncRuntime {
                 report.pulled += pulled.pulled;
                 report.deleted += pulled.deleted;
                 report.conflicts += pulled.conflicts;
-                report.latest_remote_sequence = pulled.latest_remote_sequence;
+                report.latest_remote_sequence = report
+                    .latest_remote_sequence
+                    .max(pulled.latest_remote_sequence);
                 report.has_more = pulled.has_more;
                 if !pulled.has_more {
                     break;
@@ -771,7 +790,7 @@ impl CloudSyncRuntime {
         }
         let now = Utc::now().to_rfc3339();
         open(database_path)?.execute(
-            "UPDATE cloud_sync_state SET last_success_at=?1,last_remote_sequence=?2,last_error='',preview_id='',preview_local_hash='',updated_at=?1 WHERE singleton=1",
+            "UPDATE cloud_sync_state SET last_success_at=?1,last_remote_sequence=?2,last_error='',preview_id='',preview_local_hash='',preview_remote_sequence=0,previewed_at='',updated_at=?1 WHERE singleton=1",
             params![now,report.latest_remote_sequence],
         ).map_err(|error| error.to_string())?;
         Ok(report)
@@ -999,6 +1018,20 @@ impl CloudSyncRuntime {
             if rows.is_empty() {
                 break;
             }
+            let submitted_ids = rows
+                .iter()
+                .map(|operation| {
+                    operation
+                        .get("operationId")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| "本地同步队列存在无效操作 ID".to_string())
+                })
+                .collect::<Result<HashSet<_>, _>>()?;
+            if submitted_ids.len() != rows.len() {
+                return Err("本地同步队列存在重复操作 ID".to_string());
+            }
             let response = self
                 .client
                 .post(join_url(gateway_url, "v1/sync/push"))
@@ -1019,6 +1052,7 @@ impl CloudSyncRuntime {
             }
             let pushed: PushResponse = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("同步上传结果格式无效：{error}"))?;
+            validate_push_acknowledgements(&submitted_ids, &pushed.accepted, &pushed.rejected)?;
             let connection = open(database_path)?;
             let transaction = connection
                 .unchecked_transaction()
@@ -1091,13 +1125,7 @@ impl CloudSyncRuntime {
         }
         let pulled: PullResponse = serde_json::from_slice(&bytes)
             .map_err(|error| format!("同步下载结果格式无效：{error}"))?;
-        let mut previous_sequence = status.last_pulled_sequence;
-        for operation in &pulled.operations {
-            if operation.sequence <= previous_sequence || operation.node_id.is_empty() {
-                return Err("云端同步序列无效或来源节点缺失".to_string());
-            }
-            previous_sequence = operation.sequence;
-        }
+        validate_pull_page(status.last_pulled_sequence, &pulled)?;
         let mut operations = pulled.operations;
         operations.sort_by_key(sync_apply_priority);
         let mut connection = open(database_path)?;
@@ -2522,6 +2550,73 @@ fn clean_network_error(value: &str) -> String {
     }
 }
 
+fn record_sync_failure(database_path: &Path, error: &str) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let message = clean_network_error(error);
+    open(database_path)?
+        .execute(
+            "UPDATE cloud_sync_state
+             SET last_error=?1,
+                 preview_id='',
+                 preview_local_hash='',
+                 preview_remote_sequence=0,
+                 previewed_at='',
+                 updated_at=?2
+             WHERE singleton=1",
+            params![message, now],
+        )
+        .map_err(|database_error| format!("记录同步失败状态失败：{database_error}"))?;
+    Ok(())
+}
+
+fn validate_push_acknowledgements(
+    submitted_ids: &HashSet<String>,
+    accepted: &[PushAccepted],
+    rejected: &[PushRejected],
+) -> Result<(), String> {
+    let mut acknowledged = HashSet::new();
+    for operation_id in accepted
+        .iter()
+        .map(|value| &value.operation_id)
+        .chain(rejected.iter().map(|value| &value.operation_id))
+    {
+        if !submitted_ids.contains(operation_id) {
+            return Err("同步网关确认了本批之外的操作，已停止以保护本地队列".to_string());
+        }
+        if !acknowledged.insert(operation_id.clone()) {
+            return Err("同步网关重复确认同一操作，已停止以保护本地队列".to_string());
+        }
+    }
+    if acknowledged.len() != submitted_ids.len() {
+        return Err(format!(
+            "同步网关只确认了本批 {} / {} 条操作，进度已保留；请重新预览后重试",
+            acknowledged.len(),
+            submitted_ids.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pull_page(previous_sequence: i64, pulled: &PullResponse) -> Result<(), String> {
+    if pulled.next_sequence < previous_sequence
+        || pulled.latest_sequence < pulled.next_sequence
+        || (pulled.has_more && pulled.next_sequence <= previous_sequence)
+    {
+        return Err("云端同步分页游标无效或没有前进".to_string());
+    }
+    let mut operation_sequence = previous_sequence;
+    for operation in &pulled.operations {
+        if operation.sequence <= operation_sequence || operation.node_id.is_empty() {
+            return Err("云端同步序列无效或来源节点缺失".to_string());
+        }
+        operation_sequence = operation.sequence;
+    }
+    if operation_sequence > pulled.next_sequence {
+        return Err("云端同步分页游标落后于返回数据".to_string());
+    }
+    Ok(())
+}
+
 fn safe_lease_part(value: &str) -> String {
     value
         .trim()
@@ -2733,5 +2828,158 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"operations":batch})).unwrap();
         assert!(body.len() < 4 * 1024 * 1024);
         assert!(batch.len() < 100);
+    }
+
+    #[test]
+    fn push_gateway_must_acknowledge_every_submitted_operation_once() {
+        let submitted = ["op-1".to_string(), "op-2".to_string()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        assert!(validate_push_acknowledgements(
+            &submitted,
+            &[PushAccepted {
+                operation_id: "op-1".to_string(),
+                record_version: 1,
+            }],
+            &[PushRejected {
+                operation_id: "op-2".to_string(),
+                reason: "conflict".to_string(),
+            }],
+        )
+        .is_ok());
+        assert!(validate_push_acknowledgements(&submitted, &[], &[]).is_err());
+        assert!(validate_push_acknowledgements(
+            &submitted,
+            &[PushAccepted {
+                operation_id: "op-1".to_string(),
+                record_version: 1,
+            }],
+            &[],
+        )
+        .is_err());
+        assert!(validate_push_acknowledgements(
+            &submitted,
+            &[
+                PushAccepted {
+                    operation_id: "op-1".to_string(),
+                    record_version: 1,
+                },
+                PushAccepted {
+                    operation_id: "op-1".to_string(),
+                    record_version: 1,
+                },
+            ],
+            &[PushRejected {
+                operation_id: "op-2".to_string(),
+                reason: "conflict".to_string(),
+            }],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pull_page_must_advance_and_keep_sequences_consistent() {
+        let operation = PullOperation {
+            sequence: 11,
+            operation_id: "op-11".to_string(),
+            node_id: "cloud".to_string(),
+            entity_type: "permanent_record".to_string(),
+            entity_key: "record:missav:abf-123".to_string(),
+            action: "upsert".to_string(),
+            record_version: 1,
+            occurred_at: "2026-01-01T00:00:00Z".to_string(),
+            payload: Some(serde_json::json!({"recordKey":"ABF-123"})),
+        };
+        assert!(validate_pull_page(
+            10,
+            &PullResponse {
+                operations: vec![operation.clone()],
+                next_sequence: 11,
+                latest_sequence: 12,
+                has_more: true,
+            },
+        )
+        .is_ok());
+        assert!(validate_pull_page(
+            10,
+            &PullResponse {
+                operations: vec![],
+                next_sequence: 10,
+                latest_sequence: 12,
+                has_more: true,
+            },
+        )
+        .is_err());
+        assert!(validate_pull_page(
+            10,
+            &PullResponse {
+                operations: vec![operation],
+                next_sequence: 10,
+                latest_sequence: 12,
+                has_more: false,
+            },
+        )
+        .is_err());
+        assert!(validate_pull_page(
+            10,
+            &PullResponse {
+                operations: vec![],
+                next_sequence: 12,
+                latest_sequence: 11,
+                has_more: false,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sync_failure_keeps_success_and_cursor_but_invalidates_preview() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync-failure.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        crate::workspace::initialize_schema(&connection).unwrap();
+        connection
+            .execute(
+                "UPDATE cloud_sync_state
+                 SET last_pulled_sequence=42,
+                     last_success_at='2026-01-01T00:00:00Z',
+                     preview_id='preview-1',
+                     preview_local_hash='hash',
+                     preview_remote_sequence=42,
+                     previewed_at='2026-01-01T00:00:00Z'
+                 WHERE singleton=1",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        record_sync_failure(&path, "request failed with token=must-not-be-stored").unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let state = connection
+            .query_row(
+                "SELECT last_pulled_sequence,last_success_at,last_error,preview_id,preview_local_hash,preview_remote_sequence,previewed_at
+                 FROM cloud_sync_state WHERE singleton=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state.0, 42);
+        assert_eq!(state.1, "2026-01-01T00:00:00Z");
+        assert_eq!(state.2, "网络请求失败（敏感详情已隐藏）");
+        assert_eq!(state.3, "");
+        assert_eq!(state.4, "");
+        assert_eq!(state.5, 0);
+        assert_eq!(state.6, "");
     }
 }

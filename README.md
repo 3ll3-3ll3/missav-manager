@@ -1,8 +1,8 @@
 # TG 内容工具箱 v0.5（Windows）
 
-这是一个只面向 Windows 的本地桌面工具箱。它把 Telegram 消息、官方导出文件或手动文本送入五个彼此独立的工具：推特博主、Bad.news、海角、MissAV 和 123AV。所有业务数据保存在本机 SQLite；不需要服务器账户，也不会上传你的 Telegram 正文、浏览器 Cookie 或密码。
+这是一个只面向 Windows 的本地桌面工具箱。它把 Telegram 消息、官方导出文件或手动文本送入五个彼此独立的工具：推特博主、Bad.news、海角、MissAV 和 123AV。默认业务数据保存在本机 SQLite；统一开发分支另提供可选的 Windows ↔ 私人 Work 网站增量同步，但正式同步网关尚未部署，Telegram Session、Token、API Hash、密码、Cookie 与本地路径永不参与同步。
 
-当前主线：`codex/v0.5-redesign`，当前构建版本为 `v0.5.13`。稳定旧版 `v0.4.5` 已由独立 Git tag 保留；v0.5.13 可以在用户确认后只读迁移旧库，操作前自动备份当前 v0.5 数据库。Telegram 会话使用 Windows 当前用户加密文件，不再使用可能阻塞登录的 `libsql` 会话存储。
+当前已发布稳定版为 `v0.5.13`；受保护分支 `codex/v0.5.13-desktop-stable`、标签和 Windows Release 不随统一同步开发改动。`codex/unified-local-cloud-v1` 是尚未发布的新主线源码，只有完成真实网关部署、双端 E2E 和首次同步预览验收后才能生成新 EXE。v0.5.13 可以在用户确认后只读迁移旧库，操作前自动备份当前 v0.5 数据库；Telegram 会话使用 Windows 当前用户加密文件。
 
 ## 发布包
 

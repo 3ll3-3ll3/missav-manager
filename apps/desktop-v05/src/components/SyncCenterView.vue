@@ -91,13 +91,19 @@ async function run(direction: "push" | "pull" | "both") {
   if (!preview.value) return;
   const label = direction === "push" ? "仅 Push（本地→云端）" : direction === "pull" ? "仅 Pull（云端→本地）" : "双向同步";
   if (!confirm("确认执行“" + label + "”？\n\n软件会先自动备份本地数据库。若预览后任一端数据变化，操作会拒绝并要求重新预览。")) return;
-  busy.value = true; error.value = ""; notice.value = "";
+  busy.value = true; error.value = ""; notice.value = `正在执行${label}。大批量数据会自动分批，请勿关闭软件。`;
   try {
     const report = await cloudSyncRun({ direction, previewId: preview.value.previewId });
     preview.value = null;
     await refresh();
     notice.value = "同步完成：上传 " + report.pushed + "，下载 " + report.pulled + "，删除 " + report.deleted + "，新增冲突 " + report.conflicts + "。";
-  } catch (reason) { error.value = String(reason); }
+  } catch (reason) {
+    const message = String(reason);
+    preview.value = null;
+    notice.value = "";
+    await refresh();
+    error.value = `${message}。已完成的分批进度会保留；继续前请重新生成差异预览。`;
+  }
   finally { busy.value = false; }
 }
 
@@ -125,6 +131,7 @@ onMounted(refresh);
 
   <div v-if="error" class="notice danger">{{ error }}</div>
   <div v-if="notice" class="notice info">{{ notice }}</div>
+  <div v-if="state.lastError && !error" class="notice warning"><strong>上次同步未完成：</strong>{{ state.lastError }}。进度已保留，继续前请重新生成差异预览。</div>
 
   <section class="sync-metric-grid">
     <article><strong>{{ state.pendingUploads.toLocaleString() }}</strong><span>待上传</span></article>
@@ -159,7 +166,7 @@ onMounted(refresh);
     </section>
 
     <section class="panel sync-step" :class="{ 'sync-disabled-actions': !preview }">
-      <div class="section-heading compact-heading"><div><span class="section-kicker">03 日常操作</span><h3>Push、Pull 与双向同步</h3><p>完成首次差异预览后开放。每批最多 200 条；断网可续传，删除使用墓碑，冲突不会静默覆盖。</p></div></div>
+      <div class="section-heading compact-heading"><div><span class="section-kicker">03 日常操作</span><h3>Push、Pull 与双向同步</h3><p>完成差异预览后开放。内部按最多 200 条自动分批；失败时保留已完成进度并要求重新预览，删除使用墓碑，冲突不会静默覆盖。</p></div></div>
       <div class="action-row"><button :disabled="busy || !preview" @click="run('push')">仅 Push</button><button :disabled="busy || !preview" @click="run('pull')">仅 Pull</button><button class="primary-button" :disabled="busy || !preview" @click="run('both')">双向同步</button></div>
     </section>
 
