@@ -1068,14 +1068,14 @@ fn crypt_data(input: &[u8], protect: bool) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn protect_data(input: &[u8]) -> Result<Vec<u8>, String> { crypt_data(input, true) }
+pub(crate) fn protect_data(input: &[u8]) -> Result<Vec<u8>, String> { crypt_data(input, true) }
 #[cfg(target_os = "windows")]
-fn unprotect_data(input: &[u8]) -> Result<Vec<u8>, String> { crypt_data(input, false) }
+pub(crate) fn unprotect_data(input: &[u8]) -> Result<Vec<u8>, String> { crypt_data(input, false) }
 
 #[cfg(not(target_os = "windows"))]
-fn protect_data(_input: &[u8]) -> Result<Vec<u8>, String> { Err("Telegram 凭据加密仅支持 Windows".to_string()) }
+pub(crate) fn protect_data(_input: &[u8]) -> Result<Vec<u8>, String> { Err("凭据加密仅支持 Windows".to_string()) }
 #[cfg(not(target_os = "windows"))]
-fn unprotect_data(_input: &[u8]) -> Result<Vec<u8>, String> { Err("Telegram 凭据解密仅支持 Windows".to_string()) }
+pub(crate) fn unprotect_data(_input: &[u8]) -> Result<Vec<u8>, String> { Err("凭据解密仅支持 Windows".to_string()) }
 
 #[cfg(test)]
 mod tests {

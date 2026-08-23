@@ -1,4 +1,105 @@
-# TG 内容工具箱：Web UX v0.5.13 对齐交接
+# TG 内容工具箱：本地与云端统一主线交接
+
+更新日期：2026-08-23
+
+## 0. 当前统一主线（本轮）
+
+- 当前工作目录：E:\Desktop\codex项目\tg-toolbox-unified
+- 当前分支：codex/unified-local-cloud-v1
+- 起始基线：origin/codex/cloud/web-ux-parity-v0513 的 38fed1d3c177c1a62ec193ea09664b457a7cd33e
+- 本轮在独立 worktree 工作；原 missav-manager 脏工作树未覆盖、未 stash、未 reset。
+- 受保护基线 codex/v0.5.13-desktop-stable、标签 v0.5.13-desktop-baseline、Windows Release、既有 EXE 和正式数据库均未修改。
+
+### 已完成
+
+1. 新增共享同步协议 packages/sync-contract：统一自然键、幂等操作、批次限制、Secret 拒绝、墓碑、checkpoint 单调合并和队列状态冲突规则。
+2. 新增独立 Cloudflare Worker/D1 同步网关 apps/sync-service：
+   - 一次性设备配对与可撤销设备；
+   - 增量 Push/Pull 和全局序列；
+   - 实体快照、冲突、节点游标；
+   - Telegram 来源级执行租约；
+   - Miniflare+D1 集成测试覆盖配对、幂等、Push/Pull、租约、Secret 拒绝、单实体冲突读取和墓碑显式恢复。
+3. Windows 新增一级“同步”入口：
+   - 网关连接测试与一次性配对；
+   - 设备 Token 通过 Windows DPAPI 独立加密文件保存；
+   - 本地同步状态、实体镜像、outbox 和冲突表；
+   - 真实差异预览；
+   - 仅 Push、仅 Pull、双向同步；
+   - 30 分钟预览有效期、预览后两端变化拒绝、执行前自动备份；
+   - 按数量和请求体大小分批上传/下载、删除墓碑、断点游标和本地冲突留痕；
+   - 冲突逐条“采用云端/保留本地”，处理前自动备份；从墓碑恢复必须明确选择保留本地。
+4. Windows v1 业务适配已覆盖 11 类：永久记录、处理批次、结果明细、任务中心、Telegram 来源、工具与来源绑定、统一 Telegram 消息、各工具独立队列、Telegram checkpoint、三种已读策略及位置、MissAV 三份规则资料。超大原始输入只同步前 64 KiB 预览，完整原文仍保留在创建它的执行端。
+5. Windows 的 Bot 增量、个人账号增量、历史回拉和标已读调用链均接入远端来源租约；续约失败时拒绝提交本次结果，不推进本地 checkpoint、Bot offset 或已读位置。
+6. 架构与云端提示词：docs/UNIFIED_LOCAL_CLOUD_ARCHITECTURE.md 与 docs/WORK_UNIFIED_CLOUD_PROMPT.md。
+
+### 尚未完成，不得提前宣称
+
+- Sites 网站尚未接入本轮同步网关；当前网页和 Windows 仍不能真实互通。
+- 同步网关尚未部署正式 Worker/D1，未配置任何正式 Secret，未导入正式数据。
+- 真实两端首次汇合、断网续传、大数据量和 Telegram E2E 尚未验收。
+
+### 下一步交给云端
+
+云端 Work 必须完整执行 docs/WORK_UNIFIED_CLOUD_PROMPT.md：
+
+1. 基于本分支远端 HEAD 新建 codex/cloud/unified-local-cloud-v1-web。
+2. 在 Sites 端实现同步 outbox、Pull 应用、同步中心和设备管理。
+3. 网页 Telegram 远端操作接入来源租约。
+4. 保持五工具的 list 复制、TXT/CSV、表格选择和历史体验与 Windows 一致。
+5. 只读取既有 Site Secrets；浏览器和仓库不得接触 Secret。
+
+### 云端必须检查
+
+- docs/UNIFIED_LOCAL_CLOUD_ARCHITECTURE.md
+- docs/WORK_UNIFIED_CLOUD_PROMPT.md
+- packages/sync-contract/index.js
+- apps/sync-service/src/index.mjs
+- apps/sync-service/migrations/0001_initial.sql
+- apps/web-site/lib/server-store.ts
+- apps/web-site/lib/server-telegram.ts
+- apps/web-site/app/workbench.tsx
+
+### 禁止修改
+
+- codex/v0.5.13-desktop-stable
+- v0.5.13-desktop-baseline
+- 现有 Windows Release/EXE
+- 正式 SQLite/D1 数据
+- 任何 Telegram/Raindrop Token、API Hash、Session、Cookie、密码或 .env 值
+
+### 本轮验证命令
+
+    node --test test/sync-contract.test.js
+    cd apps/sync-service
+    npm ci
+    npm run check
+    npm test
+    $env:WRANGLER_LOG_PATH='.wrangler/wrangler.log'
+    npm run deploy:dry -- --config wrangler.example.jsonc
+    cd ../desktop-v05
+    npm ci
+    npm run build:web
+    cargo check --manifest-path src-tauri/Cargo.toml
+    cargo test --manifest-path src-tauri/Cargo.toml
+    cd ../..
+    git diff --check
+
+### 当前完成标准
+
+- 本轮代码提交与推送后，云端 Work 可从单一分支读取协议、网关和桌面实现。
+- 不需要真实 Secret 的单元、集成和构建验证全部通过。
+- 未部署前同步 UI 不得指向虚构网关；首次正式数据同步必须由用户在差异预览后确认。
+- 云端完成后必须回写真实提交、部署版本、测试结果和待用户 E2E，不能用“构建通过”替代外部验收。
+
+### 当前阻塞点
+
+- 正式部署需要用户批准创建 Cloudflare Worker/D1，并在安全 Secret 存储中设置 SYNC_ADMIN_TOKEN；当前不需要把值发给 Codex。
+- Sites 接入需由云端 Work 按上述提示词实施后，才能做 Windows 与网页真实往返。
+- 网页端业务 outbox、Pull 应用、配对码管理、冲突 UI 和 Telegram 来源租约仍需由云端 Work 接入。
+
+---
+
+# 历史交接：Web UX v0.5.13 对齐
 
 更新日期：2026-08-14
 

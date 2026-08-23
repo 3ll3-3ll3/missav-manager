@@ -1,5 +1,6 @@
 mod database;
 mod chrome_bridge;
+mod cloud_sync;
 mod missav_blacklists;
 mod models;
 mod network;
@@ -28,6 +29,7 @@ struct AppState {
     database_location_config: PathBuf,
     missav_blacklist_directory: PathBuf,
     telegram_user: Arc<telegram_user::TelegramUserRuntime>,
+    cloud_sync: Arc<cloud_sync::CloudSyncRuntime>,
 }
 
 #[derive(Serialize)]
@@ -388,7 +390,15 @@ async fn fetch_site_page(state: State<'_, AppState>, url: String, proxy: String,
 #[tauri::command]
 async fn call_telegram_bot(state: State<'_, AppState>, input: network::TelegramBotRequest) -> Result<network::HttpResponse, String> {
     let method = input.method.clone();
-    let result = network::telegram_bot_request(input).await;
+    let lease = if method.eq_ignore_ascii_case("getUpdates") {
+        state.cloud_sync.acquire_telegram_lease(state.runtime.database_path.as_ref(), "bot", "global-offset").await?
+    } else { None };
+    let mut result = network::telegram_bot_request(input).await;
+    if let Some(lease) = lease {
+        if let Err(error) = lease.release().await {
+            if result.is_ok() { result = Err(error); }
+        }
+    }
     match &result {
         Ok(response) => { let _ = workspace::append_log(state.runtime.database_path.as_ref(), "INFO", "telegram", "Telegram Bot 请求完成", &serde_json::json!({"method":method,"status":response.status_code,"durationMs":response.duration_ms})); },
         Err(error) => { let _ = workspace::append_log(state.runtime.database_path.as_ref(), "ERROR", "telegram", "Telegram Bot 请求失败", &serde_json::json!({"method":method,"error":error})); },
@@ -456,7 +466,13 @@ async fn telegram_user_list_dialogs(state: State<'_, AppState>, limit: usize) ->
 #[tauri::command]
 async fn telegram_user_sync_messages(state: State<'_, AppState>, input: telegram_user::TelegramSyncRequest) -> Result<telegram_user::TelegramSyncResult, String> {
     let source_id = input.external_id.clone();
-    let result = state.telegram_user.sync_messages(input).await;
+    let lease = state.cloud_sync.acquire_telegram_lease(state.runtime.database_path.as_ref(), "personal", &source_id).await?;
+    let mut result = state.telegram_user.sync_messages(input).await;
+    if let Some(lease) = lease {
+        if let Err(error) = lease.release().await {
+            if result.is_ok() { result = Err(error); }
+        }
+    }
     let _ = workspace::append_log(state.runtime.database_path.as_ref(), if result.is_ok() { "INFO" } else { "ERROR" }, "telegram_user", "Telegram 个人账号增量同步", &serde_json::json!({"sourceId":source_id,"count":result.as_ref().map(|row|row.messages.len()).unwrap_or(0),"ok":result.is_ok()}));
     result
 }
@@ -485,10 +501,16 @@ async fn telegram_user_load_history(state: State<'_, AppState>, input: TelegramT
     let source_id = input.source_id;
     let tool = input.tool.clone();
     let request = telegram_user::TelegramHistoryRequest {
-        external_id, limit: input.limit, start: input.start, end: input.end,
+        external_id: external_id.clone(), limit: input.limit, start: input.start, end: input.end,
         before_id: input.before_id, after_id: input.after_id,
     };
-    let result = state.telegram_user.load_history(request).await;
+    let lease = state.cloud_sync.acquire_telegram_lease(state.runtime.database_path.as_ref(), "personal", &external_id).await?;
+    let mut result = state.telegram_user.load_history(request).await;
+    if let Some(lease) = lease {
+        if let Err(error) = lease.release().await {
+            if result.is_ok() { result = Err(error); }
+        }
+    }
     let _ = workspace::append_log(
         state.runtime.database_path.as_ref(),
         if result.is_ok() { "INFO" } else { "ERROR" },
@@ -562,7 +584,13 @@ fn record_telegram_load_session(state: State<'_, AppState>, input: workspace::Te
 #[tauri::command]
 async fn telegram_user_mark_read(state: State<'_, AppState>, source_id: i64, message_id: i32) -> Result<(), String> {
     let external_id = workspace::telegram_user_source_external_id(state.runtime.database_path.as_ref(), source_id)?;
-    let remote_result = state.telegram_user.mark_read_through(&external_id, message_id).await;
+    let lease = state.cloud_sync.acquire_telegram_lease(state.runtime.database_path.as_ref(), "personal", &external_id).await?;
+    let mut remote_result = state.telegram_user.mark_read_through(&external_id, message_id).await;
+    if let Some(lease) = lease {
+        if let Err(error) = lease.release().await {
+            if remote_result.is_ok() { remote_result = Err(error); }
+        }
+    }
     let remote_error = remote_result.as_ref().err().cloned().unwrap_or_default();
     let local_result = workspace::update_telegram_read_result(
         state.runtime.database_path.as_ref(),
@@ -646,6 +674,109 @@ fn reset_database_location(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn cloud_sync_status(state: State<'_, AppState>) -> Result<cloud_sync::CloudSyncStatus, String> {
+    state.cloud_sync.status(state.runtime.database_path.as_ref())
+}
+
+#[tauri::command]
+async fn cloud_sync_health(state: State<'_, AppState>, gateway_url: String) -> Result<cloud_sync::GatewayHealth, String> {
+    Ok(state.cloud_sync.health(&gateway_url).await)
+}
+
+#[tauri::command]
+async fn cloud_sync_pair(state: State<'_, AppState>, input: cloud_sync::PairingInput) -> Result<cloud_sync::CloudSyncStatus, String> {
+    let result = state.cloud_sync.pair(state.runtime.database_path.as_ref(), input).await;
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if result.is_ok() { "INFO" } else { "ERROR" },
+        "cloud_sync",
+        "Windows 设备与云同步网关配对",
+        &serde_json::json!({"ok":result.is_ok(),"error":result.as_ref().err().cloned().unwrap_or_default()}),
+    );
+    result
+}
+
+#[tauri::command]
+fn cloud_sync_disconnect(state: State<'_, AppState>) -> Result<cloud_sync::CloudSyncStatus, String> {
+    let result = state.cloud_sync.disconnect(state.runtime.database_path.as_ref());
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if result.is_ok() { "INFO" } else { "ERROR" },
+        "cloud_sync",
+        "Windows 设备断开云同步",
+        &serde_json::json!({"ok":result.is_ok()}),
+    );
+    result
+}
+
+#[tauri::command]
+async fn cloud_sync_preview(state: State<'_, AppState>) -> Result<cloud_sync::CloudSyncPreview, String> {
+    let result = state.cloud_sync.preview(state.runtime.database_path.as_ref()).await;
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if result.is_ok() { "INFO" } else { "ERROR" },
+        "cloud_sync",
+        "生成本地与云端同步差异预览",
+        &serde_json::json!({"ok":result.is_ok(),"local":result.as_ref().map(|value|value.local_count).unwrap_or(0),"remote":result.as_ref().map(|value|value.remote_count).unwrap_or(0),"error":result.as_ref().err().cloned().unwrap_or_default()}),
+    );
+    result
+}
+
+#[tauri::command]
+async fn cloud_sync_run(state: State<'_, AppState>, input: cloud_sync::SyncRunInput) -> Result<cloud_sync::CloudSyncReport, String> {
+    let backup = workspace::create_backup(state.runtime.database_path.as_ref(), Some("before-cloud-sync"))?;
+    let result = state.cloud_sync.run_sync(state.runtime.database_path.as_ref(), input).await;
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if result.is_ok() { "INFO" } else { "ERROR" },
+        "cloud_sync",
+        "执行本地与云端数据同步",
+        &serde_json::json!({"ok":result.is_ok(),"backup":backup.path,"pushed":result.as_ref().map(|value|value.pushed).unwrap_or(0),"pulled":result.as_ref().map(|value|value.pulled).unwrap_or(0),"conflicts":result.as_ref().map(|value|value.conflicts).unwrap_or(0),"error":result.as_ref().err().cloned().unwrap_or_default()}),
+    );
+    result
+}
+
+#[tauri::command]
+fn cloud_sync_conflicts(
+    state: State<'_, AppState>,
+    limit: usize,
+) -> Result<Vec<cloud_sync::CloudSyncConflict>, String> {
+    state
+        .cloud_sync
+        .list_conflicts(state.runtime.database_path.as_ref(), limit)
+}
+
+#[tauri::command]
+async fn cloud_sync_resolve_conflict(
+    state: State<'_, AppState>,
+    conflict_id: i64,
+    decision: cloud_sync::ConflictDecision,
+) -> Result<cloud_sync::CloudSyncConflict, String> {
+    let backup = workspace::create_backup(
+        state.runtime.database_path.as_ref(),
+        Some("before-cloud-conflict-resolution"),
+    )?;
+    let result = state
+        .cloud_sync
+        .resolve_conflict(state.runtime.database_path.as_ref(), conflict_id, decision)
+        .await;
+    let _ = workspace::append_log(
+        state.runtime.database_path.as_ref(),
+        if result.is_ok() { "INFO" } else { "ERROR" },
+        "cloud_sync",
+        "处理本地与云端同步冲突",
+        &serde_json::json!({
+            "ok": result.is_ok(),
+            "conflictId": conflict_id,
+            "backup": backup.path,
+            "status": result.as_ref().map(|value| value.status.clone()).unwrap_or_default(),
+            "error": result.as_ref().err().cloned().unwrap_or_default()
+        }),
+    );
+    result
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -722,6 +853,7 @@ pub fn run() {
                 database_location_config,
                 missav_blacklist_directory,
                 telegram_user: Arc::new(telegram_user::TelegramUserRuntime::new(&data_dir)),
+                cloud_sync: Arc::new(cloud_sync::CloudSyncRuntime::new(&data_dir).map_err(std::io::Error::other)?),
             });
             trace("setup:ready");
             Ok(())
@@ -796,6 +928,14 @@ pub fn run() {
             ,migrate_legacy_database
             ,relocate_database,
             reset_database_location
+            ,cloud_sync_status,
+            cloud_sync_health,
+            cloud_sync_pair,
+            cloud_sync_disconnect,
+            cloud_sync_preview,
+            cloud_sync_run,
+            cloud_sync_conflicts,
+            cloud_sync_resolve_conflict
         ])
         .run(tauri::generate_context!())
         .expect("failed to run TG Content Toolbox v0.5");

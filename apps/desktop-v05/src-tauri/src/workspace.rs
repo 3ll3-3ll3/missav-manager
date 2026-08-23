@@ -150,6 +150,65 @@ pub fn initialize_schema(connection: &Connection) -> Result<(), String> {
                value_json TEXT NOT NULL,
                updated_at TEXT NOT NULL
              );
+
+             CREATE TABLE IF NOT EXISTS cloud_sync_state (
+               singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+               node_id TEXT NOT NULL DEFAULT '',
+               gateway_url TEXT NOT NULL DEFAULT '',
+               last_pulled_sequence INTEGER NOT NULL DEFAULT 0,
+               last_push_at TEXT NOT NULL DEFAULT '',
+               last_pull_at TEXT NOT NULL DEFAULT '',
+               last_success_at TEXT NOT NULL DEFAULT '',
+               last_error TEXT NOT NULL DEFAULT '',
+               preview_id TEXT NOT NULL DEFAULT '',
+               preview_local_hash TEXT NOT NULL DEFAULT '',
+               preview_remote_sequence INTEGER NOT NULL DEFAULT 0,
+               previewed_at TEXT NOT NULL DEFAULT '',
+               last_remote_sequence INTEGER NOT NULL DEFAULT 0,
+               updated_at TEXT NOT NULL
+             );
+             INSERT OR IGNORE INTO cloud_sync_state(singleton,updated_at) VALUES(1,'');
+
+             CREATE TABLE IF NOT EXISTS cloud_sync_entities (
+               entity_type TEXT NOT NULL,
+               entity_key TEXT NOT NULL,
+               record_version INTEGER NOT NULL DEFAULT 0,
+               payload_hash TEXT NOT NULL DEFAULT '',
+               tombstone INTEGER NOT NULL DEFAULT 0,
+               updated_at TEXT NOT NULL,
+               PRIMARY KEY(entity_type,entity_key)
+             );
+
+             CREATE TABLE IF NOT EXISTS cloud_sync_outbox (
+               operation_id TEXT PRIMARY KEY,
+               entity_type TEXT NOT NULL,
+               entity_key TEXT NOT NULL,
+               action TEXT NOT NULL CHECK(action IN ('upsert','delete')),
+               restore INTEGER NOT NULL DEFAULT 0,
+               base_version INTEGER NOT NULL DEFAULT 0,
+               payload_json TEXT NOT NULL DEFAULT '',
+               occurred_at TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'pending',
+               attempt_count INTEGER NOT NULL DEFAULT 0,
+               last_error TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_cloud_sync_outbox_status ON cloud_sync_outbox(status,created_at);
+
+             CREATE TABLE IF NOT EXISTS cloud_sync_conflicts (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               operation_id TEXT NOT NULL DEFAULT '',
+               entity_type TEXT NOT NULL,
+               entity_key TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               local_json TEXT NOT NULL DEFAULT '',
+               remote_json TEXT NOT NULL DEFAULT '',
+               status TEXT NOT NULL DEFAULT 'open',
+               created_at TEXT NOT NULL,
+               resolved_at TEXT NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS idx_cloud_sync_conflicts_status ON cloud_sync_conflicts(status,id DESC);
              CREATE TABLE IF NOT EXISTS app_logs (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                level TEXT NOT NULL,
@@ -264,9 +323,19 @@ pub fn initialize_schema(connection: &Connection) -> Result<(), String> {
                created_at TEXT NOT NULL
              );
 
-             PRAGMA user_version=506;",
+             PRAGMA user_version=507;",
         )
         .map_err(|error| format!("初始化 v0.5 正式数据结构失败：{error}"))?;
+    for column in [
+        "preview_id TEXT NOT NULL DEFAULT ''",
+        "preview_local_hash TEXT NOT NULL DEFAULT ''",
+        "preview_remote_sequence INTEGER NOT NULL DEFAULT 0",
+        "previewed_at TEXT NOT NULL DEFAULT ''",
+        "last_remote_sequence INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = connection.execute(&format!("ALTER TABLE cloud_sync_state ADD COLUMN {column}"), []);
+    }
+    let _ = connection.execute("ALTER TABLE cloud_sync_outbox ADD COLUMN restore INTEGER NOT NULL DEFAULT 0", []);
     Ok(())
 }
 

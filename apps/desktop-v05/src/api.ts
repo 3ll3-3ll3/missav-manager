@@ -25,7 +25,23 @@ import type {
   TelegramStoreResult,
   TelegramCommitResult,
   InboxTask,
+  CloudSyncStatus,
+  GatewayHealth,
+  CloudSyncPreview,
+  CloudSyncReport,
+  CloudSyncConflict,
 } from "./types";
+
+export function cloudSyncStatus(): Promise<CloudSyncStatus> { return invoke("cloud_sync_status"); }
+export function cloudSyncHealth(gatewayUrl: string): Promise<GatewayHealth> { return invoke("cloud_sync_health", { gatewayUrl }); }
+export function cloudSyncPair(input: { gatewayUrl: string; code: string; label: string }): Promise<CloudSyncStatus> { return invoke("cloud_sync_pair", { input }); }
+export function cloudSyncDisconnect(): Promise<CloudSyncStatus> { return invoke("cloud_sync_disconnect"); }
+export function cloudSyncPreview(): Promise<CloudSyncPreview> { return invoke("cloud_sync_preview"); }
+export function cloudSyncRun(input: { direction: "push" | "pull" | "both"; previewId: string }): Promise<CloudSyncReport> { return invoke("cloud_sync_run", { input }); }
+export function cloudSyncConflicts(limit = 200): Promise<CloudSyncConflict[]> { return invoke("cloud_sync_conflicts", { limit }); }
+export function cloudSyncResolveConflict(conflictId: number, decision: "accept_remote" | "keep_local"): Promise<CloudSyncConflict> {
+  return invoke("cloud_sync_resolve_conflict", { conflictId, decision });
+}
 
 export function getAppInfo(): Promise<AppInfo> {
   return invoke("app_info");

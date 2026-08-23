@@ -7,6 +7,7 @@ import type { AppInfo, ViewName } from "./types";
 const MigrationPrototype = defineAsyncComponent(() => import("./components/MigrationPrototype.vue"));
 const ToolWorkspace = defineAsyncComponent(() => import("./components/ToolWorkspace.vue"));
 const SourcesView = defineAsyncComponent(() => import("./components/SourcesView.vue"));
+const SyncCenterView = defineAsyncComponent(() => import("./components/SyncCenterView.vue"));
 const LogsView = defineAsyncComponent(() => import("./components/LogsView.vue"));
 const SettingsView = defineAsyncComponent(() => import("./components/SettingsView.vue"));
 const DataCenterView = defineAsyncComponent(() => import("./components/DataCenterView.vue"));
@@ -22,6 +23,7 @@ const titles: Record<ViewName, string> = {
   tasks: "处理中心",
   migration: "v0.4.5 迁移检查",
   sources: "Telegram 来源",
+  sync: "本地与云端同步",
   data: "统一数据中心",
   logs: "运行日志",
   settings: "设置与备份",
@@ -69,7 +71,7 @@ onMounted(refreshInfo);
       <span class="version-pill">v{{ info?.version ?? "0.5" }}</span>
         <span>独立正式数据库</span>
       </div>
-      <nav class="global-nav"><button @click="navigate('home')">工具</button><button @click="navigate('tasks')">处理</button><button @click="navigate('data')">数据</button><button @click="navigate('sources')">来源</button><button @click="navigate('logs')">日志</button><button @click="navigate('settings')">设置</button></nav>
+      <nav class="global-nav"><button @click="navigate('home')">工具</button><button @click="navigate('tasks')">处理</button><button @click="navigate('data')">数据</button><button @click="navigate('sources')">来源</button><button @click="navigate('sync')">同步</button><button @click="navigate('logs')">日志</button><button @click="navigate('settings')">设置</button></nav>
     </header>
 
     <main class="workspace">
@@ -82,6 +84,7 @@ onMounted(refreshInfo);
       <DataCenterView v-else-if="currentView === 'data'" />
       <MigrationPrototype v-else-if="currentView === 'migration'" />
       <SourcesView v-else-if="currentView === 'sources'" />
+      <SyncCenterView v-else-if="currentView === 'sync'" />
       <LogsView v-else-if="currentView === 'logs'" />
       <SettingsView v-else />
     </main>

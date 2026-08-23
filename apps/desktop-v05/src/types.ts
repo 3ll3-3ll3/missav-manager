@@ -1,10 +1,63 @@
 export type ToolKind = "twitter" | "badnews" | "haijiao" | "missav" | "av123";
-export type ViewName = "home" | "tasks" | "migration" | "sources" | "data" | "logs" | "settings" | `tool:${ToolKind}`;
+export type ViewName = "home" | "tasks" | "migration" | "sources" | "sync" | "data" | "logs" | "settings" | `tool:${ToolKind}`;
 
 export interface AppInfo {
   version: string;
   databasePath: string;
   recordCount: number;
+}
+
+export interface CloudSyncStatus {
+  configured: boolean;
+  nodeId: string;
+  gatewayUrl: string;
+  gatewayReachable: boolean;
+  latestRemoteSequence: number;
+  lastPulledSequence: number;
+  pendingUploads: number;
+  openConflicts: number;
+  lastPushAt: string;
+  lastPullAt: string;
+  lastSuccessAt: string;
+  lastError: string;
+}
+
+export interface GatewayHealth {
+  reachable: boolean;
+  schemaVersion: number;
+  error: string;
+}
+
+export interface CloudSyncPreview {
+  previewId: string;
+  localCount: number;
+  remoteCount: number;
+  sameCount: number;
+  localOnlyCount: number;
+  remoteOnlyCount: number;
+  differentCount: number;
+  deleteCount: number;
+  entityCounts: Record<string, number>;
+  warnings: string[];
+}
+
+export interface CloudSyncReport {
+  pushed: number;
+  pulled: number;
+  deleted: number;
+  conflicts: number;
+  latestRemoteSequence: number;
+  hasMore: boolean;
+}
+
+export interface CloudSyncConflict {
+  id: number;
+  operationId: string;
+  entityType: string;
+  entityKey: string;
+  reason: string;
+  status: string;
+  createdAt: string;
 }
 
 export interface TableCount {
