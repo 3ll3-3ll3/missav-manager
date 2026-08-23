@@ -30,6 +30,14 @@ test("同步实体键在本地与云端使用同一自然键", async () => {
     canonicalSourceKey({ kind: "telegram_personal", connectionId: "personal-main", externalChatId: "-10001" }),
   );
   assert.equal(
+    canonicalSourceKey({ kind: "telegram_user", externalId: "-10001" }),
+    canonicalSourceKey({ kind: "telegram_personal", connectionId: "telegram-personal", externalChatId: "-10001" }),
+  );
+  assert.equal(
+    canonicalSourceKey({ sourceKey: "telegram-bot:telegram-bot:-10002" }),
+    "telegram_bot:default:-10002",
+  );
+  assert.equal(
     canonicalEntityKey("telegram_message", { kind: "telegram_user", externalId: "-1001", messageId: 55 }),
     "message:telegram_personal:default:-1001:55",
   );
@@ -60,6 +68,9 @@ test("普通设置和敏感设置不能借 app_setting 穿过同步层", async (
 test("同步批次拒绝 Secret 和重复 operationId", async () => {
   const { validateSyncBatch } = await contract();
   assert.throws(() => validateSyncBatch({ operations: [operation({ payload: { kind: "telegram_user", externalId: "-1001", api_hash: "secret" } })] }), /敏感字段/);
+  assert.throws(() => validateSyncBatch({ operations: [operation({ payload: { kind: "telegram_user", externalId: "-1001", note: "TELEGRAM_BOT_TOKEN=123456789:abcdefghijklmnopqrstuvwxyzABCDE" } })] }), /敏感内容/);
+  assert.throws(() => validateSyncBatch({ operations: [operation({ payload: { kind: "telegram_user", externalId: "-1001", note: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345" } })] }), /敏感内容/);
+  assert.doesNotThrow(() => validateSyncBatch({ operations: [operation({ payload: { kind: "telegram_user", externalId: "-1001", note: "普通消息提到了 token 一词，但没有携带凭据" } })] }));
   assert.throws(() => validateSyncBatch({ operations: [operation(), operation()] }), /重复 operationId/);
 });
 

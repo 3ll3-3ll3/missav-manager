@@ -148,6 +148,7 @@ async function runToolSourceSync(
             if (shouldStop()) return true;
             try { assertLease(); return false; } catch { return true; }
           },
+          assertLease,
         ),
       )
     : null;
@@ -169,7 +170,7 @@ async function runToolSourceSync(
             { limit: normalized.limit, shouldStop: () => {
               if (shouldStop()) return true;
               try { assertLease(); return false; } catch { return true; }
-            } },
+            }, assertRemoteLease: assertLease },
           ),
         )
       : scope.botSourceIds.length
@@ -386,11 +387,11 @@ export async function POST(request: Request) {
     if (input.action === "pull-stream")
       return telegramSyncOperationStream((onProgress) =>
         withCloudTelegramSourceLeases([], "telegram-bot", (assertLease) =>
-          pullTelegramBot((progress) => { assertLease(); onProgress(progress); }),
+          pullTelegramBot((progress) => { assertLease(); onProgress(progress); }, { assertRemoteLease: assertLease }),
         ),
       );
     if (input.action === "pull") return Response.json(await withCloudTelegramSourceLeases([], "telegram-bot", (assertLease) =>
-      pullTelegramBot(undefined, { shouldStop: () => { try { assertLease(); return false; } catch { return true; } } }),
+      pullTelegramBot(undefined, { shouldStop: () => { try { assertLease(); return false; } catch { return true; } }, assertRemoteLease: assertLease }),
     ));
     if (input.action === "import")
       return Response.json(
@@ -452,6 +453,7 @@ export async function POST(request: Request) {
             },
             (progress) => { assertLease(); onProgress(progress); },
             () => { try { assertLease(); return false; } catch { return true; } },
+            assertLease,
           ),
         ),
       );
@@ -469,6 +471,7 @@ export async function POST(request: Request) {
             },
             undefined,
             () => { try { assertLease(); return false; } catch { return true; } },
+            assertLease,
           ),
         ),
       );
@@ -478,9 +481,10 @@ export async function POST(request: Request) {
       return Response.json(await runToolSourceSync(input));
     if (input.action === "mark-read")
       return Response.json(
-        await withCloudTelegramSourceLeases([String(input.sourceId || "")], "telegram-personal", () =>
-          markTelegramSourceRead(input.sourceId, input.maxId),
-        ),
+        await withCloudTelegramSourceLeases([String(input.sourceId || "")], "telegram-personal", (assertLease) => {
+          assertLease();
+          return markTelegramSourceRead(input.sourceId, input.maxId);
+        }),
       );
     if (input.action === "migration-preview")
       return Response.json(await telegramMigrationPreview());

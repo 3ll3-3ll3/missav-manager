@@ -42,6 +42,11 @@
 5. 网站个人 API、Bot、工具同步、历史回拉和标已读在远端操作前取得跨端来源租约；租约丢失时不推进 checkpoint、offset 或已读位置。
 6. 5,001 条以上 dirty 数据能分批完整进入 outbox，十万条路径不存在静默截断。
 7. 五工具的一行一个 list、复制所选/当前筛选、TXT/CSV、表格选择和历史能力没有被同步改动破坏。
+8. 部署前审计曾发现的四项阻断必须以最新 HEAD 复核：
+   - Web 与 Windows 的 Telegram 来源自然键都归一为 `default`，网页本地连接别名不会制造重复来源；
+   - Web Push 按 UTF-8 JSON 实际字节切分到 3.5 MB，真实 Worker 路径的大载荷测试会产生多个请求；
+   - Secret 防护能拒绝普通字符串值中嵌入的 Bot Token、Bearer、登录 Token 或敏感键值；
+   - 租约在消息入库后失效时，Bot offset 和个人 checkpoint 均不推进，远端自动已读前也会再次检查。
 
 发现问题时只在云端部署分支修复，必须补自动测试并在汇报中给出证据；没有问题就不要机械重构。
 
@@ -71,6 +76,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 必须明确区分：源码验证通过、部署成功、真实 Telegram E2E 通过。三者不能互相代替。
+
+桌面总控已经在 Windows 环境复现 Worker Wrangler dry-run、桌面 `cargo check` 和 Rust `30/30`。若云端运行环境缺少 Rust 或拦截 Wrangler，只能记录为云端环境限制；仍需检查对应日志和本地证据，不得把它改写成源码失败。
 
 ## 正式部署（必须先获得所有者明确批准）
 

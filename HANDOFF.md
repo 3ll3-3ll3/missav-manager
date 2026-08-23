@@ -40,12 +40,17 @@
    - 新增 `0006_spicy_omega_sentinel.sql`，生产构建已包含该 D1 迁移。
 8. 网站同步集成测试通过真实内存 D1 和实际同步 Worker 验证：网页 Push、另一端 Pull、远端写入回拉、墓碑删除、冲突采用远端、5,001 条分批生成 outbox、设备凭据不返回浏览器，以及同一 Bot offset 的跨端互斥。
 9. 最终调用链审计发现并修复过一项跨端租约键差异：网页和 Windows 现在都使用 `telegram:bot:global-offset` 及 `telegram:personal:<external-chat-id>`；集成测试直接用“另一台 Windows 设备会请求的键”验证 Bot 与个人来源均返回冲突。
+10. 根据云端部署前审计，已关闭四项新阻断：
+    - Telegram 来源跨端自然键统一为 `telegram_personal:default:<external-chat-id>` / `telegram_bot:default:<external-chat-id>`；网页的 `telegram-personal`、`telegram-bot` 仅作为本地连接别名，Pull 会复用既有来源 ID，不再生成重复来源；
+    - 网站 Push 同 Windows 一样按实际 UTF-8 JSON 请求体切分到 3.5 MB 安全目标，单条超限明确报错，合法大批次不会被 Worker 的 4 MB 硬上限拒绝；
+    - Secret 防护除字段名外增加字符串内容识别，覆盖 Bot Token、Bearer、Telegram 登录链接及敏感键值文本，错误不回显原值；
+    - Bot offset 与个人 checkpoint 在最终数据库提交前再次验证远端租约；续租会刷新到期时间，距到期不足 5 秒拒绝提交，`safe_auto` 远端已读前也再次验证。
 
 ### 本轮最终自动验证
 
-- 网站：TypeScript、ESLint、Vinext 生产构建通过，`86/86` 项测试通过；构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
+- 网站：TypeScript、ESLint、Vinext 生产构建通过，`89/89` 项测试通过；新增真实网关分块、来源复用及租约失效回归，构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
 - 同步 Worker：语法检查、`7/7` 项 Miniflare+D1 测试、Wrangler dry-run 通过；未执行正式部署。
-- 仓库总回归：`238/238` 项测试通过，根目录语法检查通过。
+- 仓库总回归：`241/241` 项测试通过，根目录语法检查通过。
 - Windows 统一版：Vue/TypeScript/Vite 构建通过；Rust `cargo check` 通过，`30/30` 项测试通过。
 - `git diff --check` 通过；凭据模式扫描只命中既有安全测试中的明确假 Token 夹具，未发现正式 Secret。
 
@@ -62,6 +67,8 @@
 
 1. `fetch` 后以 `codex/unified-local-cloud-v1` 最新远端 HEAD 为唯一源码基线，新建 `codex/cloud/unified-local-cloud-v1-deploy`。
 2. 只读审计本轮网站同步、迁移、租约与测试，确认构建源码树和 Git SHA 一致；发现问题先修复并补测试。
+   - 必须复核本交接第 10 项四个部署阻断已由源码和新增测试真实关闭，不得只复述说明；
+   - 本地已复现 Wrangler dry-run、`cargo check` 与 Rust `30/30`，云端环境若不能运行应记为环境限制，不能反推源码未验证。
 3. 经所有者明确批准后创建正式同步 Worker/D1、执行网关迁移并设置 Worker 管理 Secret。
 4. 在现有私人 Site Secrets 中设置 `SYNC_GATEWAY_URL`、`SYNC_ADMIN_TOKEN`，执行网站 D1 迁移并部署新 Sites 版本。
 5. 用空白或脱敏数据完成 Web→Worker→第二设备和第二设备→Worker→Web 往返、冲突、删除、租约 E2E；正式首次汇合仍必须由所有者看过预览后确认。
@@ -81,9 +88,12 @@
 - apps/web-site/drizzle/0006_spicy_omega_sentinel.sql
 - apps/web-site/lib/server-store.ts
 - apps/web-site/lib/server-telegram.ts
+- apps/web-site/lib/server-mtproto.ts
+- apps/web-site/lib/telegram-sync-commit.ts
 - apps/web-site/app/workbench.tsx
 - apps/web-site/tests/cloud-sync-schema.test.mjs
 - apps/web-site/tests/cloud-sync-integration.test.mjs
+- apps/web-site/tests/telegram-delivery-integration.test.mjs
 
 ### 禁止修改
 

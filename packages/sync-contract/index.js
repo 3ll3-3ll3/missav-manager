@@ -22,6 +22,12 @@ export const SYNC_ENTITY_TYPES = Object.freeze([
 const ENTITY_TYPE_SET = new Set(SYNC_ENTITY_TYPES);
 const ACTION_SET = new Set(["upsert", "delete"]);
 const SECRET_KEY = /(?:^|_)(?:api_?hash|token|secret|password|passcode|phone_?code|two_?factor|2fa|session|cookie|authorization)(?:$|_)/i;
+const SECRET_TEXT_PATTERNS = Object.freeze([
+  /\b\d{5,16}:[A-Za-z0-9_-]{20,}\b/,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/i,
+  /\btg:\/\/login\?token=[^\s&#]{12,}/i,
+  /\b(?:api_?hash|token|secret|password|passcode|phone_?code|two_?factor|2fa|session(?:_string)?|cookie|authorization)\b\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i,
+]);
 const TOOL_SET = new Set(["twitter", "badnews", "haijiao", "missav", "av123"]);
 const SYNC_SETTING_KEYS = new Set([
   "missav.referenceTags",
@@ -61,16 +67,38 @@ function normalizedNaturalPart(value, field) {
   return requiredText(value, field, 1024).normalize("NFKC").toLowerCase();
 }
 
+function normalizedSourceKind(value) {
+  const kind = normalizedNaturalPart(value, "source.kind");
+  return kind === "telegram_user"
+    ? "telegram_personal"
+    : kind === "telegram-bot"
+      ? "telegram_bot"
+      : kind;
+}
+
+function normalizedSourceConnection(kind, value) {
+  const connection = optionalText(value, 256).toLowerCase() || "default";
+  if (kind === "telegram_personal" && ["telegram-personal", "personal"].includes(connection)) return "default";
+  if (kind === "telegram_bot" && ["telegram-bot", "bot"].includes(connection)) return "default";
+  return connection;
+}
+
 export function canonicalSourceKey(payload) {
-  if (payload.sourceKey) return normalizedNaturalPart(payload.sourceKey, "sourceKey");
-  const rawKind = normalizedNaturalPart(payload.kind ?? payload.sourceKind, "source.kind");
-  const kind = rawKind === "telegram_user" ? "telegram_personal" : rawKind === "telegram-bot" ? "telegram_bot" : rawKind;
-  const connection = optionalText(payload.connectionId, 256).toLowerCase();
+  if (payload.sourceKey) {
+    const parts = normalizedNaturalPart(payload.sourceKey, "sourceKey").split(":");
+    if (parts.length < 3) throw new Error("sourceKey 格式无效");
+    const kind = normalizedSourceKind(parts.shift());
+    const connection = normalizedSourceConnection(kind, parts.shift());
+    const external = normalizedNaturalPart(parts.join(":"), "source.externalKey");
+    return [kind, connection, external].join(":");
+  }
+  const kind = normalizedSourceKind(payload.kind ?? payload.sourceKind);
+  const connection = normalizedSourceConnection(kind, payload.connectionId);
   const external = normalizedNaturalPart(
     payload.externalKey ?? payload.externalId ?? payload.externalChatId,
     "source.externalKey",
   );
-  return [kind, connection || "default", external].join(":");
+  return [kind, connection, external].join(":");
 }
 
 function sourceIdentity(payload) {
@@ -152,6 +180,12 @@ export function stableStringify(value) {
 
 export function assertNoSecrets(value, path = "payload") {
   if (value === null || value === undefined) return;
+  if (typeof value === "string") {
+    if (SECRET_TEXT_PATTERNS.some((pattern) => pattern.test(value))) {
+      throw new Error(`同步数据禁止包含敏感内容：${path}`);
+    }
+    return;
+  }
   if (Array.isArray(value)) {
     value.forEach((item, index) => assertNoSecrets(item, `${path}[${index}]`));
     return;

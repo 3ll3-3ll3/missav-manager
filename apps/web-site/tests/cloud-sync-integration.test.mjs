@@ -129,6 +129,37 @@ test("网页 D1 经真实网关完成 Push、Pull 与墓碑删除，且设备凭
       }), gatewayEnv);
       assert.equal(response.status, 409, "另一端不能同时拉取同一份个人账号来源");
     });
+    const sourcePreview = await cloud.createCloudSyncPreview();
+    assert.ok(sourcePreview.pendingUpload >= 1);
+    await cloud.executeCloudSync("push");
+    assert.equal(
+      gatewaySqlite.prepare("SELECT COUNT(*) AS count FROM sync_entities WHERE entity_key='source:telegram_personal:default:-100123'").get().count,
+      1,
+      "网页连接别名必须与桌面 default 来源使用同一自然键",
+    );
+    const remoteMessagePayload = {
+      sourceKey: "telegram_personal:default:-100123",
+      messageId: "77",
+      externalMessageId: "77",
+      messageDate: timestamp,
+      body: "跨端来源映射验证",
+      eventKind: "message",
+      contentHash: "source-map-test",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    await gatewayJson(gatewayWorker, gatewayEnv, "/v1/sync/push", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${remote.deviceToken}` },
+      body: JSON.stringify({ operations: [{ schemaVersion: 1, operationId: "remote-message-source-map", nodeId: "remote-test-node", entityType: "telegram_message", entityKey: "message:telegram_personal:default:-100123:77", action: "upsert", baseVersion: 0, occurredAt: timestamp, payload: remoteMessagePayload }] }),
+    });
+    await cloud.createCloudSyncPreview();
+    await cloud.executeCloudSync("pull");
+    assert.equal(
+      webSqlite.prepare("SELECT source_id FROM telegram_messages WHERE message_id='77'").get().source_id,
+      "personal-source",
+      "Pull 必须复用网页既有来源，不能创建重复来源 ID",
+    );
+    assert.equal(webSqlite.prepare("SELECT COUNT(*) AS count FROM input_sources WHERE external_key='-100123'").get().count, 1);
     webSqlite.prepare("UPDATE permanent_records SET status='local-change',updated_at=? WHERE record_key='ABF-001'").run("2026-08-23T12:00:30.000Z");
     await cloud.createCloudSyncPreview();
     const remoteAbf = { ...webSqlite.prepare("SELECT primary_value FROM permanent_records WHERE record_key='ABF-001'").get(), ...{
@@ -183,5 +214,51 @@ test("网页 D1 经真实网关完成 Push、Pull 与墓碑删除，且设备凭
     assert.equal(webSqlite.prepare("SELECT COUNT(*) AS count FROM cloud_sync_dirty WHERE last_error='' ").get().count, 0);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("网页 Push 按 UTF-8 请求体切分，任何一批都不超过网关安全上限", async () => {
+  const webSqlite = new DatabaseSync(":memory:");
+  await applyWebMigrations(webSqlite);
+  const gatewaySqlite = new DatabaseSync(":memory:");
+  gatewaySqlite.exec(await readFile(new URL("../../sync-service/migrations/0001_initial.sql", import.meta.url), "utf8"));
+  const gatewayWorker = await import(new URL("../../sync-service/src/index.mjs", import.meta.url));
+  const adminToken = "batch-test-admin-token-at-least-32-characters";
+  const gatewayEnv = { DB: new TestD1(gatewaySqlite), SYNC_ADMIN_TOKEN: adminToken };
+  const originalFetch = globalThis.fetch;
+  const pushBytes = [];
+  globalThis.fetch = async (request, options) => {
+    const normalized = request instanceof Request ? request : new Request(request, options);
+    if (new URL(normalized.url).hostname === "sync.test") {
+      if (new URL(normalized.url).pathname === "/v1/sync/push") {
+        pushBytes.push((await normalized.clone().arrayBuffer()).byteLength);
+      }
+      return gatewayWorker.default.fetch(normalized, gatewayEnv);
+    }
+    return originalFetch(request, options);
+  };
+  try {
+    const cloud = await loadCloudSync({ DB: new TestD1(webSqlite), SYNC_GATEWAY_URL: "https://sync.test", SYNC_ADMIN_TOKEN: adminToken });
+    const timestamp = "2026-08-23T13:00:00.000Z";
+    const insert = webSqlite.prepare(
+      `INSERT INTO permanent_records(id,tool,record_key,primary_value,secondary_value,status,tags_json,actress_tags_json,genre_tags_json,source_url,missav_url,av123_url,metadata_json,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    );
+    webSqlite.exec("BEGIN");
+    for (let index = 0; index < 100; index += 1) {
+      const code = `LARGE-${String(index).padStart(3, "0")}`;
+      insert.run(`large-${index}`, "missav", code, code, "", "new", "[]", "[]", "[]", "", "", "", JSON.stringify({ note: "x".repeat(60_000) }), timestamp, timestamp);
+    }
+    webSqlite.exec("COMMIT");
+    const preview = await cloud.createCloudSyncPreview();
+    assert.equal(preview.pendingUpload, 100);
+    const result = await cloud.executeCloudSync("push");
+    assert.equal(result.push.accepted, 100);
+    assert.ok(pushBytes.length > 1, "大批次必须拆为多个请求");
+    assert.ok(pushBytes.every((bytes) => bytes <= 3_500_000), `请求体超限：${Math.max(...pushBytes)}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+    webSqlite.close();
+    gatewaySqlite.close();
   }
 });

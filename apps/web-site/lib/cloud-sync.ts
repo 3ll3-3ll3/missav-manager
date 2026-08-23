@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import {
+  MAX_SYNC_BATCH_BYTES,
   SYNC_SCHEMA_VERSION,
   canonicalEntityKey,
   canonicalSourceKey,
@@ -64,6 +65,7 @@ type EntityDraft = {
 
 const STATE_ID = "site";
 const PREVIEW_TTL_MS = 30 * 60_000;
+const SAFE_PUSH_BODY_BYTES = Math.min(MAX_SYNC_BATCH_BYTES, 3_500_000);
 const SECRET_FIELD = /(?:^|_)(?:api_?hash|token|secret|password|passcode|phone_?code|two_?factor|2fa|session|cookie|authorization)(?:$|_)/i;
 const SETTING_TO_SYNC: Record<string, string> = {
   referenceTags: "missav.referenceTags",
@@ -104,10 +106,18 @@ function safeValue(value: unknown): unknown {
 
 function sourcePayload(row: JsonObject) {
   const kind = text(row.sourceKind ?? row.kind);
-  const connectionId = text(row.sourceConnectionId ?? row.connectionId ?? row.connection_id) || "default";
+  const localConnectionId = text(row.sourceConnectionId ?? row.connectionId ?? row.connection_id) || "default";
   const externalKey = text(row.sourceExternalKey ?? row.externalKey ?? row.externalChatId ?? row.external_key);
-  const sourceKey = canonicalSourceKey({ kind, connectionId, externalKey });
-  return { sourceKey, kind, connectionId, externalKey };
+  const sourceKey = canonicalSourceKey({ kind, connectionId: localConnectionId, externalKey });
+  const [canonicalKind, connectionId = "default"] = sourceKey.split(":");
+  return { sourceKey, kind: canonicalKind, connectionId, externalKey };
+}
+
+function localConnectionIdForSource(kind: string, connectionId: string) {
+  if (connectionId !== "default") return connectionId;
+  if (kind === "telegram_personal") return "telegram-personal";
+  if (kind === "telegram_bot") return "telegram-bot";
+  return "";
 }
 
 function mapDirtyRow(row: DirtyRow): EntityDraft {
@@ -541,6 +551,28 @@ async function requireFreshPreview() {
   return state;
 }
 
+function boundedPushBody(operations: GatewayOperation[]) {
+  const prefix = '{"operations":[';
+  const suffix = "]}";
+  const encoder = new TextEncoder();
+  let bytes = encoder.encode(prefix).byteLength + encoder.encode(suffix).byteLength;
+  const serialized: string[] = [];
+  const selected: GatewayOperation[] = [];
+  for (const operation of operations) {
+    const item = JSON.stringify(operation);
+    const itemBytes = encoder.encode(item).byteLength + (serialized.length ? 1 : 0);
+    if (bytes + itemBytes > SAFE_PUSH_BODY_BYTES && !serialized.length) {
+      throw new Error(`单条同步数据超过安全上限：${operation.entityKey}`);
+    }
+    if (bytes + itemBytes > SAFE_PUSH_BODY_BYTES) break;
+    serialized.push(item);
+    selected.push(operation);
+    bytes += itemBytes;
+  }
+  if (!selected.length) throw new Error("同步分批失败：没有可安全上传的数据");
+  return { operations: selected, body: `${prefix}${serialized.join(",")}${suffix}`, bytes };
+}
+
 async function pushAll() {
   const state = await ensureLocalState();
   const db = getD1();
@@ -552,15 +584,17 @@ async function pushAll() {
     ).all<JsonObject>();
     const rows = result.results || [];
     if (!rows.length) break;
-    const byId = new Map(rows.map((row) => [text(row.operation_id), row]));
-    const operations = rows.map((row) => normalizeSyncOperation({
+    const available = rows.map((row) => normalizeSyncOperation({
       schemaVersion: SYNC_SCHEMA_VERSION, operationId: row.operation_id, nodeId: state.node_id,
       entityType: row.entity_type, entityKey: row.entity_key, action: row.action,
       restore: Boolean(integer(row.restore)), baseVersion: integer(row.base_version),
       occurredAt: row.occurred_at, payload: text(row.action) === "delete" ? null : parseJson(row.payload_json, {}),
     }));
+    const batch = boundedPushBody(available);
+    const selectedRows = rows.slice(0, batch.operations.length);
+    const byId = new Map(selectedRows.map((row) => [text(row.operation_id), row]));
     const response = await deviceFetch("/v1/sync/push", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operations }),
+      method: "POST", headers: { "content-type": "application/json" }, body: batch.body,
     }, 60_000);
     const statements: D1PreparedStatement[] = [];
     for (const accepted of (response.accepted as JsonObject[] | undefined) || []) {
@@ -605,7 +639,7 @@ async function deterministicId(value: string) {
 }
 
 function sourceKeyFromOperation(operation: GatewayOperation) {
-  if (operation.payload?.sourceKey) return text(operation.payload.sourceKey);
+  if (operation.payload?.sourceKey) return canonicalSourceKey({ sourceKey: operation.payload.sourceKey });
   if (!["input_source", "tool_source_binding", "telegram_message", "telegram_tool_queue", "telegram_read_state", "telegram_checkpoint"].includes(operation.entityType)) return "";
   const raw = operation.entityKey.replace(/^(?:source|binding|message|queue|read|checkpoint):/, "");
   if (operation.entityType === "tool_source_binding" || operation.entityType === "telegram_message") {
@@ -624,7 +658,7 @@ async function resolveSourceIds(operations: GatewayOperation[]) {
     const connectionId = raw.shift() || "default";
     const externalKey = raw.join(":");
     return db.prepare("SELECT id FROM input_sources WHERE kind=? AND connection_id=? AND external_key=? LIMIT 1")
-      .bind(kind, connectionId === "default" ? "" : connectionId, externalKey);
+      .bind(kind, localConnectionIdForSource(kind, connectionId), externalKey);
   });
   const rows = statements.length ? await db.batch(statements) : [];
   const output = new Map<string, string>();
@@ -750,10 +784,10 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
          archived=excluded.archived,last_sync_at=excluded.last_sync_at,latest_remote_message_id=excluded.latest_remote_message_id,
          sync_cursor_message_id=excluded.sync_cursor_message_id,sync_target_message_id=excluded.sync_target_message_id,last_error=excluded.last_error,
          name=excluded.name,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at`,
-      ).bind(sourceId, source.kind, source.externalKey, source.connectionId === "default" ? "" : source.connectionId, text(payload.externalChatId) || source.externalKey, text(metadata.chatType ?? payload.sourceType), text(metadata.username), text(metadata.accessStatus) || "unknown", payload.enabled === false || metadata.archived === true ? 1 : 0, text(payload.lastSyncAt), text(metadata.latestRemoteMessageId), text(payload.incrementalCheckpointId), text(metadata.syncCursorMessageId), text(metadata.syncTargetMessageId), text(metadata.lastError), text(payload.name) || source.externalKey, JSON.stringify(metadata), text(payload.createdAt) || timestamp, timestamp);
+      ).bind(sourceId, source.kind, source.externalKey, localConnectionIdForSource(source.kind, source.connectionId), text(payload.externalChatId) || source.externalKey, text(metadata.chatType ?? payload.sourceType), text(metadata.username), text(metadata.accessStatus) || "unknown", payload.enabled === false || metadata.archived === true ? 1 : 0, text(payload.lastSyncAt), text(metadata.latestRemoteMessageId), text(payload.incrementalCheckpointId), text(metadata.syncCursorMessageId), text(metadata.syncTargetMessageId), text(metadata.lastError), text(payload.name) || source.externalKey, JSON.stringify(metadata), text(payload.createdAt) || timestamp, timestamp);
     }
     case "tool_source_binding": {
-      const sourceKey = text(payload.sourceKey) || operation.entityKey.replace(/^binding:/, "").split(":").slice(0, -1).join(":");
+      const sourceKey = text(payload.sourceKey) ? canonicalSourceKey({ sourceKey: payload.sourceKey }) : operation.entityKey.replace(/^binding:/, "").split(":").slice(0, -1).join(":");
       const sourceId = sourceIds.get(sourceKey);
       const tool = text(payload.tool) || operation.entityKey.split(":").at(-1) || "";
       if (!sourceId) return null;
@@ -765,7 +799,7 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
       ).bind(await deterministicId(operation.entityKey), sourceId, tool, text(payload.historyMode) || "since_now", integer(payload.historyLimit), text(payload.historyFrom), text(payload.boundAtMessageId), text(payload.createdAt) || timestamp);
     }
     case "telegram_message": {
-      const sourceKey = text(payload.sourceKey) || operation.entityKey.replace(/^message:/, "").split(":").slice(0, -1).join(":");
+      const sourceKey = text(payload.sourceKey) ? canonicalSourceKey({ sourceKey: payload.sourceKey }) : operation.entityKey.replace(/^message:/, "").split(":").slice(0, -1).join(":");
       const sourceId = sourceIds.get(sourceKey);
       const messageId = text(payload.messageId) || operation.entityKey.split(":").at(-1) || "";
       if (!sourceId) return null;
@@ -776,10 +810,10 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
          remote_update_id=excluded.remote_update_id,message_date=excluded.message_date,body=excluded.body,event_kind=excluded.event_kind,
          content_hash=excluded.content_hash,remote_edited_at=excluded.remote_edited_at,remote_deleted_at=excluded.remote_deleted_at,
          body_deleted_at=excluded.body_deleted_at,updated_at=excluded.updated_at`,
-      ).bind(await deterministicId(operation.entityKey), sourceId, messageId, sourceKey.split(":")[1] === "default" ? "" : sourceKey.split(":")[1], text(payload.externalMessageId) || messageId, text(payload.remoteUpdateId), text(payload.messageDate), text(payload.body), text(payload.eventKind) || "message", text(payload.contentHash), text(payload.remoteEditedAt), text(payload.remoteDeletedAt), text(payload.bodyDeletedAt), text(payload.createdAt) || timestamp, timestamp);
+      ).bind(await deterministicId(operation.entityKey), sourceId, messageId, localConnectionIdForSource(sourceKey.split(":")[0], sourceKey.split(":")[1] || "default"), text(payload.externalMessageId) || messageId, text(payload.remoteUpdateId), text(payload.messageDate), text(payload.body), text(payload.eventKind) || "message", text(payload.contentHash), text(payload.remoteEditedAt), text(payload.remoteDeletedAt), text(payload.bodyDeletedAt), text(payload.createdAt) || timestamp, timestamp);
     }
     case "telegram_tool_queue": {
-      const sourceKey = text(payload.sourceKey) || operation.entityKey.replace(/^queue:/, "").split(":").slice(0, -2).join(":");
+      const sourceKey = text(payload.sourceKey) ? canonicalSourceKey({ sourceKey: payload.sourceKey }) : operation.entityKey.replace(/^queue:/, "").split(":").slice(0, -2).join(":");
       const sourceId = sourceIds.get(sourceKey);
       const messageId = text(payload.messageId) || operation.entityKey.split(":").at(-2) || "";
       const tool = text(payload.tool) || operation.entityKey.split(":").at(-1) || "";
@@ -795,7 +829,7 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
       ).bind(await deterministicId(operation.entityKey), telegramMessageId, tool, text(payload.status) || "pending", text(payload.messageDate), integer(payload.candidateCount), text(payload.candidatePreview), text(payload.runKey), text(payload.error), text(payload.selectedAt), text(payload.processingAt), text(payload.processedAt), text(payload.createdAt) || timestamp, timestamp);
     }
     case "telegram_checkpoint": {
-      const sourceKey = text(payload.sourceKey) || operation.entityKey.replace(/^checkpoint:/, "");
+      const sourceKey = text(payload.sourceKey) ? canonicalSourceKey({ sourceKey: payload.sourceKey }) : operation.entityKey.replace(/^checkpoint:/, "");
       const sourceId = sourceIds.get(sourceKey);
       if (!sourceId || deleting) return null;
       return db.prepare(
@@ -805,7 +839,7 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
       ).bind(text(payload.checkpoint), text(payload.checkpoint), text(payload.continuation), text(payload.continuation), timestamp, sourceId);
     }
     case "telegram_read_state": {
-      const sourceKey = text(payload.sourceKey) || operation.entityKey.replace(/^read:/, "");
+      const sourceKey = text(payload.sourceKey) ? canonicalSourceKey({ sourceKey: payload.sourceKey }) : operation.entityKey.replace(/^read:/, "");
       const sourceId = sourceIds.get(sourceKey);
       if (!sourceId) return null;
       if (deleting) return db.prepare("DELETE FROM telegram_read_states WHERE source_id=?").bind(sourceId);
@@ -820,7 +854,8 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
     case "task_inbox": {
       const globalId = text(payload.globalId) || operation.entityKey.replace(/^task:/, "");
       if (deleting) return db.prepare("DELETE FROM task_inbox WHERE id=? OR run_id=?").bind(globalId, globalId);
-      const sourceId = sourceIds.get(text(payload.sourceKey)) || "";
+      const taskSourceKey = text(payload.sourceKey) ? canonicalSourceKey({ sourceKey: payload.sourceKey }) : "";
+      const sourceId = sourceIds.get(taskSourceKey) || "";
       return db.prepare(
         `INSERT INTO task_inbox(id,tool,stage,phase,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET tool=excluded.tool,stage=excluded.stage,phase=excluded.phase,
@@ -980,6 +1015,8 @@ export async function acquireCloudTelegramLease(connectionKey: string, sourceKey
   return { leaseKey, leaseToken: text(acquired.leaseToken), expiresAt: text(acquired.expiresAt) };
 }
 
+type CloudTelegramLease = { leaseKey: string; leaseToken: string; expiresAt: string };
+
 export async function renewCloudTelegramLease(lease: { leaseKey: string; leaseToken: string }) {
   return deviceFetch("/v1/leases/renew", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...lease, ttlSeconds: 120 }),
@@ -997,6 +1034,22 @@ export async function releaseCloudTelegramLease(lease: { leaseKey: string; lease
   }
 }
 
+async function renewTrackedCloudTelegramLease(lease: CloudTelegramLease) {
+  const renewed = await renewCloudTelegramLease(lease);
+  const expiresAt = text(renewed.expiresAt);
+  if (!expiresAt || !Number.isFinite(Date.parse(expiresAt))) throw new Error("同步网关未返回有效的租约到期时间");
+  lease.expiresAt = expiresAt;
+}
+
+function assertCloudTelegramLeasesActive(leases: CloudTelegramLease[], leaseError: Error | null) {
+  if (leaseError) throw new Error(`跨端 Telegram 执行权已失效：${leaseError.message}`);
+  const expiring = leases.find((lease) => {
+    const expiresAt = Date.parse(lease.expiresAt);
+    return !Number.isFinite(expiresAt) || expiresAt <= Date.now() + 5_000;
+  });
+  if (expiring) throw new Error(`跨端 Telegram 执行权已失效或即将到期：${expiring.leaseKey}`);
+}
+
 export async function withCloudTelegramSourceLeases<T>(
   sourceIds: string[],
   fallbackConnection: "telegram-personal" | "telegram-bot",
@@ -1006,16 +1059,15 @@ export async function withCloudTelegramSourceLeases<T>(
   await ensureCloudSyncSchema();
   if (fallbackConnection === "telegram-bot") {
     const lease = await acquireCloudTelegramLease("bot", "global-offset");
+    const leases = lease ? [lease] : [];
     let leaseError: Error | null = null;
     try {
       const timer = setInterval(() => {
         if (!lease) return;
-        void renewCloudTelegramLease(lease)
+        void renewTrackedCloudTelegramLease(lease)
           .catch((error) => { leaseError = error instanceof Error ? error : new Error(String(error)); });
       }, 30_000);
-      const assertActive = () => {
-        if (leaseError) throw new Error(`跨端 Telegram 执行权已失效：${leaseError.message}`);
-      };
+      const assertActive = () => assertCloudTelegramLeasesActive(leases, leaseError);
       try {
         const result = await run(assertActive);
         assertActive();
@@ -1041,7 +1093,7 @@ export async function withCloudTelegramSourceLeases<T>(
       return { connection: "personal", sourceKey: text(row.external_chat_id) || source.externalKey };
     });
   if (!targets.length) targets.push({ connection: "personal", sourceKey: "global-session" });
-  const leases: Array<{ leaseKey: string; leaseToken: string; expiresAt: string }> = [];
+  const leases: CloudTelegramLease[] = [];
   let leaseError: Error | null = null;
   try {
     for (const target of targets) {
@@ -1049,12 +1101,10 @@ export async function withCloudTelegramSourceLeases<T>(
       if (lease) leases.push(lease);
     }
     const timer = setInterval(() => {
-      void Promise.all(leases.map((lease) => renewCloudTelegramLease(lease)))
+      void Promise.all(leases.map((lease) => renewTrackedCloudTelegramLease(lease)))
         .catch((error) => { leaseError = error instanceof Error ? error : new Error(String(error)); });
     }, 30_000);
-    const assertActive = () => {
-      if (leaseError) throw new Error(`跨端 Telegram 执行权已失效：${leaseError.message}`);
-    };
+    const assertActive = () => assertCloudTelegramLeasesActive(leases, leaseError);
     try {
       const result = await run(assertActive);
       assertActive();

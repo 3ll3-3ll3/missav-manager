@@ -62,6 +62,8 @@ Telegram / 导入文件
 ## Telegram 执行协调
 
 - 租约键与 Windows 完全一致：Bot 全局游标固定为 `telegram:bot:global-offset`；个人账号来源为 `telegram:personal:<external-chat-id>`。
+- Telegram 同步实体的跨端来源自然键固定为 `telegram_personal:default:<external-chat-id>` 或 `telegram_bot:default:<external-chat-id>`。网页本地连接 ID `telegram-personal` / `telegram-bot` 只是存储别名，不得进入跨端身份；具名的其他连接 ID 继续保留。
+- 租约在消息写入后、checkpoint/offset 最终提交前仍须再次验证；续租刷新到期时间，剩余时间不足安全窗口时不得推进远端位置。
 - 租期 120 秒，每 30 秒续约；网关不允许超过 120 秒，异常退出后自动过期。
 - 本地长期连接可以持续工作，但仍必须持有租约。
 - 网页按请求连接，每次请求先取得租约，完成或失败后释放。
@@ -99,5 +101,5 @@ Telegram / 导入文件
 - 编辑、删除、队列状态、checkpoint 和已读位置能往返同步。
 - 同一来源不能被本地和网页同时远端拉取或标已读。
 - 断网、重复提交、进程中断和分页续传不造成漏项或重复副作用。
-- 仓库、日志、D1 同步载荷均不出现 Secret 或 Telegram Session。
+- 仓库、日志、D1 同步载荷均不出现 Secret 或 Telegram Session；同步协议同时检查敏感字段名和字符串正文中的 Token、Bearer、登录链接、Session 等特征。
 - 五个工具的入口、处理阶段、表格操作和文本输出在两端保持同一语义。

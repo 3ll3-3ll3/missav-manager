@@ -116,10 +116,21 @@ async function loadServer(entryPath, env) {
             path: "workers",
             namespace: "cloudflare-test-env",
           }));
+          buildApi.onResolve({ filter: /^cloudflare:sockets$/ }, () => ({
+            path: "sockets",
+            namespace: "cloudflare-test-sockets",
+          }));
           buildApi.onLoad(
             { filter: /.*/, namespace: "cloudflare-test-env" },
             () => ({
               contents: "export const env = globalThis.__TELEGRAM_TEST_ENV__;",
+              loader: "js",
+            }),
+          );
+          buildApi.onLoad(
+            { filter: /.*/, namespace: "cloudflare-test-sockets" },
+            () => ({
+              contents: "export function connect(){throw new Error('cloudflare socket unavailable in unit test');}",
               loader: "js",
             }),
           );
@@ -1038,4 +1049,59 @@ test("Bot 多页拉取中途失败后从已提交 offset 继续，已入库页�
     delete globalThis.__TELEGRAM_TEST_ENV__;
     database.close();
   }
+});
+
+test("Bot 租约在提交前失效时不写消息也不推进 offset", async () => {
+  const database = new DatabaseSync(":memory:");
+  await applySchema(database);
+  const server = await loadTelegramServer({
+    DB: new TestD1Database(database),
+    TELEGRAM_BOT_TOKEN: "test-token-not-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/getWebhookInfo")) return Response.json({ ok: true, result: { url: "" } });
+    if (url.pathname.endsWith("/getUpdates")) {
+      return Response.json({ ok: true, result: [{
+        update_id: 501,
+        channel_post: { message_id: 10, date: 1_786_665_600, text: "https://bad.news/t/9999999", chat: { id: -100999, type: "channel", title: "租约测试" } },
+      }] });
+    }
+    throw new Error(`unexpected Bot method ${url.pathname}`);
+  };
+  try {
+    await assert.rejects(
+      () => server.pullTelegramBot(undefined, { assertRemoteLease: () => { throw new Error("synthetic lease expired"); } }),
+      /synthetic lease expired/,
+    );
+    assert.equal(database.prepare("SELECT next_update_offset FROM telegram_bot_state WHERE connection_id='telegram-bot'").get().next_update_offset, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM telegram_messages").get().count, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete globalThis.__TELEGRAM_TEST_ENV__;
+    database.close();
+  }
+});
+
+test("个人 API 租约在最终提交前失效时不推进 checkpoint", async () => {
+  const database = new DatabaseSync(":memory:");
+  await applySchema(database);
+  const d1 = new TestD1Database(database);
+  const server = await loadServer("lib/telegram-sync-commit.ts", { DB: d1 });
+  const timestamp = "2026-08-23T14:00:00.000Z";
+  database.prepare(
+    `INSERT INTO input_sources(id,kind,external_key,name,metadata_json,created_at,updated_at,connection_id,external_chat_id,incremental_checkpoint_id)
+     VALUES(?,?,?,?,?,?,?,?,?,?)`,
+  ).run("lease-personal-source", "telegram_personal", "-100700", "租约测试", "{}", timestamp, timestamp, "telegram-personal", "-100700", "100");
+  const checkpointUpdate = d1.prepare("UPDATE input_sources SET incremental_checkpoint_id='200' WHERE id='lease-personal-source'");
+  await assert.rejects(
+    () => server.commitPersonalSyncCheckpoint([checkpointUpdate], () => { throw new Error("synthetic lease expired"); }),
+    /synthetic lease expired/,
+  );
+  assert.equal(database.prepare("SELECT incremental_checkpoint_id FROM input_sources WHERE id='lease-personal-source'").get().incremental_checkpoint_id, "100");
+  await server.commitPersonalSyncCheckpoint([checkpointUpdate], () => undefined);
+  assert.equal(database.prepare("SELECT incremental_checkpoint_id FROM input_sources WHERE id='lease-personal-source'").get().incremental_checkpoint_id, "200");
+  delete globalThis.__TELEGRAM_TEST_ENV__;
+  database.close();
 });

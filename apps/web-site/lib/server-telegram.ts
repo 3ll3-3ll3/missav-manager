@@ -1244,7 +1244,7 @@ export type BotSyncProgress = {
 
 export async function pullTelegramBot(
   onProgress?: (progress: BotSyncProgress) => void,
-  options: { limit?: number; shouldStop?: () => boolean } = {},
+  options: { limit?: number; shouldStop?: () => boolean; assertRemoteLease?: () => void } = {},
 ) {
   await ensureSchema();
   const secret = token();
@@ -1350,6 +1350,7 @@ export async function pullTelegramBot(
       hasMore = rawCount === pageLimit;
       stopped ||= stopAfterPage;
       const releaseLock = !hasMore || capped || stopAfterPage;
+      options.assertRemoteLease?.();
       const commit = await commitMessages(
         parsed.messages,
         "telegram_bot",

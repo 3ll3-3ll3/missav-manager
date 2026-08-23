@@ -123,6 +123,19 @@ test("同步网关拒绝 Secret 载荷和其他节点冒充", async () => {
     assert.equal(response.ok, false);
     const payload = await response.json();
     assert.doesNotMatch(JSON.stringify(payload), /must-not-pass/);
+    const embedded = await worker.dispatchFetch("https://sync.test/v1/sync/push", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + device.deviceToken },
+      body: JSON.stringify({ operations: [{
+        schemaVersion: 1, operationId: "embedded-secret", nodeId: "windows-test",
+        entityType: "permanent_record", entityKey: "record:missav:secret-test", action: "upsert",
+        occurredAt: "2026-08-23T00:00:00.000Z",
+        payload: { tool: "missav", recordKey: "SECRET-TEST", note: "TELEGRAM_BOT_TOKEN=123456789:abcdefghijklmnopqrstuvwxyzABCDE" },
+      }] }),
+    });
+    assert.equal(embedded.ok, false);
+    const embeddedPayload = await embedded.json();
+    assert.doesNotMatch(JSON.stringify(embeddedPayload), /abcdefghijklmnopqrstuvwxyzABCDE/);
   } finally {
     await worker.dispose();
   }

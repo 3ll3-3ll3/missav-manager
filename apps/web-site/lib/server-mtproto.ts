@@ -17,6 +17,7 @@ import {
 import { ensureSchema, nowIso } from "./server-store";
 import { writeErrorLog, writeLog } from "./server-audit";
 import { ingestTelegramMessages } from "./server-telegram";
+import { commitPersonalSyncCheckpoint } from "./telegram-sync-commit";
 import {
   acquirePersonalSessionLease,
   personalSessionLeaseStatus,
@@ -745,6 +746,7 @@ export async function syncPersonalSources(
   },
   onProgress?: (progress: PersonalSyncProgress) => void,
   shouldStop: () => boolean = () => false,
+  assertRemoteLease: () => void = () => undefined,
 ) {
   const requested = [
     ...new Set((input.sourceIds ?? []).map(String).filter(Boolean)),
@@ -913,6 +915,7 @@ export async function syncPersonalSources(
           sourceName,
           scanned: messages.length,
         });
+        assertRemoteLease();
         const commit = await ingestTelegramMessages(
           messages,
           "telegram_personal",
@@ -936,7 +939,7 @@ export async function syncPersonalSources(
         });
         const { maxId, minId, nextCheckpoint, targetId } = checkpointPlan;
         const timestamp = nowIso();
-        await getD1().batch([
+        await commitPersonalSyncCheckpoint([
           getD1()
             .prepare(
           `UPDATE input_sources SET last_sync_at=?,last_error='',
@@ -979,7 +982,7 @@ export async function syncPersonalSources(
               String(nextCheckpoint),
               commit.syncRunId,
             ),
-        ]);
+        ], assertRemoteLease);
         if (mode === "incremental") {
           const safeTarget = Math.max(
             Number(source.safe_read_message_id || 0) || 0,
@@ -995,6 +998,7 @@ export async function syncPersonalSources(
             .run();
           const policy = String(source.policy || "never");
           if (policy === "safe_auto" && safeTarget > markedBefore) {
+            assertRemoteLease();
             try {
               await markReadWithClient(client, source, String(safeTarget));
             } catch {
