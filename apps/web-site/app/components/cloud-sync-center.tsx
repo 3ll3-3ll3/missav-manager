@@ -88,6 +88,15 @@ export default function CloudSyncCenter() {
       } else if (action === "retry-conflicts") {
         setNotice(`已选择保留网页内容并将 ${Number(result.retried || 0)} 条冲突放回重试队列，请重新生成预览。`);
       } else {
+        let continuation = result;
+        let rounds = 1;
+        while (continuation.incomplete === true) {
+          if (rounds >= 250) throw new Error("同步仍有大量待处理数据，已安全停止；请刷新状态后继续，不会丢失进度。");
+          const nextPreview = await request({ action: "preview" });
+          setNotice(`正在继续第 ${rounds + 1} 轮：待上传 ${Number(nextPreview.pendingUpload || 0)} 条，待下载约 ${Number(nextPreview.pendingDownload || 0)} 条。`);
+          continuation = await request({ action: "execute", ...(mode ? { mode } : {}) });
+          rounds += 1;
+        }
         setNotice(mode === "both" ? "双向同步完成。" : mode === "push" ? "网页数据 Push 完成。" : "云端数据 Pull 完成。");
       }
       await load();

@@ -256,6 +256,30 @@ test("网页 Push 按 UTF-8 请求体切分，任何一批都不超过网关安�
     assert.equal(result.push.accepted, 100);
     assert.ok(pushBytes.length > 1, "大批次必须拆为多个请求");
     assert.ok(pushBytes.every((bytes) => bytes <= 3_500_000), `请求体超限：${Math.max(...pushBytes)}`);
+
+    const successBeforeContinuation = (await cloud.cloudSyncStatus()).lastSuccessAt;
+    webSqlite.exec("BEGIN");
+    for (let index = 0; index < 5; index += 1) {
+      const code = `CONTINUE-${index}`;
+      insert.run(`continue-${index}`, "missav", code, code, "", "new", "[]", "[]", "[]", "", "", "", "{}", timestamp, timestamp);
+    }
+    webSqlite.exec("COMMIT");
+    await cloud.createCloudSyncPreview();
+    const partial = await cloud.executeCloudSync("push", { maxPushBatches: 2, pushBatchOperations: 1 });
+    assert.equal(partial.incomplete, true);
+    assert.equal(partial.push.accepted, 2);
+    assert.equal(partial.push.remaining, 3);
+    assert.equal((await cloud.cloudSyncStatus()).lastSuccessAt, successBeforeContinuation, "分段未完成不能冒充完整同步成功");
+    let continuation = partial;
+    let continuedAccepted = 0;
+    while (continuation.incomplete) {
+      await cloud.createCloudSyncPreview();
+      continuation = await cloud.executeCloudSync("push", { maxPushBatches: 2, pushBatchOperations: 1 });
+      continuedAccepted += Number(continuation.push.accepted || 0);
+    }
+    assert.equal(continuedAccepted, 3);
+    assert.equal(webSqlite.prepare("SELECT COUNT(*) AS count FROM cloud_sync_outbox WHERE status IN ('pending','retry')").get().count, 0);
+    assert.equal(gatewaySqlite.prepare("SELECT COUNT(*) AS count FROM sync_entities WHERE entity_key LIKE 'record:missav:continue-%'").get().count, 5);
   } finally {
     globalThis.fetch = originalFetch;
     webSqlite.close();

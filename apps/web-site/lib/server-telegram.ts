@@ -329,7 +329,9 @@ async function commitMessages(
   kind: "telegram_bot" | "telegram_personal" | "telegram_import",
   nextOffset?: number,
   releaseBotLock = true,
+  assertRemoteLease: () => void = () => undefined,
 ) {
+  assertRemoteLease();
   const totalStarted = performance.now();
   await ensureSchema();
   const connectionKind =
@@ -831,6 +833,11 @@ async function commitMessages(
           ),
       );
     }
+    // Message rows are written in bounded chunks above. Re-check after those
+    // writes and immediately before the atomic offset/final-state batch. If a
+    // remote lease was lost while preparing or storing messages, a retry will
+    // deduplicate them and the Bot offset must stay unchanged.
+    assertRemoteLease();
     await getD1().batch(finalStatements);
     await writeLog("info", "telegram", "Telegram 消息已安全分发", {
       kind,
@@ -1350,12 +1357,12 @@ export async function pullTelegramBot(
       hasMore = rawCount === pageLimit;
       stopped ||= stopAfterPage;
       const releaseLock = !hasMore || capped || stopAfterPage;
-      options.assertRemoteLease?.();
       const commit = await commitMessages(
         parsed.messages,
         "telegram_bot",
         nextOffset,
         releaseLock,
+        options.assertRemoteLease,
       );
       totals.received += commit.received;
       totals.inserted += commit.inserted;

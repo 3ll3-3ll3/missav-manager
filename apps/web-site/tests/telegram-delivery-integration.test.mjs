@@ -1051,7 +1051,7 @@ test("Bot 多页拉取中途失败后从已提交 offset 继续，已入库页�
   }
 });
 
-test("Bot 租约在提交前失效时不写消息也不推进 offset", async () => {
+test("Bot 租约在消息写入后失效时保留去重数据但不推进 offset", async () => {
   const database = new DatabaseSync(":memory:");
   await applySchema(database);
   const server = await loadTelegramServer({
@@ -1071,12 +1071,20 @@ test("Bot 租约在提交前失效时不写消息也不推进 offset", async () 
     throw new Error(`unexpected Bot method ${url.pathname}`);
   };
   try {
+    let leaseChecks = 0;
     await assert.rejects(
-      () => server.pullTelegramBot(undefined, { assertRemoteLease: () => { throw new Error("synthetic lease expired"); } }),
+      () => server.pullTelegramBot(undefined, { assertRemoteLease: () => {
+        leaseChecks += 1;
+        if (leaseChecks < 2) return;
+        assert.equal(database.prepare("SELECT COUNT(*) AS count FROM telegram_messages").get().count, 1);
+        throw new Error("synthetic lease expired after message write");
+      } }),
       /synthetic lease expired/,
     );
+    assert.equal(leaseChecks, 2);
     assert.equal(database.prepare("SELECT next_update_offset FROM telegram_bot_state WHERE connection_id='telegram-bot'").get().next_update_offset, 0);
-    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM telegram_messages").get().count, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM telegram_messages").get().count, 1);
+    assert.equal(database.prepare("SELECT status FROM telegram_sync_runs ORDER BY started_at DESC LIMIT 1").get().status, "failed");
   } finally {
     globalThis.fetch = originalFetch;
     delete globalThis.__TELEGRAM_TEST_ENV__;

@@ -45,10 +45,13 @@
     - 网站 Push 同 Windows 一样按实际 UTF-8 JSON 请求体切分到 3.5 MB 安全目标，单条超限明确报错，合法大批次不会被 Worker 的 4 MB 硬上限拒绝；
     - Secret 防护除字段名外增加字符串内容识别，覆盖 Bot Token、Bearer、Telegram 登录链接及敏感键值文本，错误不回显原值；
     - Bot offset 与个人 checkpoint 在最终数据库提交前再次验证远端租约；续租会刷新到期时间，距到期不足 5 秒拒绝提交，`safe_auto` 远端已读前也再次验证。
+11. 根据第二轮云端复核，又关闭两项最终阻断：
+    - Bot 消息分块写入完成后、最终 offset/状态批次提交前再次验证远端租约；若此时租约失效，已写消息保留并由唯一键支持幂等重试，但 offset 保持原值且同步运行记为失败；集成测试真实模拟“消息已经入库后租约失效”。
+    - 网站 Push/Pull 不再依赖静默硬分页上限。每次服务端请求只处理有界批次并明确返回 `incomplete`、`remaining` 与 `hasMore`；浏览器重新生成预览后自动续跑，关闭页面后未处理 outbox 仍保留。分段未完成不会更新最近成功时间，十万条不会在约 26,500 条后假报成功。
 
 ### 本轮最终自动验证
 
-- 网站：TypeScript、ESLint、Vinext 生产构建通过，`89/89` 项测试通过；新增真实网关分块、来源复用及租约失效回归，构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
+- 网站：TypeScript、ESLint、Vinext 生产构建通过，`89/89` 项测试通过；新增真实网关分块、显式续跑、来源复用及消息写入后租约失效回归，构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
 - 同步 Worker：语法检查、`7/7` 项 Miniflare+D1 测试、Wrangler dry-run 通过；未执行正式部署。
 - 仓库总回归：`241/241` 项测试通过，根目录语法检查通过。
 - Windows 统一版：Vue/TypeScript/Vite 构建通过；Rust `cargo check` 通过，`30/30` 项测试通过。
@@ -67,7 +70,7 @@
 
 1. `fetch` 后以 `codex/unified-local-cloud-v1` 最新远端 HEAD 为唯一源码基线，新建 `codex/cloud/unified-local-cloud-v1-deploy`。
 2. 只读审计本轮网站同步、迁移、租约与测试，确认构建源码树和 Git SHA 一致；发现问题先修复并补测试。
-   - 必须复核本交接第 10 项四个部署阻断已由源码和新增测试真实关闭，不得只复述说明；
+   - 必须复核本交接第 10、11 项六个部署阻断已由源码和新增测试真实关闭，不得只复述说明；
    - 本地已复现 Wrangler dry-run、`cargo check` 与 Rust `30/30`，云端环境若不能运行应记为环境限制，不能反推源码未验证。
 3. 经所有者明确批准后创建正式同步 Worker/D1、执行网关迁移并设置 Worker 管理 Secret。
 4. 在现有私人 Site Secrets 中设置 `SYNC_GATEWAY_URL`、`SYNC_ADMIN_TOKEN`，执行网站 D1 迁移并部署新 Sites 版本。

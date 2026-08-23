@@ -66,6 +66,7 @@ type EntityDraft = {
 const STATE_ID = "site";
 const PREVIEW_TTL_MS = 30 * 60_000;
 const SAFE_PUSH_BODY_BYTES = Math.min(MAX_SYNC_BATCH_BYTES, 3_500_000);
+const SYNC_BATCHES_PER_REQUEST = 20;
 const SECRET_FIELD = /(?:^|_)(?:api_?hash|token|secret|password|passcode|phone_?code|two_?factor|2fa|session|cookie|authorization)(?:$|_)/i;
 const SETTING_TO_SYNC: Record<string, string> = {
   referenceTags: "missav.referenceTags",
@@ -573,18 +574,27 @@ function boundedPushBody(operations: GatewayOperation[]) {
   return { operations: selected, body: `${prefix}${serialized.join(",")}${suffix}`, bytes };
 }
 
-async function pushAll() {
+type SyncExecutionOptions = {
+  maxPushBatches?: number;
+  pushBatchOperations?: number;
+  maxPullPages?: number;
+};
+
+async function pushAll(options: SyncExecutionOptions = {}) {
   const state = await ensureLocalState();
   const db = getD1();
+  const maxBatches = Math.min(500, Math.max(1, integer(options.maxPushBatches) || SYNC_BATCHES_PER_REQUEST));
+  const batchOperations = Math.min(200, Math.max(1, integer(options.pushBatchOperations) || 200));
   let acceptedCount = 0;
   let rejectedCount = 0;
-  for (let page = 0; page < 500; page += 1) {
+  let batches = 0;
+  for (; batches < maxBatches; batches += 1) {
     const result = await db.prepare(
       "SELECT * FROM cloud_sync_outbox WHERE status IN ('pending','retry') ORDER BY created_at LIMIT 200",
     ).all<JsonObject>();
     const rows = result.results || [];
     if (!rows.length) break;
-    const available = rows.map((row) => normalizeSyncOperation({
+    const available = rows.slice(0, batchOperations).map((row) => normalizeSyncOperation({
       schemaVersion: SYNC_SCHEMA_VERSION, operationId: row.operation_id, nodeId: state.node_id,
       entityType: row.entity_type, entityKey: row.entity_key, action: row.action,
       restore: Boolean(integer(row.restore)), baseVersion: integer(row.base_version),
@@ -628,10 +638,14 @@ async function pushAll() {
          VALUES(?,?,?,?,?,?,?,?, 'open',?)`,
       ).bind(conflictId, row.operation_id, row.entity_type, row.entity_key, integer(rejected.currentVersion), text(rejected.reason), JSON.stringify(row), JSON.stringify(remote.entity || null), nowIso()));
     }
-    if (statements.length) await db.batch(statements);
-    if (!((response.accepted as unknown[] | undefined)?.length)) break;
+    if (!statements.length) throw new Error("同步网关没有确认本批任何操作，已停止以避免静默循环");
+    await db.batch(statements);
   }
-  return { accepted: acceptedCount, rejected: rejectedCount };
+  const remainingRow = await db.prepare(
+    "SELECT COUNT(*) AS count FROM cloud_sync_outbox WHERE status IN ('pending','retry')",
+  ).first<{ count: number }>();
+  const remaining = integer(remainingRow?.count);
+  return { accepted: acceptedCount, rejected: rejectedCount, batches, remaining, hasMore: remaining > 0 };
 }
 
 async function deterministicId(value: string) {
@@ -876,12 +890,15 @@ async function businessStatement(db: D1Database, operation: GatewayOperation, so
   }
 }
 
-async function pullAll() {
+async function pullAll(options: SyncExecutionOptions = {}) {
   let state = await ensureLocalState();
   let applied = 0;
   let conflicts = 0;
   let pages = 0;
-  for (; pages < 2_000; pages += 1) {
+  let hasMore = false;
+  let latestSequence = integer(state.last_pulled_sequence);
+  const maxPages = Math.min(500, Math.max(1, integer(options.maxPullPages) || SYNC_BATCHES_PER_REQUEST));
+  for (; pages < maxPages; pages += 1) {
     const response = await deviceFetch(`/v1/sync/pull?after=${integer(state.last_pulled_sequence)}&limit=50`, {}, 60_000);
     const operations = ((response.operations as GatewayOperation[] | undefined) || []);
     const next = integer(response.nextSequence);
@@ -894,20 +911,39 @@ async function pullAll() {
         .bind(next, nowIso(), STATE_ID).run();
     }
     state = { ...state, last_pulled_sequence: next };
-    if (!response.hasMore) break;
+    hasMore = response.hasMore === true;
+    latestSequence = integer(response.latestSequence);
+    if (!hasMore) break;
   }
-  return { applied, conflicts, pages: pages + 1, lastPulledSequence: integer(state.last_pulled_sequence) };
+  return {
+    applied,
+    conflicts,
+    pages: Math.min(pages + 1, maxPages),
+    lastPulledSequence: integer(state.last_pulled_sequence),
+    remaining: Math.max(0, latestSequence - integer(state.last_pulled_sequence)),
+    hasMore,
+  };
 }
 
-export async function executeCloudSync(mode: "push" | "pull" | "both") {
-  await requireFreshPreview();
+export async function executeCloudSync(mode: "push" | "pull" | "both", options: SyncExecutionOptions = {}) {
+  const state = await requireFreshPreview();
   const result: JsonObject = { mode };
   try {
-    if (mode === "push" || mode === "both") result.push = await pushAll();
-    if (mode === "pull" || mode === "both") result.pull = await pullAll();
+    let incomplete = false;
+    if (mode === "push" || mode === "both") {
+      result.push = await pushAll(options);
+      incomplete = (result.push as JsonObject).hasMore === true;
+    }
+    if (!incomplete && (mode === "pull" || mode === "both")) {
+      result.pull = await pullAll(options);
+      incomplete = (result.pull as JsonObject).hasMore === true;
+    }
+    result.incomplete = incomplete;
+    result.requiresContinuationPreview = incomplete;
+    const completedAt = nowIso();
     await getD1().prepare(
       "UPDATE cloud_sync_state SET preview_json='{}',preview_expires_at='',last_success_at=?,last_error='',updated_at=? WHERE id=?",
-    ).bind(nowIso(), nowIso(), STATE_ID).run();
+    ).bind(incomplete ? state.last_success_at : completedAt, completedAt, STATE_ID).run();
     return result;
   } catch (error) {
     const message = text(error instanceof Error ? error.message : error).slice(0, 800);

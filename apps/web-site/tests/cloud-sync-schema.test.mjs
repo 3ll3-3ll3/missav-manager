@@ -90,5 +90,8 @@ test("跨端同步界面和 Telegram 来源租约接入均存在", async () => {
   assert.match(service, /SYNC_ADMIN_TOKEN/);
   assert.match(service, /withCloudTelegramSourceLeases/);
   assert.match(telegramRoute, /withCloudTelegramSourceLeases/);
+  assert.match(service, /requiresContinuationPreview/);
+  assert.match(center, /continuation\.incomplete/);
+  assert.match(center, /action: "preview"/);
   assert.doesNotMatch(center, /deviceToken|adminToken/);
 });
