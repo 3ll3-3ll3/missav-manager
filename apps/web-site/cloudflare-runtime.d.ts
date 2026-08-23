@@ -37,6 +37,8 @@ declare module "cloudflare:workers" {
     TELEGRAM_SESSION_ENCRYPTION_KEY?: string;
     MTPROTO_BACKEND_URL?: string;
     MTPROTO_BACKEND_TOKEN?: string;
+    SYNC_GATEWAY_URL?: string;
+    SYNC_ADMIN_TOKEN?: string;
     [key: string]: unknown;
   };
 }

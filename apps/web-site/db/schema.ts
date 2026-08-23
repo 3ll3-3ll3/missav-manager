@@ -539,3 +539,105 @@ export const dataSnapshotItems = sqliteTable(
     index("data_snapshot_items_snapshot_idx").on(table.snapshotId, table.id),
   ],
 );
+
+export const cloudSyncState = sqliteTable("cloud_sync_state", {
+  id: text("id").primaryKey(),
+  nodeId: text("node_id").notNull(),
+  encryptedDeviceToken: text("encrypted_device_token").notNull().default(""),
+  lastPulledSequence: integer("last_pulled_sequence").notNull().default(0),
+  previewJson: text("preview_json").notNull().default("{}"),
+  previewExpiresAt: text("preview_expires_at").notNull().default(""),
+  lastSuccessAt: text("last_success_at").notNull().default(""),
+  lastError: text("last_error").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const cloudSyncRuntime = sqliteTable("cloud_sync_runtime", {
+  id: integer("id").primaryKey(),
+  suppressOutbox: integer("suppress_outbox").notNull().default(0),
+});
+
+export const cloudSyncDirty = sqliteTable(
+  "cloud_sync_dirty",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    tableName: text("table_name").notNull(),
+    rowKey: text("row_key").notNull(),
+    action: text("action").notNull(),
+    rowJson: text("row_json").notNull(),
+    changedAt: text("changed_at").notNull(),
+    lastError: text("last_error").notNull().default(""),
+  },
+  (table) => [index("cloud_sync_dirty_id_idx").on(table.id)],
+);
+
+export const cloudSyncOutbox = sqliteTable(
+  "cloud_sync_outbox",
+  {
+    operationId: text("operation_id").primaryKey(),
+    entityType: text("entity_type").notNull(),
+    entityKey: text("entity_key").notNull(),
+    action: text("action").notNull(),
+    restore: integer("restore").notNull().default(0),
+    baseVersion: integer("base_version").notNull().default(0),
+    payloadJson: text("payload_json").notNull().default(""),
+    occurredAt: text("occurred_at").notNull(),
+    status: text("status").notNull().default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastError: text("last_error").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("cloud_sync_outbox_entity_uq").on(
+      table.entityType,
+      table.entityKey,
+    ),
+    index("cloud_sync_outbox_status_created_idx").on(
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const cloudSyncEntityVersions = sqliteTable(
+  "cloud_sync_entity_versions",
+  {
+    entityType: text("entity_type").notNull(),
+    entityKey: text("entity_key").notNull(),
+    recordVersion: integer("record_version").notNull().default(0),
+    tombstone: integer("tombstone").notNull().default(0),
+    payloadHash: text("payload_hash").notNull().default(""),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("cloud_sync_entity_versions_uq").on(
+      table.entityType,
+      table.entityKey,
+    ),
+  ],
+);
+
+export const cloudSyncConflicts = sqliteTable(
+  "cloud_sync_conflicts",
+  {
+    id: text("id").primaryKey(),
+    operationId: text("operation_id").notNull().default(""),
+    entityType: text("entity_type").notNull(),
+    entityKey: text("entity_key").notNull(),
+    currentVersion: integer("current_version").notNull().default(0),
+    reason: text("reason").notNull(),
+    localJson: text("local_json").notNull().default(""),
+    remoteJson: text("remote_json").notNull().default(""),
+    status: text("status").notNull().default("open"),
+    createdAt: text("created_at").notNull(),
+    resolvedAt: text("resolved_at").notNull().default(""),
+  },
+  (table) => [
+    index("cloud_sync_conflicts_status_created_idx").on(
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);

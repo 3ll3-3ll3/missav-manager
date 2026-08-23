@@ -17,6 +17,7 @@ import type {
 import type { ProcessingStats } from "./rules";
 import { toolCsv, toolFieldText } from "./tool-export";
 import defaultReferenceTagsRaw from "../public/default-reference-tags.txt?raw";
+import { CLOUD_SYNC_SCHEMA_STATEMENTS } from "./cloud-sync-schema";
 
 const TOOLS = new Set(["twitter", "badnews", "haijiao", "missav", "av123"]);
 const EDITABLE_FIELDS: Record<string, string> = {
@@ -140,6 +141,8 @@ async function probeCurrentSchema(db: D1Database) {
     ),
     db.prepare("SELECT phase FROM task_inbox LIMIT 1"),
     db.prepare("SELECT webhook_status FROM telegram_bot_state LIMIT 1"),
+    db.prepare("SELECT id,node_id,last_pulled_sequence FROM cloud_sync_state LIMIT 1"),
+    db.prepare("SELECT suppress_outbox FROM cloud_sync_runtime WHERE id=1"),
   ]);
 }
 
@@ -368,6 +371,7 @@ export async function ensureSchema() {
         entity_key TEXT NOT NULL, previous_json TEXT NOT NULL
       )`,
       `CREATE INDEX IF NOT EXISTS data_snapshot_items_snapshot_idx ON data_snapshot_items(snapshot_id, id)`,
+      ...CLOUD_SYNC_SCHEMA_STATEMENTS,
     ];
     await db.batch(statements.map((statement) => db.prepare(statement)));
     // The private Site has already been deployed with the pre-hub schema. D1

@@ -31,22 +31,41 @@
 4. Windows v1 业务适配已覆盖 11 类：永久记录、处理批次、结果明细、任务中心、Telegram 来源、工具与来源绑定、统一 Telegram 消息、各工具独立队列、Telegram checkpoint、三种已读策略及位置、MissAV 三份规则资料。超大原始输入只同步前 64 KiB 预览，完整原文仍保留在创建它的执行端。
 5. Windows 的 Bot 增量、个人账号增量、历史回拉和标已读调用链均接入远端来源租约；续约失败时拒绝提交本次结果，不推进本地 checkpoint、Bot offset 或已读位置。
 6. 架构与云端提示词：docs/UNIFIED_LOCAL_CLOUD_ARCHITECTURE.md 与 docs/WORK_UNIFIED_CLOUD_PROMPT.md。
+7. Sites 网站已完成本轮同步代码接入：
+   - D1 新增同步状态、运行抑制、dirty、outbox、实体版本和冲突表，业务表由同事务触发器登记变更；
+   - 既有数据首次初始化会进入安全种子队列，Pull 写入通过抑制标记避免形成同步回声；
+   - 网站服务端完成设备自动配对、设备凭据 AES-GCM 加密保存、真实预览、Push、Pull、双向同步、墓碑删除、断点游标、冲突查看/重试/逐条取舍；
+   - 一级导航新增“同步”，浏览器只看到脱敏状态，不接触管理员 Token 或设备 Token；
+   - 网站 Bot、个人账号增量/历史、工具内同步及标已读均接入跨端来源租约；有效租约不允许强抢，续约失效拒绝推进远端状态；
+   - 新增 `0006_spicy_omega_sentinel.sql`，生产构建已包含该 D1 迁移。
+8. 网站同步集成测试通过真实内存 D1 和实际同步 Worker 验证：网页 Push、另一端 Pull、远端写入回拉、墓碑删除、冲突采用远端、5,001 条分批生成 outbox、设备凭据不返回浏览器，以及同一 Bot offset 的跨端互斥。
+9. 最终调用链审计发现并修复过一项跨端租约键差异：网页和 Windows 现在都使用 `telegram:bot:global-offset` 及 `telegram:personal:<external-chat-id>`；集成测试直接用“另一台 Windows 设备会请求的键”验证 Bot 与个人来源均返回冲突。
+
+### 本轮最终自动验证
+
+- 网站：TypeScript、ESLint、Vinext 生产构建通过，`86/86` 项测试通过；构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
+- 同步 Worker：语法检查、`7/7` 项 Miniflare+D1 测试、Wrangler dry-run 通过；未执行正式部署。
+- 仓库总回归：`238/238` 项测试通过，根目录语法检查通过。
+- Windows 统一版：Vue/TypeScript/Vite 构建通过；Rust `cargo check` 通过，`30/30` 项测试通过。
+- `git diff --check` 通过；凭据模式扫描只命中既有安全测试中的明确假 Token 夹具，未发现正式 Secret。
 
 ### 尚未完成，不得提前宣称
 
-- Sites 网站尚未接入本轮同步网关；当前网页和 Windows 仍不能真实互通。
-- 同步网关尚未部署正式 Worker/D1，未配置任何正式 Secret，未导入正式数据。
-- 真实两端首次汇合、断网续传、大数据量和 Telegram E2E 尚未验收。
+- 同步网关尚未部署正式 Worker/D1，Sites 尚未配置 `SYNC_GATEWAY_URL`、`SYNC_ADMIN_TOKEN`，因此生产网站和 Windows 目前仍不能真实互通。
+- `0006_spicy_omega_sentinel.sql` 尚未在正式 D1 执行，未导入或改写任何正式数据。
+- 真实两端首次汇合、断网续传、十万条正式数据与 Telegram 登录/收发 E2E 尚未验收。
+- 当前只是源码、模拟 D1、实际 Worker 代码和构建产物通过，不能描述成“已经上线”。
 
 ### 下一步交给云端
 
-云端 Work 必须完整执行 docs/WORK_UNIFIED_CLOUD_PROMPT.md：
+云端 Work 必须执行 docs/WORK_UNIFIED_CLOUD_PROMPT.md，但不得重复实现已有功能：
 
-1. 基于本分支远端 HEAD 新建 codex/cloud/unified-local-cloud-v1-web。
-2. 在 Sites 端实现同步 outbox、Pull 应用、同步中心和设备管理。
-3. 网页 Telegram 远端操作接入来源租约。
-4. 保持五工具的 list 复制、TXT/CSV、表格选择和历史体验与 Windows 一致。
-5. 只读取既有 Site Secrets；浏览器和仓库不得接触 Secret。
+1. `fetch` 后以 `codex/unified-local-cloud-v1` 最新远端 HEAD 为唯一源码基线，新建 `codex/cloud/unified-local-cloud-v1-deploy`。
+2. 只读审计本轮网站同步、迁移、租约与测试，确认构建源码树和 Git SHA 一致；发现问题先修复并补测试。
+3. 经所有者明确批准后创建正式同步 Worker/D1、执行网关迁移并设置 Worker 管理 Secret。
+4. 在现有私人 Site Secrets 中设置 `SYNC_GATEWAY_URL`、`SYNC_ADMIN_TOKEN`，执行网站 D1 迁移并部署新 Sites 版本。
+5. 用空白或脱敏数据完成 Web→Worker→第二设备和第二设备→Worker→Web 往返、冲突、删除、租约 E2E；正式首次汇合仍必须由所有者看过预览后确认。
+6. 回写实际 Worker URL（可公开部分）、Git 提交、Sites 部署号、迁移结果与待用户 E2E；不得回写任何 Secret 值。
 
 ### 云端必须检查
 
@@ -55,9 +74,16 @@
 - packages/sync-contract/index.js
 - apps/sync-service/src/index.mjs
 - apps/sync-service/migrations/0001_initial.sql
+- apps/web-site/lib/cloud-sync-schema.ts
+- apps/web-site/lib/cloud-sync.ts
+- apps/web-site/app/api/cloud-sync/route.ts
+- apps/web-site/app/components/cloud-sync-center.tsx
+- apps/web-site/drizzle/0006_spicy_omega_sentinel.sql
 - apps/web-site/lib/server-store.ts
 - apps/web-site/lib/server-telegram.ts
 - apps/web-site/app/workbench.tsx
+- apps/web-site/tests/cloud-sync-schema.test.mjs
+- apps/web-site/tests/cloud-sync-integration.test.mjs
 
 ### 禁止修改
 
@@ -82,11 +108,13 @@
     cargo check --manifest-path src-tauri/Cargo.toml
     cargo test --manifest-path src-tauri/Cargo.toml
     cd ../..
+    npm run check
+    npm test
     git diff --check
 
 ### 当前完成标准
 
-- 本轮代码提交与推送后，云端 Work 可从单一分支读取协议、网关和桌面实现。
+- 本轮代码提交与推送后，云端 Work 可从单一分支读取协议、网关、桌面和网站实现。
 - 不需要真实 Secret 的单元、集成和构建验证全部通过。
 - 未部署前同步 UI 不得指向虚构网关；首次正式数据同步必须由用户在差异预览后确认。
 - 云端完成后必须回写真实提交、部署版本、测试结果和待用户 E2E，不能用“构建通过”替代外部验收。
@@ -94,8 +122,8 @@
 ### 当前阻塞点
 
 - 正式部署需要用户批准创建 Cloudflare Worker/D1，并在安全 Secret 存储中设置 SYNC_ADMIN_TOKEN；当前不需要把值发给 Codex。
-- Sites 接入需由云端 Work 按上述提示词实施后，才能做 Windows 与网页真实往返。
-- 网页端业务 outbox、Pull 应用、配对码管理、冲突 UI 和 Telegram 来源租约仍需由云端 Work 接入。
+- Sites 生产环境需要配置 `SYNC_GATEWAY_URL` 与 `SYNC_ADMIN_TOKEN`；值只能进入 Site Secrets。
+- 网站接入代码、outbox、Pull、冲突 UI 和 Telegram 跨端租约已经完成；剩余阻塞是正式基础设施部署和真实双端验收。
 
 ---
 

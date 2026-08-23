@@ -42,6 +42,7 @@ import {
   normalizeTelegramToolSyncRequest,
   type TelegramImportMessage,
 } from "../../../lib/telegram";
+import { withCloudTelegramSourceLeases } from "../../../lib/cloud-sync";
 
 function processTelegramStream(
   tool: string,
@@ -124,40 +125,53 @@ async function runToolSourceSync(
   let inserted = 0;
   let personalProgressInserted = 0;
   const personal = scope.personalSourceIds.length
-    ? await syncPersonalSources(
-        {
-          sourceIds: scope.personalSourceIds,
-          mode,
-          limit: normalized.limit,
-          start: normalized.start,
-          end: normalized.end,
-        },
-        (progress) => {
-          if (progress.phase === "source_completed")
-            personalProgressInserted += Number(progress.inserted || 0);
-          onProgress?.({
-            ...progress,
-            total: requestedSourceIds.length,
-            resultCount: personalProgressInserted,
-          });
-        },
-        shouldStop,
+    ? await withCloudTelegramSourceLeases(scope.personalSourceIds, "telegram-personal", (assertLease) =>
+        syncPersonalSources(
+          {
+            sourceIds: scope.personalSourceIds,
+            mode,
+            limit: normalized.limit,
+            start: normalized.start,
+            end: normalized.end,
+          },
+          (progress) => {
+            assertLease();
+            if (progress.phase === "source_completed")
+              personalProgressInserted += Number(progress.inserted || 0);
+            onProgress?.({
+              ...progress,
+              total: requestedSourceIds.length,
+              resultCount: personalProgressInserted,
+            });
+          },
+          () => {
+            if (shouldStop()) return true;
+            try { assertLease(); return false; } catch { return true; }
+          },
+        ),
       )
     : null;
   inserted = Number(personal?.inserted || 0);
   // Bot owns one account-wide getUpdates cursor; pages commit independently.
   const bot =
     scope.botSourceIds.length && mode === "incremental"
-      ? await pullTelegramBot(
-        (progress) =>
-          onProgress?.({
-            ...progress,
-            current: scope.personalSourceIds.length,
-            total: requestedSourceIds.length,
-            resultCount: inserted + progress.inserted,
-        }),
-        { limit: normalized.limit, shouldStop },
-      )
+      ? await withCloudTelegramSourceLeases([], "telegram-bot", (assertLease) =>
+          pullTelegramBot(
+            (progress) => {
+              assertLease();
+              onProgress?.({
+                ...progress,
+                current: scope.personalSourceIds.length,
+                total: requestedSourceIds.length,
+                resultCount: inserted + progress.inserted,
+              });
+            },
+            { limit: normalized.limit, shouldStop: () => {
+              if (shouldStop()) return true;
+              try { assertLease(); return false; } catch { return true; }
+            } },
+          ),
+        )
       : scope.botSourceIds.length
         ? {
             skipped: true,
@@ -371,9 +385,13 @@ export async function POST(request: Request) {
       return Response.json(await checkTelegramBotConnection());
     if (input.action === "pull-stream")
       return telegramSyncOperationStream((onProgress) =>
-        pullTelegramBot(onProgress),
+        withCloudTelegramSourceLeases([], "telegram-bot", (assertLease) =>
+          pullTelegramBot((progress) => { assertLease(); onProgress(progress); }),
+        ),
       );
-    if (input.action === "pull") return Response.json(await pullTelegramBot());
+    if (input.action === "pull") return Response.json(await withCloudTelegramSourceLeases([], "telegram-bot", (assertLease) =>
+      pullTelegramBot(undefined, { shouldStop: () => { try { assertLease(); return false; } catch { return true; } } }),
+    ));
     if (input.action === "import")
       return Response.json(
         await importTelegramMessages(
@@ -422,38 +440,37 @@ export async function POST(request: Request) {
       return Response.json(await discoverPersonalSources());
     if (input.action === "sync-personal-stream")
       return telegramSyncOperationStream((onProgress) =>
-        syncPersonalSources(
-          {
-            sourceIds: Array.isArray(input.sourceIds)
-              ? input.sourceIds.map(String)
-              : [],
-            mode: ["incremental", "recent", "range", "history"].includes(
-              String(input.mode),
-            )
-              ? (input.mode as "incremental" | "recent" | "range" | "history")
-              : "incremental",
-            limit: Number(input.limit || 200),
-            start: String(input.start || ""),
-            end: String(input.end || ""),
-          },
-          onProgress,
+        withCloudTelegramSourceLeases(
+          Array.isArray(input.sourceIds) ? input.sourceIds.map(String) : [],
+          "telegram-personal",
+          (assertLease) => syncPersonalSources(
+            {
+              sourceIds: Array.isArray(input.sourceIds) ? input.sourceIds.map(String) : [],
+              mode: ["incremental", "recent", "range", "history"].includes(String(input.mode))
+                ? (input.mode as "incremental" | "recent" | "range" | "history") : "incremental",
+              limit: Number(input.limit || 200), start: String(input.start || ""), end: String(input.end || ""),
+            },
+            (progress) => { assertLease(); onProgress(progress); },
+            () => { try { assertLease(); return false; } catch { return true; } },
+          ),
         ),
       );
     if (input.action === "sync-personal")
       return Response.json(
-        await syncPersonalSources({
-          sourceIds: Array.isArray(input.sourceIds)
-            ? input.sourceIds.map(String)
-            : [],
-          mode: ["incremental", "recent", "range", "history"].includes(
-            String(input.mode),
-          )
-            ? (input.mode as "incremental" | "recent" | "range" | "history")
-            : "incremental",
-          limit: Number(input.limit || 200),
-          start: String(input.start || ""),
-          end: String(input.end || ""),
-        }),
+        await withCloudTelegramSourceLeases(
+          Array.isArray(input.sourceIds) ? input.sourceIds.map(String) : [],
+          "telegram-personal",
+          (assertLease) => syncPersonalSources(
+            {
+              sourceIds: Array.isArray(input.sourceIds) ? input.sourceIds.map(String) : [],
+              mode: ["incremental", "recent", "range", "history"].includes(String(input.mode))
+                ? (input.mode as "incremental" | "recent" | "range" | "history") : "incremental",
+              limit: Number(input.limit || 200), start: String(input.start || ""), end: String(input.end || ""),
+            },
+            undefined,
+            () => { try { assertLease(); return false; } catch { return true; } },
+          ),
+        ),
       );
     if (input.action === "sync-tool-sources-stream")
       return syncToolSourcesStream(input);
@@ -461,7 +478,9 @@ export async function POST(request: Request) {
       return Response.json(await runToolSourceSync(input));
     if (input.action === "mark-read")
       return Response.json(
-        await markTelegramSourceRead(input.sourceId, input.maxId),
+        await withCloudTelegramSourceLeases([String(input.sourceId || "")], "telegram-personal", () =>
+          markTelegramSourceRead(input.sourceId, input.maxId),
+        ),
       );
     if (input.action === "migration-preview")
       return Response.json(await telegramMigrationPreview());

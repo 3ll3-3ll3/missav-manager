@@ -61,7 +61,7 @@ Telegram / 导入文件
 
 ## Telegram 执行协调
 
-- 租约键：`telegram:<connectionKey>:<sourceKey>`。
+- 租约键与 Windows 完全一致：Bot 全局游标固定为 `telegram:bot:global-offset`；个人账号来源为 `telegram:personal:<external-chat-id>`。
 - 租期 120 秒，每 30 秒续约；网关不允许超过 120 秒，异常退出后自动过期。
 - 本地长期连接可以持续工作，但仍必须持有租约。
 - 网页按请求连接，每次请求先取得租约，完成或失败后释放。

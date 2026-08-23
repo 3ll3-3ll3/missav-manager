@@ -79,7 +79,8 @@ test("工具内刷新同步只接受当前工具已绑定来源并复用全局�
     assert.match(panel, new RegExp(label));
   assert.match(route, /sync-tool-sources/);
   assert.match(route, /resolveBoundToolSyncSources/);
-  assert.match(route, /pullTelegramBot\(\)/);
+  assert.match(route, /withCloudTelegramSourceLeases\(\[\], "telegram-bot"/);
+  assert.match(route, /pullTelegramBot\(/);
   assert.match(
     server,
     /JOIN tool_source_bindings b ON b\.source_id=s\.id AND b\.tool=\?/,

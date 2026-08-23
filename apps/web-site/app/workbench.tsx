@@ -11,8 +11,9 @@ import SnapshotsPanel from "./components/snapshots-panel";
 import TaskCenter from "./components/task-center";
 import TelegramSettingsPanel from "./components/telegram-settings";
 import ToolPanel, { TOOL_DEFINITIONS } from "./components/tool-panel";
+import CloudSyncCenter from "./components/cloud-sync-center";
 
-type ViewId = "home" | "processing" | "data" | "telegram" | "logs" | "settings" | "tool";
+type ViewId = "home" | "processing" | "data" | "telegram" | "sync" | "logs" | "settings" | "tool";
 type DataTab = "records" | "history" | "library" | "migration" | "snapshots";
 type SettingsTab = "general" | "windows";
 type Bootstrap = {
@@ -24,6 +25,7 @@ const NAV: Array<{ id: Exclude<ViewId, "tool">; label: string; icon: string }> =
   { id: "processing", label: "处理中心", icon: "◎" },
   { id: "data", label: "数据中心", icon: "▦" },
   { id: "telegram", label: "Telegram", icon: "✈" },
+  { id: "sync", label: "同步", icon: "⇄" },
   { id: "logs", label: "日志", icon: "≡" },
   { id: "settings", label: "设置", icon: "⚙" },
 ];
@@ -119,7 +121,7 @@ export default function Workbench({ owner }: { owner: string }) {
       <aside className={`sidebar ${menu ? "open" : ""}`}>
         <div className="brand"><span className="brand-mark">TG</span><div><strong>TG 内容工具箱</strong><small>PRIVATE WEB · v0.5.13 UX</small></div></div>
         <nav>{NAV.map((item) => <button className={activeNav === item.id ? "active" : ""} onClick={() => go(item.id)} key={item.id}><span>{item.icon}</span>{item.label}</button>)}</nav>
-        <div className="sidebar-note"><span className="status-dot" />私人访问已启用<small>云端 D1 独立于 Windows SQLite</small></div>
+        <div className="sidebar-note"><span className="status-dot" />私人访问已启用<small>D1 与 Windows 可安全增量同步</small></div>
         <div className="account"><span className="avatar">B</span><div><strong>{owner}</strong><small>网站所有者</small></div></div>
       </aside>
       {menu && <button className="backdrop" aria-label="关闭菜单" onClick={() => setMenu(false)} />}
@@ -131,6 +133,7 @@ export default function Workbench({ owner }: { owner: string }) {
           {view === "processing" && <TaskCenter onOpenTask={openTask} />}
           {view === "data" && <><SecondaryNav items={DATA_TABS} value={dataTab} setValue={(value) => setDataTab(value as DataTab)} />{dataTab === "records" && <DataCenter refreshKey={refreshKey} />}{dataTab === "history" && <HistoryPanel refreshKey={refreshKey} />}{dataTab === "library" && <LibraryPanel />}{dataTab === "migration" && <MigrationPanel onChanged={() => setRefreshKey((key) => key + 1)} />}{dataTab === "snapshots" && <SnapshotsPanel />}</>}
           {view === "telegram" && <TelegramSettingsPanel key={telegramTool || "global"} initialTool={telegramTool} />}
+          {view === "sync" && <CloudSyncCenter />}
           {view === "logs" && <LogsPanel />}
           {view === "settings" && <><SecondaryNav items={[{ id: "general", label: "通用" }, { id: "windows", label: "Windows 说明" }]} value={settingsTab} setValue={(value) => setSettingsTab(value as SettingsTab)} />{settingsTab === "general" ? <GeneralSettings /> : <WindowsBoundary onExport={() => download("TG内容工具箱-Windows-v0.5.13-交接.txt", DESKTOP_HANDOFF)} />}</>}
         </div>
@@ -144,7 +147,7 @@ function SecondaryNav({ items, value, setValue }: { items: Array<{ id: string; l
 }
 
 function ToolHome({ data, openTool, openData }: { data: Bootstrap | null; openTool: (tool: ToolId) => void; openData: () => void }) {
-  return <div className="stack-lg"><section className="hero tool-home-hero"><div><span className="pill">Windows v0.5.13 体验基线</span><h2>TG 内容工具箱</h2><p>五个工具各自保留独立输入、筛选、选择和结果。Telegram 是每个工具输入页的子模式，全局只登录和配置一次。</p><div className="button-row"><button className="primary" onClick={() => openTool("twitter")}>打开第一个工具</button><button onClick={openData}>查看永久数据</button></div></div><div className="hero-gauge"><span>独立工作区</span><strong>5</strong><small>文本工具 3 阶段 · 专用工具 4 阶段</small></div></section><section className="tool-home-grid">{TOOL_DEFINITIONS.map((tool, index) => <button key={tool.id} className={`tool-home-card tool-${tool.id}`} onClick={() => openTool(tool.id)}><span className="tool-card-index">0{index + 1}</span><span className="tool-card-mark">{tool.mark}</span><div><strong>{tool.title}</strong><p>{tool.note}</p><small>{tool.id === "missav" ? "输入 · 结果 · 浏览器脚本 · 历史" : tool.id === "av123" ? "输入 · 结果 · 本地任务 · 历史" : "输入 · 结果 · 历史"}</small></div><span className="tool-card-arrow">→</span></button>)}</section><section className="metric-grid"><Metric label="永久记录" value={data?.summary.records} note="D1 服务端分页" /><Metric label="处理历史" value={data?.summary.runs} note="五工具独立检索" /><Metric label="迁移批次" value={data?.summary.migrations} note="预览与恢复点" /><Metric label="Telegram 来源" value={100} note="按最多 100 来源设计" /></section><section className="callout"><strong>数据边界保持独立</strong><p>云端 D1 与 Windows SQLite 不做实时双向同步；两端只对齐业务字段和 TXT/CSV/JSON 导出格式。</p></section></div>;
+  return <div className="stack-lg"><section className="hero tool-home-hero"><div><span className="pill">Windows v0.5.13 体验基线</span><h2>TG 内容工具箱</h2><p>五个工具各自保留独立输入、筛选、选择和结果。Telegram 是每个工具输入页的子模式，全局只登录和配置一次。</p><div className="button-row"><button className="primary" onClick={() => openTool("twitter")}>打开第一个工具</button><button onClick={openData}>查看永久数据</button></div></div><div className="hero-gauge"><span>独立工作区</span><strong>5</strong><small>文本工具 3 阶段 · 专用工具 4 阶段</small></div></section><section className="tool-home-grid">{TOOL_DEFINITIONS.map((tool, index) => <button key={tool.id} className={`tool-home-card tool-${tool.id}`} onClick={() => openTool(tool.id)}><span className="tool-card-index">0{index + 1}</span><span className="tool-card-mark">{tool.mark}</span><div><strong>{tool.title}</strong><p>{tool.note}</p><small>{tool.id === "missav" ? "输入 · 结果 · 浏览器脚本 · 历史" : tool.id === "av123" ? "输入 · 结果 · 本地任务 · 历史" : "输入 · 结果 · 历史"}</small></div><span className="tool-card-arrow">→</span></button>)}</section><section className="metric-grid"><Metric label="永久记录" value={data?.summary.records} note="D1 服务端分页" /><Metric label="处理历史" value={data?.summary.runs} note="五工具独立检索" /><Metric label="迁移批次" value={data?.summary.migrations} note="预览与恢复点" /><Metric label="Telegram 来源" value={100} note="按最多 100 来源设计" /></section><section className="callout"><strong>两端保持独立，也可以互通</strong><p>网页 D1 与 Windows SQLite 不共享数据库文件；“同步中心”通过预览、Push、Pull 或双向同步交换重要业务数据，密钥和登录态永不进入同步内容。</p></section></div>;
 }
 
 function Metric({ label, value, note }: { label: string; value: number | undefined; note: string }) {
@@ -152,11 +155,11 @@ function Metric({ label, value, note }: { label: string; value: number | undefin
 }
 
 function GeneralSettings() {
-  return <div className="stack-md"><section className="card"><span className="eyebrow">外观</span><h3>v0.5.13 护眼淡绿</h3><p className="subtle">默认主题使用淡绿色页面、白绿面板和深绿操作色，不加载背景图。</p><div className="theme-swatches"><span style={{ background: "#e9f3e7" }}>页面</span><span style={{ background: "#f7fbf5" }}>面板</span><span style={{ background: "#278f58", color: "white" }}>主操作</span></div></section><section className="card"><span className="eyebrow">数据与安全</span><h3>私人网站边界</h3><ul className="boundary-list"><li><span>独立</span>云端 D1 与 Windows SQLite 不做实时双向同步</li><li><span>全局</span>Telegram 个人账号与 Bot 只配置一次</li><li><span>恢复</span>删除、覆盖和队列处理前建立恢复点</li><li><span>权限</span>生产 API 继续要求 ChatGPT 身份头</li></ul></section><section className="callout warning"><strong>待用户 E2E 验收</strong><p>Telegram 真实登录、加密 Session 恢复、Bot 拉取、远端编辑/删除传播及 safe_auto / never / manual 三种已读策略，必须由所有者在真实账号上操作确认；构建通过不代表这些外部副作用已验收。</p></section></div>;
+  return <div className="stack-md"><section className="card"><span className="eyebrow">外观</span><h3>v0.5.13 护眼淡绿</h3><p className="subtle">默认主题使用淡绿色页面、白绿面板和深绿操作色，不加载背景图。</p><div className="theme-swatches"><span style={{ background: "#e9f3e7" }}>页面</span><span style={{ background: "#f7fbf5" }}>面板</span><span style={{ background: "#278f58", color: "white" }}>主操作</span></div></section><section className="card"><span className="eyebrow">数据与安全</span><h3>私人网站边界</h3><ul className="boundary-list"><li><span>独立</span>网页与 Windows 保留各自数据库和登录态</li><li><span>同步</span>重要业务数据经预览后可 Push、Pull 或双向同步</li><li><span>全局</span>Telegram 个人账号与 Bot 只配置一次</li><li><span>恢复</span>删除、覆盖和队列处理前建立恢复点</li><li><span>权限</span>生产 API 继续要求 ChatGPT 身份头</li></ul></section><section className="callout warning"><strong>待用户 E2E 验收</strong><p>Telegram 真实登录、加密 Session 恢复、Bot 拉取、远端编辑/删除传播及 safe_auto / never / manual 三种已读策略，必须由所有者在真实账号上操作确认；构建通过不代表这些外部副作用已验收。</p></section></div>;
 }
 
-const DESKTOP_HANDOFF = `TG 内容工具箱 · Windows v0.5.13 交接\n\nWindows 稳定参考：codex/v0.5.13-desktop-stable / v0.5.13-desktop-baseline / 4e2aad0\n\n云端 D1 与 Windows SQLite 继续独立，不做实时双向同步，只统一字段和导出格式。\nTelegram 网站端与 Windows 各自使用独立 Session。真实登录、Session 恢复、Bot 拉取、编辑/删除和三种已读策略仍待用户 E2E 验收。\n`;
+const DESKTOP_HANDOFF = `TG 内容工具箱 · Windows v0.5.13 交接\n\nWindows 稳定参考：codex/v0.5.13-desktop-stable / v0.5.13-desktop-baseline / 4e2aad0\n\n云端 D1 与 Windows SQLite 各自独立，通过同步网关交换重要业务数据；Secret 与 Telegram Session 永不跨端同步。\nTelegram 网站端与 Windows 各自使用独立 Session。真实登录、Session 恢复、Bot 拉取、编辑/删除和三种已读策略仍待用户 E2E 验收。\n`;
 
 function WindowsBoundary({ onExport }: { onExport: () => void }) {
-  return <div className="stack-md"><section className="callout warning"><strong>Windows v0.5.13 是稳定回退边界</strong><p>本次没有修改 Windows 稳定分支、标签、Release 或 EXE。网站端只对齐使用体验、字段与导出格式。</p></section><section className="boundary-cards"><article className="card"><span className="online-badge">WEB + WINDOWS</span><h3>Telegram 个人账号</h3><p>两端各自使用独立 Session；网站复用全局连接和检查点，不共享 Windows 登录态。</p></article><article className="card"><span className="local-badge">WINDOWS</span><h3>本地 SQLite 与 EXE</h3><p>桌面稳定资产保持不动，生产数据库也不会被本次改造写入。</p></article><article className="card"><span className="online-badge">统一格式</span><h3>导出交接</h3><p>TXT、CSV、JSON 字段语义对齐，可人工导入导出，但不做实时同步。</p></article></section><button className="primary" onClick={onExport}>导出 Windows 交接说明</button></div>;
+  return <div className="stack-md"><section className="callout warning"><strong>Windows v0.5.13 是稳定回退边界</strong><p>本次没有修改 Windows 稳定分支、标签、Release 或 EXE。新同步能力位于独立主线，可随时退回稳定版。</p></section><section className="boundary-cards"><article className="card"><span className="online-badge">WEB + WINDOWS</span><h3>Telegram 个人账号</h3><p>两端各自使用独立 Session；只同步来源、消息、队列、检查点与已读语义，不共享登录态。</p></article><article className="card"><span className="local-badge">WINDOWS</span><h3>本地 SQLite 与 EXE</h3><p>桌面稳定资产保持不动；新主线通过独立同步网关与网页 D1 交换增量。</p></article><article className="card"><span className="online-badge">安全互通</span><h3>预览后同步</h3><p>支持 Push、Pull、双向同步、墓碑删除和冲突留痕；所有 Secret 均留在执行端。</p></article></section><button className="primary" onClick={onExport}>导出 Windows 交接说明</button></div>;
 }

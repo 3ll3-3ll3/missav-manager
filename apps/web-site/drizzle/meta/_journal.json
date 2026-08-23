@@ -43,6 +43,13 @@
       "when": 1786687200000,
       "tag": "0005_workflow_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787490280530,
+      "tag": "0006_spicy_omega_sentinel",
+      "breakpoints": true
     }
   ]
 }
