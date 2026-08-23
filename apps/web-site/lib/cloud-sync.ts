@@ -735,8 +735,8 @@ async function applyPulledPage(operations: GatewayOperation[], nextSequence: num
     statements.push(versionStatement(db, operation));
   }
   statements.push(db.prepare(
-    "UPDATE cloud_sync_state SET last_pulled_sequence=?,last_success_at=?,last_error='',updated_at=? WHERE id=?",
-  ).bind(nextSequence, nowIso(), nowIso(), STATE_ID));
+    "UPDATE cloud_sync_state SET last_pulled_sequence=?,updated_at=? WHERE id=?",
+  ).bind(nextSequence, nowIso(), STATE_ID));
   statements.push(db.prepare("UPDATE cloud_sync_runtime SET suppress_outbox=0 WHERE id=1"));
   await db.batch(statements);
   return { applied: applicable.length, conflicts: conflictStatements.length / 3 };

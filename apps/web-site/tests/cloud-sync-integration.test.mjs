@@ -286,3 +286,72 @@ test("网页 Push 按 UTF-8 请求体切分，任何一批都不超过网关安�
     gatewaySqlite.close();
   }
 });
+
+test("Pull 后续分页网络失败时保留断点但不提前更新最近成功时间", async () => {
+  const webSqlite = new DatabaseSync(":memory:");
+  await applyWebMigrations(webSqlite);
+  const gatewaySqlite = new DatabaseSync(":memory:");
+  gatewaySqlite.exec(await readFile(new URL("../../sync-service/migrations/0001_initial.sql", import.meta.url), "utf8"));
+  const gatewayWorker = await import(new URL("../../sync-service/src/index.mjs", import.meta.url));
+  const adminToken = "pull-failure-admin-token-at-least-32-characters";
+  const gatewayEnv = { DB: new TestD1(gatewaySqlite), SYNC_ADMIN_TOKEN: adminToken };
+  const pairing = await gatewayJson(gatewayWorker, gatewayEnv, "/v1/admin/pairings", {
+    method: "POST", headers: { "content-type": "application/json", "x-sync-admin-token": adminToken }, body: JSON.stringify({ label: "pull-failure-remote" }),
+  });
+  const remote = await gatewayJson(gatewayWorker, gatewayEnv, "/v1/devices/exchange", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: pairing.code, nodeId: "pull-failure-node", label: "pull-failure-remote" }),
+  });
+  const timestamp = "2026-08-23T14:00:00.000Z";
+  const operations = Array.from({ length: 51 }, (_, index) => {
+    const code = `REMOTE-${String(index).padStart(3, "0")}`;
+    return {
+      schemaVersion: 1,
+      operationId: `pull-failure-${index}`,
+      nodeId: "pull-failure-node",
+      entityType: "permanent_record",
+      entityKey: `record:missav:${code.toLowerCase()}`,
+      action: "upsert",
+      baseVersion: 0,
+      occurredAt: timestamp,
+      payload: {
+        tool: "missav", recordKey: code, primaryValue: code, secondaryValue: "", status: "new",
+        tags: [], actressTags: [], genreTags: [], sourceUrl: "", missavUrl: "", av123Url: "", metadata: {}, createdAt: timestamp, updatedAt: timestamp,
+      },
+    };
+  });
+  await gatewayJson(gatewayWorker, gatewayEnv, "/v1/sync/push", {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${remote.deviceToken}` }, body: JSON.stringify({ operations }),
+  });
+
+  const originalFetch = globalThis.fetch;
+  let pullPages = 0;
+  globalThis.fetch = async (request, options) => {
+    const normalized = request instanceof Request ? request : new Request(request, options);
+    const url = new URL(normalized.url);
+    if (url.hostname === "sync.test") {
+      if (url.pathname === "/v1/sync/pull" && url.searchParams.get("limit") === "50") {
+        pullPages += 1;
+        if (pullPages === 2) throw new Error("synthetic second pull page failure");
+      }
+      return gatewayWorker.default.fetch(normalized, gatewayEnv);
+    }
+    return originalFetch(request, options);
+  };
+  try {
+    const cloud = await loadCloudSync({ DB: new TestD1(webSqlite), SYNC_GATEWAY_URL: "https://sync.test", SYNC_ADMIN_TOKEN: adminToken });
+    await cloud.createCloudSyncPreview();
+    const baselineSuccess = "2026-08-20T00:00:00.000Z";
+    webSqlite.prepare("UPDATE cloud_sync_state SET last_success_at=? WHERE id='site'").run(baselineSuccess);
+    await assert.rejects(() => cloud.executeCloudSync("pull"), /synthetic second pull page failure/);
+    const status = await cloud.cloudSyncStatus();
+    assert.equal(pullPages, 2);
+    assert.equal(status.lastSuccessAt, baselineSuccess, "Pull 整体失败不能把第一页写成最近成功时间");
+    assert.equal(status.lastPulledSequence, 50, "已完整落库的第一页必须保留断点");
+    assert.equal(webSqlite.prepare("SELECT COUNT(*) AS count FROM permanent_records WHERE record_key LIKE 'REMOTE-%'").get().count, 50);
+    assert.match(status.lastError, /synthetic second pull page failure/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    webSqlite.close();
+    gatewaySqlite.close();
+  }
+});
