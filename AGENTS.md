@@ -2,9 +2,20 @@
 
 本文件适用于整个 `missav-manager` 仓库。开始任何修改前，先完整阅读：
 
-1. `docs/PROJECT_HANDOFF.md` - 当前版本、架构、数据语义、验证方式和下一步。
-2. `docs/CHANGELOG_2026-07-12.md` - 本轮修改日志与行为变化。
-3. `README.md` 与 `使用教程.md` - 用户视角的功能和操作说明。
+1. `HANDOFF.md` - **当前统一主线、真实基础设施状态、验证结果和下一步；最高优先级。**
+2. `docs/UNIFIED_LOCAL_CLOUD_ARCHITECTURE.md` - Windows、Sites 与同步网关的目标架构。
+3. `docs/WORK_UNIFIED_CLOUD_PROMPT.md` - 云端 Work 当前实施边界。
+4. `docs/PROJECT_HANDOFF.md`、`docs/CHATGPT_WORK_SITE_HANDOFF.md` 与旧 Changelog - 只作为历史产品语义和追溯材料，不能覆盖上述当前主线。
+5. `README.md` 与 `使用教程.md` - 用户视角的功能和操作说明。
+
+## 2026-08-24 统一主线覆盖（最高优先级）
+
+- 当前开发主线是 `codex/unified-local-cloud-v1`，不是 `codex/cloud/web-ux-parity-v0513`。
+- `codex/cloud/web-ux-parity-v0513` 是统一主线的起始网站基线；PR #4、`0005` 和 Sites v26 记录属于前序阶段。
+- 当前统一主线已新增 `packages/sync-contract`、`apps/sync-service`、网站 `0006_spicy_omega_sentinel.sql` 和 Windows v0.6.0 同步中心。
+- 正式同步 Worker 与独立 D1 已部署；生产 Site 仍是 v26，正式 Site D1 尚未执行 `0006`，因此网站和 Windows 仍未正式业务互通。
+- `HANDOFF.md` 中“历史交接”标题之后的内容只用于追溯，不得据此重新判定当前分支、当前迁移或下一步。
+- 任何 Work 若未检查 `origin/codex/unified-local-cloud-v1`，不得宣称已经完成当前主线核对。
 
 ## 接手约束
 

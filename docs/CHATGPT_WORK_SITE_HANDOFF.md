@@ -1,5 +1,7 @@
 # ChatGPT 网页端 Work / Sites 完整交接文档
 
+> **历史资料警告（2026-08-24）：** 本文记录的是统一同步主线之前的网页端阶段，不能再作为“当前分支/当前迁移/当前部署状态”的事实来源。当前事实必须先读取仓库根目录 `HANDOFF.md`、`docs/UNIFIED_LOCAL_CLOUD_ARCHITECTURE.md` 和 `docs/WORK_UNIFIED_CLOUD_PROMPT.md`；当前开发主线为 `codex/unified-local-cloud-v1`。本文仍可用于核对五工具 UX、Telegram 业务语义和旧版验收要求。
+
 更新日期：2026-08-14
 
 ## 2026-08-14 当前实现补充（优先于旧分支说明）

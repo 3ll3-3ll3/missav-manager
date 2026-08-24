@@ -6,6 +6,7 @@
 
 - 当前工作目录：E:\Desktop\codex项目\tg-toolbox-unified
 - 当前分支：codex/unified-local-cloud-v1
+- 当前本地 HEAD：74807b3e18458c5a6f40ec31ee59ef2b8dc6b116（尚未推送时，远端仍可能停在 20486209ab20163d8cbd20f26a075da415c4d68f）。
 - 起始基线：origin/codex/cloud/web-ux-parity-v0513 的 38fed1d3c177c1a62ec193ea09664b457a7cd33e
 - 本轮在独立 worktree 工作；原 missav-manager 脏工作树未覆盖、未 stash、未 reset。
 - 受保护基线 codex/v0.5.13-desktop-stable、标签 v0.5.13-desktop-baseline、Windows Release、既有 EXE 和正式数据库均未修改。
@@ -157,7 +158,9 @@
 
 ---
 
-# 历史交接：Web UX v0.5.13 对齐
+# 历史交接：Web UX v0.5.13 对齐（非当前状态）
+
+> 以下内容只保留用于追溯旧网站实现。它不能覆盖本文顶部“当前统一主线”，不能用于判定当前开发分支、当前迁移编号、基础设施状态或下一步。当前 Work 必须以 `codex/unified-local-cloud-v1`、本文顶部状态及 `docs/WORK_UNIFIED_CLOUD_PROMPT.md` 为准。
 
 更新日期：2026-08-14
 
