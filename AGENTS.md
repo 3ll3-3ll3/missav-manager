@@ -13,7 +13,7 @@
 - 当前开发主线是 `codex/unified-local-cloud-v1`，不是 `codex/cloud/web-ux-parity-v0513`。
 - `codex/cloud/web-ux-parity-v0513` 是统一主线的起始网站基线；PR #4、`0005` 和 Sites v26 记录属于前序阶段。
 - 当前统一主线已新增 `packages/sync-contract`、`apps/sync-service`、网站 `0006_spicy_omega_sentinel.sql` 和 Windows v0.6.0 同步中心。
-- 正式同步 Worker 与独立 D1 已部署；生产 Site 仍是 v26，正式 Site D1 尚未执行 `0006`，因此网站和 Windows 仍未正式业务互通。
+- 正式同步 Worker 与独立 D1 已部署；生产 Site 已升级为 v30 只读备份中心，但正式 Site D1 尚未执行 `0006`，因此网站和 Windows 仍未正式业务互通。
 - `HANDOFF.md` 中“历史交接”标题之后的内容只用于追溯，不得据此重新判定当前分支、当前迁移或下一步。
 - 任何 Work 若未检查 `origin/codex/unified-local-cloud-v1`，不得宣称已经完成当前主线核对。
 
