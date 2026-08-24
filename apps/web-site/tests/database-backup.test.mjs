@@ -312,6 +312,38 @@ test("完整文件只允许恢复演练到全新临时 D1", async () => {
   delete globalThis.__DATABASE_BACKUP_TEST_ENV__; source.close(); temporary.close();
 });
 
+test("v30 分块计算不修改旧 job.sequence，原子提交代码同时写 jobs 与 chunks", async () => {
+  const storageModule = await loadBuiltModule("lib/database-backup-indexeddb.ts", {});
+  const checkpoint = { sequence: 9 };
+  const batch = storageModule.makeBackupChunks(checkpoint.sequence, [
+    { type: "page", table: "app_logs", index: 0, rows: [{ id: "once" }] },
+    { type: "table_end", name: "app_logs", rowCount: 1, sha256: "digest" },
+  ]);
+  assert.equal(checkpoint.sequence, 9);
+  assert.equal(batch.nextSequence, 11);
+  assert.deepEqual(batch.chunks.map((chunk) => chunk.sequence), [9, 10]);
+  assert.ok(batch.utf8Bytes > 0);
+
+  const source = await readFile(projectFile("lib/database-backup-indexeddb.ts"), "utf8");
+  assert.doesNotMatch(source, /job\.sequence\+\+|sequence\s*\+=/);
+  assert.match(source, /database\.transaction\(\["jobs", "chunks"\], "readwrite"\)/);
+  assert.match(source, /objectStore\("jobs"\)\.put\(nextJob\)/);
+  assert.match(source, /objectStore\("chunks"\)\.put\(chunk\)/);
+  assert.match(source, /QuotaExceededError/);
+  assert.match(source, /InvalidStateError/);
+});
+
+test("真实 Chromium IndexedDB 回归脚本覆盖四类事务失败、分页重试与 footer 原子完成", async () => {
+  const source = await readFile(projectFile("tests/database-backup-indexeddb-browser.mjs"), "utf8");
+  for (const fault of ["quota", "abort", "close", "error"]) assert.match(source, new RegExp(`\\"${fault}\\"`));
+  assert.match(source, /inventory network request must succeed before forced transaction failure/);
+  assert.match(source, /retry must persist the page exactly once/);
+  assert.match(source, /footer transaction failure must not display a durable complete job/);
+  assert.match(source, /final checkpoint must retain all 25 table manifests/);
+  assert.match(source, /stored chunks must be contiguous through footer/);
+  assert.match(source, /models a page refresh/);
+});
+
 test("Miniflare Workers D1 的 10 万行必须由数百个受限请求完成", { timeout: 240_000 }, async () => {
   const mf = new Miniflare({ modules: true, script: "export default { fetch() { return new Response('ok') } }", d1Databases: { DB: "00000000-0000-0000-0000-000000000029" } });
   try {

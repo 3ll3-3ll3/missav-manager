@@ -396,5 +396,5 @@ export async function validateDatabaseBackupStream(stream: ReadableStream<Uint8A
 }
 
 export function backupFileName(createdAt = new Date().toISOString()) {
-  return `tg-content-toolbox-site-v26-d1-v29-${createdAt.replace(/[:.]/g, "-")}.ndjson`;
+  return `tg-content-toolbox-site-v26-d1-v30-${createdAt.replace(/[:.]/g, "-")}.ndjson`;
 }

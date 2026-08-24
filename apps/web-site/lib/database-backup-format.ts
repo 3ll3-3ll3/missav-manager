@@ -1,6 +1,6 @@
 export const DATABASE_BACKUP_FORMAT = "tg-content-toolbox-d1-backup-ndjson/v3";
 export const DATABASE_BACKUP_SITE_VERSION = 26;
-export const DATABASE_BACKUP_CANDIDATE_SITE_VERSION = 29;
+export const DATABASE_BACKUP_CANDIDATE_SITE_VERSION = 30;
 export const DATABASE_BACKUP_PAGE_MAX_ROWS = 500;
 export const DATABASE_BACKUP_PAGE_MAX_UTF8_BYTES = 512 * 1024;
 export const DATABASE_BACKUP_INITIAL_DIGEST = "0".repeat(64);
