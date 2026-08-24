@@ -165,6 +165,7 @@ pub fn initialize_schema(connection: &Connection) -> Result<(), String> {
                preview_remote_sequence INTEGER NOT NULL DEFAULT 0,
                previewed_at TEXT NOT NULL DEFAULT '',
                last_remote_sequence INTEGER NOT NULL DEFAULT 0,
+               bootstrap_completed INTEGER NOT NULL DEFAULT 0,
                updated_at TEXT NOT NULL
              );
              INSERT OR IGNORE INTO cloud_sync_state(singleton,updated_at) VALUES(1,'');
@@ -323,7 +324,7 @@ pub fn initialize_schema(connection: &Connection) -> Result<(), String> {
                created_at TEXT NOT NULL
              );
 
-             PRAGMA user_version=507;",
+             PRAGMA user_version=508;",
         )
         .map_err(|error| format!("初始化 v0.5 正式数据结构失败：{error}"))?;
     for column in [
@@ -332,10 +333,18 @@ pub fn initialize_schema(connection: &Connection) -> Result<(), String> {
         "preview_remote_sequence INTEGER NOT NULL DEFAULT 0",
         "previewed_at TEXT NOT NULL DEFAULT ''",
         "last_remote_sequence INTEGER NOT NULL DEFAULT 0",
+        "bootstrap_completed INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = connection.execute(&format!("ALTER TABLE cloud_sync_state ADD COLUMN {column}"), []);
     }
     let _ = connection.execute("ALTER TABLE cloud_sync_outbox ADD COLUMN restore INTEGER NOT NULL DEFAULT 0", []);
+    let _ = connection.execute(
+        "UPDATE cloud_sync_state
+         SET bootstrap_completed=1
+         WHERE bootstrap_completed=0
+           AND (last_success_at<>'' OR last_pulled_sequence>0 OR EXISTS(SELECT 1 FROM cloud_sync_entities))",
+        [],
+    );
     Ok(())
 }
 

@@ -938,5 +938,5 @@ pub fn run() {
             cloud_sync_resolve_conflict
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run TG Content Toolbox v0.5");
+        .expect("failed to run TG Content Toolbox v0.6");
 }

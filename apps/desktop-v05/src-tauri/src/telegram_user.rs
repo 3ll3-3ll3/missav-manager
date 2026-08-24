@@ -421,7 +421,7 @@ impl TelegramUserRuntime {
                 .map_err(|error| format!("打开 Telegram 会话失败：{error}"))?,
         );
         let mut params = ConnectionParams {
-            app_version: "TG Content Toolbox 0.5.13".to_string(),
+            app_version: "TG Content Toolbox 0.6.0".to_string(),
             device_model: "Windows Desktop".to_string(),
             system_lang_code: "zh-CN".to_string(),
             lang_code: "zh-CN".to_string(),

@@ -3,8 +3,23 @@ import { computed, onMounted, ref } from "vue";
 import { cloudSyncConflicts, cloudSyncDisconnect, cloudSyncHealth, cloudSyncPair, cloudSyncPreview, cloudSyncResolveConflict, cloudSyncRun, cloudSyncStatus } from "../api";
 import type { CloudSyncConflict, CloudSyncPreview, CloudSyncStatus } from "../types";
 
+const DEFAULT_GATEWAY_URL = "https://tg-toolbox-sync.wjiale-tg-toolbox.workers.dev";
+const entityLabels: Record<string, string> = {
+  content_run: "处理批次",
+  content_result: "处理结果",
+  permanent_record: "永久记录",
+  input_source: "输入来源",
+  source_binding: "工具绑定",
+  telegram_message: "TG 消息",
+  telegram_tool_queue: "TG 工具队列",
+  telegram_checkpoint: "TG 检查点",
+  task_inbox: "任务中心",
+  script_generation: "脚本记录",
+};
+
 const emptyStatus = (): CloudSyncStatus => ({
   configured: false,
+  bootstrapCompleted: false,
   nodeId: "",
   gatewayUrl: "",
   gatewayReachable: false,
@@ -19,7 +34,7 @@ const emptyStatus = (): CloudSyncStatus => ({
 });
 
 const state = ref<CloudSyncStatus>(emptyStatus());
-const gatewayUrl = ref("");
+const gatewayUrl = ref(DEFAULT_GATEWAY_URL);
 const pairingCode = ref("");
 const deviceLabel = ref("我的 Windows 电脑");
 const busy = ref(false);
@@ -27,8 +42,19 @@ const notice = ref("");
 const error = ref("");
 const preview = ref<CloudSyncPreview | null>(null);
 const conflicts = ref<CloudSyncConflict[]>([]);
+const healthState = ref<"unknown" | "ok" | "error">("unknown");
+const healthCheckedAt = ref("");
 
 const remotePending = computed(() => Math.max(0, state.value.latestRemoteSequence - state.value.lastPulledSequence));
+const previewEntities = computed(() => Object.entries(preview.value?.entityCounts ?? {}).sort((a, b) => b[1] - a[1]));
+const directionAdvice = computed(() => {
+  const value = preview.value;
+  if (!value) return "先生成预览，软件再根据两端数据给出方向建议。";
+  if (value.localCount > 0 && value.remoteCount === 0) return "建议首次选择“仅 Push”：云端为空，把本地数据作为初始基线。";
+  if (value.localCount === 0 && value.remoteCount > 0) return "建议首次选择“仅 Pull”：本地为空，从云端建立本机数据。";
+  if (value.differentCount > 0) return `建议选择“双向同步”：${value.differentCount} 条同键差异会进入冲突清单，不会静默覆盖。`;
+  return "建议选择“双向同步”：两端独有数据互补，相同记录不会重复写入。";
+});
 
 function timeLabel(value: string) {
   if (!value) return "尚无";
@@ -40,7 +66,7 @@ async function refresh() {
   error.value = "";
   try {
     state.value = await cloudSyncStatus();
-    if (!gatewayUrl.value) gatewayUrl.value = state.value.gatewayUrl;
+    gatewayUrl.value = state.value.gatewayUrl || gatewayUrl.value || DEFAULT_GATEWAY_URL;
     conflicts.value = state.value.configured && state.value.openConflicts > 0 ? await cloudSyncConflicts() : [];
   } catch (reason) {
     error.value = String(reason);
@@ -50,10 +76,19 @@ async function refresh() {
 async function testGateway() {
   busy.value = true; error.value = ""; notice.value = "";
   try {
-    const result = await cloudSyncHealth(gatewayUrl.value);
+    const target = state.value.configured ? state.value.gatewayUrl : gatewayUrl.value;
+    const result = await cloudSyncHealth(target);
     if (!result.reachable) throw new Error(result.error || "同步网关不可达");
+    healthState.value = "ok";
+    healthCheckedAt.value = new Date().toISOString();
+    state.value.gatewayReachable = true;
     notice.value = `同步网关连接正常，协议版本 v${result.schemaVersion}。`;
-  } catch (reason) { error.value = String(reason); }
+  } catch (reason) {
+    healthState.value = "error";
+    healthCheckedAt.value = new Date().toISOString();
+    state.value.gatewayReachable = false;
+    error.value = String(reason);
+  }
   finally { busy.value = false; }
 }
 
@@ -61,6 +96,8 @@ async function pairDevice() {
   busy.value = true; error.value = ""; notice.value = "";
   try {
     state.value = await cloudSyncPair({ gatewayUrl: gatewayUrl.value, code: pairingCode.value, label: deviceLabel.value });
+    healthState.value = "ok";
+    healthCheckedAt.value = new Date().toISOString();
     pairingCode.value = "";
     notice.value = "设备配对完成。设备 Token 已由 Windows 当前用户加密保存，不会写入数据库、日志或导出文件。";
   } catch (reason) { error.value = String(reason); }
@@ -90,7 +127,13 @@ async function generatePreview() {
 async function run(direction: "push" | "pull" | "both") {
   if (!preview.value) return;
   const label = direction === "push" ? "仅 Push（本地→云端）" : direction === "pull" ? "仅 Pull（云端→本地）" : "双向同步";
-  if (!confirm("确认执行“" + label + "”？\n\n软件会先自动备份本地数据库。若预览后任一端数据变化，操作会拒绝并要求重新预览。")) return;
+  const effect = direction === "push"
+    ? "本地同键内容将作为云端版本；云端独有记录不会被删除。"
+    : direction === "pull"
+      ? "云端同键内容将写入本地；本地独有记录不会被删除。"
+      : "两端独有记录会互补；同键不同内容会进入冲突清单。";
+  const counts = `本地 ${preview.value.localCount}，云端 ${preview.value.remoteCount}，相同 ${preview.value.sameCount}，仅本地 ${preview.value.localOnlyCount}，仅云端 ${preview.value.remoteOnlyCount}，同键不同 ${preview.value.differentCount}，远端删除标记 ${preview.value.deleteCount}`;
+  if (!confirm(`确认执行“${label}”？\n\n${effect}\n${counts}\n\n软件会先自动备份本地数据库。若预览后任一端数据变化，操作会拒绝并要求重新预览。`)) return;
   busy.value = true; error.value = ""; notice.value = `正在执行${label}。大批量数据会自动分批，请勿关闭软件。`;
   try {
     const report = await cloudSyncRun({ direction, previewId: preview.value.previewId });
@@ -143,7 +186,7 @@ onMounted(refresh);
   <section v-if="!state.configured" class="panel sync-step">
     <div class="section-heading compact-heading"><div><span class="section-kicker">01 设备配对</span><h3>用网页端一次性配对码连接</h3><p>先在私人网站“同步中心”生成 10 分钟有效的配对码。本页不需要、也不接受任何网站或 Telegram 密钥。</p></div></div>
     <div class="sync-pair-grid">
-      <label>同步网关地址<input v-model.trim="gatewayUrl" autocomplete="url" placeholder="https://你的同步网关.workers.dev" /></label>
+      <label>同步网关地址<input v-model.trim="gatewayUrl" autocomplete="url" placeholder="https://你的同步网关.workers.dev" /><small>已预填本项目正式同步网关；只有更换部署时才需要修改。</small></label>
       <label>设备名称<input v-model.trim="deviceLabel" maxlength="120" placeholder="我的 Windows 电脑" /></label>
       <label>一次性配对码<input v-model.trim="pairingCode" maxlength="12" autocomplete="one-time-code" placeholder="ABCDE23456" /></label>
     </div>
@@ -152,15 +195,17 @@ onMounted(refresh);
 
   <template v-else>
     <section class="panel sync-step">
-      <div class="section-heading compact-heading"><div><span class="section-kicker">01 当前节点</span><h3>{{ state.nodeId }}</h3><p class="path-text" :title="state.gatewayUrl">{{ state.gatewayUrl }}</p></div><button class="danger-button small" :disabled="busy" @click="disconnect">断开本机</button></div>
-      <div class="sync-detail-grid"><span>最后 Push：<strong>{{ timeLabel(state.lastPushAt) }}</strong></span><span>最后 Pull：<strong>{{ timeLabel(state.lastPullAt) }}</strong></span><span>远端序列：<strong>{{ state.latestRemoteSequence }}</strong></span><span>本地游标：<strong>{{ state.lastPulledSequence }}</strong></span></div>
+      <div class="section-heading compact-heading"><div><span class="section-kicker">01 当前节点</span><h3>{{ state.nodeId }}</h3><p class="path-text" :title="state.gatewayUrl">{{ state.gatewayUrl }}</p></div><div class="action-row compact-actions"><button class="quiet-button small" :disabled="busy" @click="testGateway">测试连接</button><button class="danger-button small" :disabled="busy" @click="disconnect">断开本机</button></div></div>
+      <div class="sync-detail-grid"><span>首次汇合：<strong>{{ state.bootstrapCompleted ? "已完成" : "待执行" }}</strong></span><span>网关状态：<strong :class="healthState === 'error' ? 'danger-text' : ''">{{ healthState === "ok" ? "连接正常" : healthState === "error" ? "连接失败" : "尚未检测" }}</strong><small v-if="healthCheckedAt">{{ timeLabel(healthCheckedAt) }}</small></span><span>最后 Push：<strong>{{ timeLabel(state.lastPushAt) }}</strong></span><span>最后 Pull：<strong>{{ timeLabel(state.lastPullAt) }}</strong></span><span>远端序列：<strong>{{ state.latestRemoteSequence }}</strong></span><span>本地游标：<strong>{{ state.lastPulledSequence }}</strong></span></div>
     </section>
 
     <section class="panel sync-step">
       <div class="section-heading compact-heading"><div><span class="section-kicker">02 首次同步</span><h3>先比较，再决定方向</h3><p>正式数据第一次汇合必须先生成本地/云端数量、重复、差异和冲突预览。预览不会写入任何业务表。</p></div></div>
       <div class="action-row"><button class="primary-button" :disabled="busy" @click="generatePreview">生成差异预览</button></div>
       <div v-if="preview" class="sync-preview-summary">
-        <span><strong>{{ preview.localCount }}</strong> 本地</span><span><strong>{{ preview.remoteCount }}</strong> 云端</span><span><strong>{{ preview.sameCount }}</strong> 相同</span><span><strong>{{ preview.localOnlyCount }}</strong> 仅本地</span><span><strong>{{ preview.remoteOnlyCount }}</strong> 仅云端</span><span><strong>{{ preview.differentCount }}</strong> 内容不同</span>
+        <span><strong>{{ preview.localCount }}</strong> 本地</span><span><strong>{{ preview.remoteCount }}</strong> 云端</span><span><strong>{{ preview.sameCount }}</strong> 相同</span><span><strong>{{ preview.localOnlyCount }}</strong> 仅本地</span><span><strong>{{ preview.remoteOnlyCount }}</strong> 仅云端</span><span><strong>{{ preview.differentCount }}</strong> 内容不同</span><span><strong>{{ preview.deleteCount }}</strong> 远端删除标记</span>
+        <div class="sync-direction-advice">{{ directionAdvice }}</div>
+        <div v-if="previewEntities.length" class="sync-entity-breakdown"><span v-for="entry in previewEntities" :key="entry[0]"><b>{{ entityLabels[entry[0]] || entry[0] }}</b>{{ entry[1].toLocaleString() }}</span></div>
         <p v-for="warning in preview.warnings" :key="warning">{{ warning }}</p>
       </div>
     </section>

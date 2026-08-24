@@ -9,6 +9,7 @@ export interface AppInfo {
 
 export interface CloudSyncStatus {
   configured: boolean;
+  bootstrapCompleted: boolean;
   nodeId: string;
   gatewayUrl: string;
   gatewayReachable: boolean;

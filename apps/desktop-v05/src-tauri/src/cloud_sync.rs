@@ -247,6 +247,7 @@ pub struct PairingInput {
 #[serde(rename_all = "camelCase")]
 pub struct CloudSyncStatus {
     pub configured: bool,
+    pub bootstrap_completed: bool,
     pub node_id: String,
     pub gateway_url: String,
     pub gateway_reachable: bool,
@@ -286,10 +287,11 @@ impl CloudSyncRuntime {
         let connection = open(database_path)?;
         let mut status = connection
             .query_row(
-                "SELECT node_id,gateway_url,last_pulled_sequence,last_push_at,last_pull_at,last_success_at,last_error,last_remote_sequence FROM cloud_sync_state WHERE singleton=1",
+                "SELECT node_id,gateway_url,last_pulled_sequence,last_push_at,last_pull_at,last_success_at,last_error,last_remote_sequence,bootstrap_completed FROM cloud_sync_state WHERE singleton=1",
                 [],
                 |row| Ok(CloudSyncStatus {
                     configured: false,
+                    bootstrap_completed: row.get::<_, i64>(8)? != 0,
                     node_id: row.get(0)?,
                     gateway_url: row.get(1)?,
                     gateway_reachable: false,
@@ -543,7 +545,12 @@ impl CloudSyncRuntime {
             match remote.get(&entity.entity_key) {
                 None => local_only_count += 1,
                 Some(other) if entity_hash(entity) == entity_hash(other) => same_count += 1,
-                Some(_) => different_count += 1,
+                Some(other) => {
+                    different_count += 1;
+                    if other.tombstone {
+                        delete_count += 1;
+                    }
+                }
             }
         }
         let mut remote_only_count = 0;
@@ -752,6 +759,9 @@ impl CloudSyncRuntime {
         self.verify_preview(database_path, &status, &input.preview_id)
             .await?;
         let credential = self.read_credential()?;
+        let direction = input.direction.clone();
+        let wants_push = matches!(direction, SyncDirection::Push | SyncDirection::Both);
+        let wants_pull = matches!(direction, SyncDirection::Pull | SyncDirection::Both);
         let mut report = CloudSyncReport {
             pushed: 0,
             pulled: 0,
@@ -760,18 +770,36 @@ impl CloudSyncRuntime {
             latest_remote_sequence: status.latest_remote_sequence,
             has_more: false,
         };
-        if matches!(input.direction, SyncDirection::Push | SyncDirection::Both) {
-            enqueue_local_changes(database_path, &credential.node_id)?;
-            let pushed = self
-                .push_outbox(database_path, &status.gateway_url, &credential)
+
+        // A new device starts from the current remote snapshot instead of replaying
+        // every historical change. This also establishes record versions for equal
+        // rows and turns independently-created differences into explicit conflicts.
+        let used_snapshot_bootstrap = !status.bootstrap_completed;
+        if used_snapshot_bootstrap {
+            let remote = self
+                .fetch_snapshot(&status.gateway_url, &credential.device_token)
                 .await?;
-            report.pushed += pushed.pushed;
-            report.conflicts += pushed.conflicts;
+            let bootstrap = prepare_remote_snapshot(
+                database_path,
+                &remote,
+                &direction,
+                status.latest_remote_sequence,
+            )?;
+            report.pulled += bootstrap.pulled;
+            report.deleted += bootstrap.deleted;
+            report.conflicts += bootstrap.conflicts;
             report.latest_remote_sequence = report
                 .latest_remote_sequence
-                .max(pushed.latest_remote_sequence);
+                .max(bootstrap.latest_remote_sequence);
         }
-        if matches!(input.direction, SyncDirection::Pull | SyncDirection::Both) {
+
+        if wants_push {
+            enqueue_local_changes(database_path, &credential.node_id)?;
+        }
+
+        // For two-way sync, pull before push. pull_once marks matching local
+        // outbox rows as conflicts, so only unrelated local changes are uploaded.
+        if wants_pull && !used_snapshot_bootstrap {
             loop {
                 let pulled = self
                     .pull_once(database_path, &status.gateway_url, &credential)
@@ -787,6 +815,16 @@ impl CloudSyncRuntime {
                     break;
                 }
             }
+        }
+        if wants_push {
+            let pushed = self
+                .push_outbox(database_path, &status.gateway_url, &credential)
+                .await?;
+            report.pushed += pushed.pushed;
+            report.conflicts += pushed.conflicts;
+            report.latest_remote_sequence = report
+                .latest_remote_sequence
+                .max(pushed.latest_remote_sequence);
         }
         let now = Utc::now().to_rfc3339();
         open(database_path)?.execute(
@@ -1067,7 +1105,7 @@ impl CloudSyncRuntime {
                     transaction.execute("UPDATE cloud_sync_outbox SET status='sent',last_error='',updated_at=?2 WHERE operation_id=?1", params![accepted.operation_id, now]).map_err(|error| error.to_string())?;
                     transaction.execute(
                         "INSERT INTO cloud_sync_entities(entity_type,entity_key,record_version,payload_hash,tombstone,updated_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(entity_type,entity_key) DO UPDATE SET record_version=excluded.record_version,payload_hash=excluded.payload_hash,tombstone=excluded.tombstone,updated_at=excluded.updated_at",
-                        params![entity_type, entity_key, accepted.record_version, if action == "delete" { String::new() } else { hash_text(&payload_json) }, if action == "delete" { 1 } else { 0 }, now],
+                        params![entity_type, entity_key, accepted.record_version, if action == "delete" { "tombstone".to_string() } else { hash_text(&payload_json) }, if action == "delete" { 1 } else { 0 }, now],
                     ).map_err(|error| error.to_string())?;
                     report.pushed += 1;
                 }
@@ -1143,15 +1181,31 @@ impl CloudSyncRuntime {
         };
         for operation in operations {
             let pending: Option<String> = transaction.query_row(
-                "SELECT payload_json FROM cloud_sync_outbox WHERE entity_type=?1 AND entity_key=?2 AND status IN ('pending','retry') ORDER BY created_at DESC LIMIT 1",
+                "SELECT payload_json FROM cloud_sync_outbox WHERE entity_type=?1 AND entity_key=?2 AND status IN ('pending','retry','conflict') ORDER BY created_at DESC LIMIT 1",
                 params![operation.entity_type, operation.entity_key], |row| row.get(0),
             ).optional().map_err(|error| error.to_string())?;
             if let Some(local_json) = pending {
                 transaction.execute(
-                    "INSERT INTO cloud_sync_conflicts(operation_id,entity_type,entity_key,reason,local_json,remote_json,created_at) VALUES(?1,?2,?3,'local_pending',?4,?5,?6)",
-                    params![operation.operation_id,operation.entity_type,operation.entity_key,local_json,serde_json::to_string(&operation.payload).unwrap_or_default(),now],
+                    "UPDATE cloud_sync_outbox SET status='conflict',last_error='local_pending',updated_at=?3 WHERE entity_type=?1 AND entity_key=?2 AND status IN ('pending','retry')",
+                    params![operation.entity_type,operation.entity_key,now],
                 ).map_err(|error| error.to_string())?;
-                report.conflicts += 1;
+                if insert_open_conflict(
+                    &transaction,
+                    &operation.operation_id,
+                    &operation.entity_type,
+                    &operation.entity_key,
+                    "local_pending",
+                    &local_json,
+                    &serde_json::to_string(&operation.payload).unwrap_or_default(),
+                    &now,
+                )? {
+                    report.conflicts += 1;
+                }
+            } else if pulled_operation_matches_mirror(&transaction, &operation)? {
+                // This is usually the device's own previously accepted Push. The
+                // business row already has the same content; only advance its
+                // cloud version and the page cursor instead of rewriting it.
+                upsert_operation_mirror(&transaction, &operation)?;
             } else {
                 let changed = apply_business_entity(&transaction, &operation)?;
                 if changed {
@@ -1160,10 +1214,7 @@ impl CloudSyncRuntime {
                 if operation.action == "delete" && changed {
                     report.deleted += 1;
                 }
-                transaction.execute(
-                    "INSERT INTO cloud_sync_entities(entity_type,entity_key,record_version,payload_hash,tombstone,updated_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(entity_type,entity_key) DO UPDATE SET record_version=excluded.record_version,payload_hash=excluded.payload_hash,tombstone=excluded.tombstone,updated_at=excluded.updated_at",
-                    params![operation.entity_type,operation.entity_key,operation.record_version,operation.payload.as_ref().map(stable_json).map(|value|hash_text(&value)).unwrap_or_default(),if operation.action=="delete"{1}else{0},operation.occurred_at],
-                ).map_err(|error| error.to_string())?;
+                upsert_operation_mirror(&transaction, &operation)?;
             }
         }
         transaction.execute("UPDATE cloud_sync_state SET last_pulled_sequence=?1,last_remote_sequence=?2,last_pull_at=?3,last_error='',updated_at=?3 WHERE singleton=1", params![pulled.next_sequence,pulled.latest_sequence,now]).map_err(|error| error.to_string())?;
@@ -1685,6 +1736,249 @@ fn limit_push_batch(operations: Vec<serde_json::Value>) -> Result<Vec<serde_json
     Ok(output)
 }
 
+fn insert_open_conflict(
+    transaction: &rusqlite::Transaction<'_>,
+    operation_id: &str,
+    entity_type: &str,
+    entity_key: &str,
+    reason: &str,
+    local_json: &str,
+    remote_json: &str,
+    created_at: &str,
+) -> Result<bool, String> {
+    let exists = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM cloud_sync_conflicts WHERE entity_type=?1 AND entity_key=?2 AND status='open')",
+            params![entity_type, entity_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?
+        != 0;
+    if exists {
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "INSERT INTO cloud_sync_conflicts(operation_id,entity_type,entity_key,reason,local_json,remote_json,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![operation_id, entity_type, entity_key, reason, local_json, remote_json, created_at],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn operation_hash(operation: &PullOperation) -> String {
+    if operation.action == "delete" {
+        "tombstone".to_string()
+    } else {
+        operation
+            .payload
+            .as_ref()
+            .map(stable_json)
+            .map(|value| hash_text(&value))
+            .unwrap_or_default()
+    }
+}
+
+fn pulled_operation_matches_mirror(
+    transaction: &rusqlite::Transaction<'_>,
+    operation: &PullOperation,
+) -> Result<bool, String> {
+    let tracked = transaction
+        .query_row(
+            "SELECT payload_hash,tombstone FROM cloud_sync_entities WHERE entity_type=?1 AND entity_key=?2",
+            params![operation.entity_type, operation.entity_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(tracked
+        .map(|(payload_hash, tombstone)| {
+            tombstone == (operation.action == "delete") && payload_hash == operation_hash(operation)
+        })
+        .unwrap_or(false))
+}
+
+fn upsert_operation_mirror(
+    transaction: &rusqlite::Transaction<'_>,
+    operation: &PullOperation,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO cloud_sync_entities(entity_type,entity_key,record_version,payload_hash,tombstone,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(entity_type,entity_key) DO UPDATE SET
+               record_version=excluded.record_version,
+               payload_hash=excluded.payload_hash,
+               tombstone=excluded.tombstone,
+               updated_at=excluded.updated_at",
+            params![
+                operation.entity_type,
+                operation.entity_key,
+                operation.record_version,
+                operation_hash(operation),
+                (operation.action == "delete") as i64,
+                operation.occurred_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn upsert_remote_mirror(
+    transaction: &rusqlite::Transaction<'_>,
+    entity: &SyncEntity,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO cloud_sync_entities(entity_type,entity_key,record_version,payload_hash,tombstone,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(entity_type,entity_key) DO UPDATE SET
+               record_version=excluded.record_version,
+               payload_hash=excluded.payload_hash,
+               tombstone=excluded.tombstone,
+               updated_at=excluded.updated_at",
+            params![
+                entity.entity_type,
+                entity.entity_key,
+                entity.record_version,
+                entity_hash(entity),
+                entity.tombstone as i64,
+                entity.updated_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn snapshot_operation(entity: &SyncEntity) -> PullOperation {
+    PullOperation {
+        sequence: 0,
+        operation_id: format!("snapshot:{}", hash_text(&entity.entity_key)),
+        node_id: "cloud-snapshot".to_string(),
+        entity_type: entity.entity_type.clone(),
+        entity_key: entity.entity_key.clone(),
+        action: if entity.tombstone {
+            "delete".to_string()
+        } else {
+            "upsert".to_string()
+        },
+        record_version: entity.record_version,
+        occurred_at: nonempty(entity.updated_at.clone(), &Utc::now().to_rfc3339()),
+        payload: entity.payload.clone(),
+    }
+}
+
+fn prepare_remote_snapshot(
+    path: &Path,
+    remote: &HashMap<String, SyncEntity>,
+    direction: &SyncDirection,
+    latest_remote_sequence: i64,
+) -> Result<CloudSyncReport, String> {
+    let local = collect_local_entities(path)?;
+    let wants_pull = matches!(direction, SyncDirection::Pull | SyncDirection::Both);
+    let mut connection = open(path)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let mut report = CloudSyncReport {
+        pushed: 0,
+        pulled: 0,
+        deleted: 0,
+        conflicts: 0,
+        latest_remote_sequence,
+        has_more: false,
+    };
+
+    for entity in remote.values() {
+        match local.get(&entity.entity_key) {
+            Some(local_entity) if entity_hash(local_entity) == entity_hash(entity) => {
+                upsert_remote_mirror(&transaction, entity)?;
+            }
+            None if wants_pull => {
+                let operation = snapshot_operation(entity);
+                let changed = apply_business_entity(&transaction, &operation)?;
+                upsert_remote_mirror(&transaction, entity)?;
+                if changed {
+                    report.pulled += 1;
+                    if entity.tombstone {
+                        report.deleted += 1;
+                    }
+                }
+            }
+            Some(_) if matches!(direction, SyncDirection::Pull) => {
+                let operation = snapshot_operation(entity);
+                let changed = apply_business_entity(&transaction, &operation)?;
+                upsert_remote_mirror(&transaction, entity)?;
+                if changed {
+                    report.pulled += 1;
+                    if entity.tombstone {
+                        report.deleted += 1;
+                    }
+                }
+            }
+            Some(local_entity)
+                if matches!(direction, SyncDirection::Both) || entity.tombstone =>
+            {
+                upsert_remote_mirror(&transaction, entity)?;
+                let local_json = local_entity
+                    .payload
+                    .as_ref()
+                    .map(stable_json)
+                    .unwrap_or_default();
+                let remote_json = entity
+                    .payload
+                    .as_ref()
+                    .map(stable_json)
+                    .unwrap_or_default();
+                if insert_open_conflict(
+                    &transaction,
+                    &format!("snapshot:{}", hash_text(&entity.entity_key)),
+                    &entity.entity_type,
+                    &entity.entity_key,
+                    if entity.tombstone {
+                        "explicit_restore_required"
+                    } else {
+                        "first_sync_difference"
+                    },
+                    &local_json,
+                    &remote_json,
+                    &now,
+                )? {
+                    report.conflicts += 1;
+                }
+            }
+            Some(_) => {
+                // Push explicitly makes the local row authoritative. Seed the
+                // remote version so the outgoing write has an exact base.
+                upsert_remote_mirror(&transaction, entity)?;
+            }
+            None => {
+                // Push never deletes a remote-only row. It remains available for
+                // a later Pull or two-way sync.
+            }
+        }
+    }
+
+    if wants_pull {
+        transaction
+            .execute(
+                "UPDATE cloud_sync_state SET last_pulled_sequence=?1,last_remote_sequence=?1,last_pull_at=?2,bootstrap_completed=1,last_error='',updated_at=?2 WHERE singleton=1",
+                params![latest_remote_sequence, now],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        transaction
+            .execute(
+                "UPDATE cloud_sync_state SET last_remote_sequence=?1,bootstrap_completed=1,last_error='',updated_at=?2 WHERE singleton=1",
+                params![latest_remote_sequence, now],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(report)
+}
+
 fn enqueue_local_changes(path: &Path, node_id: &str) -> Result<(), String> {
     let local = collect_local_entities(path)?;
     let mut connection = open(path)?;
@@ -1692,6 +1986,7 @@ fn enqueue_local_changes(path: &Path, node_id: &str) -> Result<(), String> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let mut tracked = HashMap::<String, (String, i64, String, bool)>::new();
+    let mut open_conflicts = HashSet::<String>::new();
     {
         let mut statement = transaction.prepare("SELECT entity_key,entity_type,record_version,payload_hash,tombstone FROM cloud_sync_entities").map_err(|error| error.to_string())?;
         let rows = statement
@@ -1710,8 +2005,22 @@ fn enqueue_local_changes(path: &Path, node_id: &str) -> Result<(), String> {
             tracked.insert(key, (kind, version, hash, tombstone));
         }
     }
+    {
+        let mut statement = transaction
+            .prepare("SELECT entity_key FROM cloud_sync_conflicts WHERE status='open'")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            open_conflicts.insert(row.map_err(|error| error.to_string())?);
+        }
+    }
     let now = Utc::now().to_rfc3339();
     for entity in local.values() {
+        if open_conflicts.contains(&entity.entity_key) {
+            continue;
+        }
         let payload = entity
             .payload
             .as_ref()
@@ -1745,7 +2054,11 @@ fn enqueue_local_changes(path: &Path, node_id: &str) -> Result<(), String> {
     .into_iter()
     .collect::<HashSet<_>>();
     for (key, (entity_type, version, _, tombstone)) in tracked {
-        if !tombstone && supported.contains(entity_type.as_str()) && !local.contains_key(&key) {
+        if !tombstone
+            && supported.contains(entity_type.as_str())
+            && !local.contains_key(&key)
+            && !open_conflicts.contains(&key)
+        {
             transaction.execute("DELETE FROM cloud_sync_outbox WHERE entity_type=?1 AND entity_key=?2 AND status IN ('pending','retry')", params![entity_type,key]).map_err(|error| error.to_string())?;
             transaction.execute(
                 "INSERT INTO cloud_sync_outbox(operation_id,entity_type,entity_key,action,base_version,payload_json,occurred_at,created_at,updated_at) VALUES(?1,?2,?3,'delete',?4,'',?5,?5,?5)",
@@ -2636,6 +2949,32 @@ fn safe_lease_part(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn insert_test_record(path: &Path, record_key: &str, primary_value: &str) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO permanent_records(tool,record_key,primary_value,status,created_at,updated_at) VALUES('missav',?1,?2,'ok','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                params![record_key, primary_value],
+            )
+            .unwrap();
+    }
+
+    fn remote_record(
+        path: &Path,
+        record_key: &str,
+        primary_value: &str,
+        record_version: i64,
+    ) -> SyncEntity {
+        let key = format!("record:missav:{}", record_key.to_lowercase());
+        let mut entity = collect_local_entities(path).unwrap().remove(&key).unwrap();
+        entity.record_version = record_version;
+        entity.updated_at = "2026-02-01T00:00:00Z".to_string();
+        let payload = entity.payload.as_mut().unwrap();
+        payload["primaryValue"] = serde_json::Value::String(primary_value.to_string());
+        payload["updatedAt"] = serde_json::Value::String(entity.updated_at.clone());
+        entity
+    }
+
     #[test]
     fn gateway_requires_https_except_loopback() {
         assert!(normalize_gateway_url("https://sync.example.com/").is_ok());
@@ -2668,6 +3007,211 @@ mod tests {
         assert!(!serialized.contains("must-not-sync"));
         assert!(serialized.contains("\"username\":\"demo\""));
         assert!(entities.contains_key("checkpoint:telegram_personal:personal-main:-1001"));
+    }
+
+    #[test]
+    fn first_two_way_sync_turns_different_rows_into_one_stable_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("first-both.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        crate::workspace::initialize_schema(&connection).unwrap();
+        drop(connection);
+        insert_test_record(&path, "ABF-123", "本地版本");
+        let remote_entity = remote_record(&path, "ABF-123", "云端版本", 7);
+        let remote = HashMap::from([(remote_entity.entity_key.clone(), remote_entity)]);
+
+        let report =
+            prepare_remote_snapshot(&path, &remote, &SyncDirection::Both, 19).unwrap();
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(report.pulled, 0);
+        let connection = Connection::open(&path).unwrap();
+        let local_value: String = connection
+            .query_row(
+                "SELECT primary_value FROM permanent_records WHERE tool='missav' AND record_key='ABF-123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(local_value, "本地版本");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_pulled_sequence FROM cloud_sync_state WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            19
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT record_version FROM cloud_sync_entities WHERE entity_key='record:missav:abf-123'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            7
+        );
+        drop(connection);
+
+        enqueue_local_changes(&path, "desktop-node").unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM cloud_sync_outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        drop(connection);
+
+        let second = prepare_remote_snapshot(&path, &remote, &SyncDirection::Both, 19).unwrap();
+        assert_eq!(second.conflicts, 0);
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cloud_sync_conflicts WHERE status='open'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn first_pull_applies_remote_value_and_advances_to_snapshot_sequence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("first-pull.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        crate::workspace::initialize_schema(&connection).unwrap();
+        drop(connection);
+        insert_test_record(&path, "ABF-123", "本地版本");
+        let remote_entity = remote_record(&path, "ABF-123", "云端版本", 4);
+        let remote = HashMap::from([(remote_entity.entity_key.clone(), remote_entity)]);
+
+        let report =
+            prepare_remote_snapshot(&path, &remote, &SyncDirection::Pull, 23).unwrap();
+        assert_eq!(report.pulled, 1);
+        assert_eq!(report.conflicts, 0);
+        let connection = Connection::open(&path).unwrap();
+        let state = connection
+            .query_row(
+                "SELECT p.primary_value,s.last_pulled_sequence,e.record_version
+                 FROM permanent_records p
+                 JOIN cloud_sync_state s ON s.singleton=1
+                 JOIN cloud_sync_entities e ON e.entity_key='record:missav:abf-123'
+                 WHERE p.tool='missav' AND p.record_key='ABF-123'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state, ("云端版本".to_string(), 23, 4));
+    }
+
+    #[test]
+    fn first_push_uses_remote_version_without_deleting_remote_only_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("first-push.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        crate::workspace::initialize_schema(&connection).unwrap();
+        drop(connection);
+        insert_test_record(&path, "ABF-123", "本地版本");
+        let remote_entity = remote_record(&path, "ABF-123", "云端版本", 11);
+        let mut remote_only = remote_entity.clone();
+        remote_only.entity_key = "record:missav:xyz-999".to_string();
+        remote_only.record_version = 3;
+        let remote_only_payload = remote_only.payload.as_mut().unwrap();
+        remote_only_payload["recordKey"] = serde_json::Value::String("XYZ-999".to_string());
+        remote_only_payload["primaryValue"] = serde_json::Value::String("仅云端".to_string());
+        let remote = HashMap::from([
+            (remote_entity.entity_key.clone(), remote_entity),
+            (remote_only.entity_key.clone(), remote_only),
+        ]);
+
+        let report =
+            prepare_remote_snapshot(&path, &remote, &SyncDirection::Push, 31).unwrap();
+        assert_eq!(report.pulled, 0);
+        assert_eq!(report.conflicts, 0);
+        enqueue_local_changes(&path, "desktop-node").unwrap();
+        let connection = Connection::open(&path).unwrap();
+        let pending = connection
+            .query_row(
+                "SELECT entity_key,base_version,payload_json FROM cloud_sync_outbox WHERE status='pending'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(pending.0, "record:missav:abf-123");
+        assert_eq!(pending.1, 11);
+        assert!(pending.2.contains("本地版本"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cloud_sync_entities WHERE entity_key='record:missav:xyz-999'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_pulled_sequence FROM cloud_sync_state WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn pull_skips_business_rewrite_when_payload_is_already_mirrored() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("skip-own-push.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        crate::workspace::initialize_schema(&connection).unwrap();
+        drop(connection);
+        insert_test_record(&path, "ABF-123", "相同内容");
+        let entity = remote_record(&path, "ABF-123", "相同内容", 1);
+        let mut connection = Connection::open(&path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        upsert_remote_mirror(&transaction, &entity).unwrap();
+        let mut operation = snapshot_operation(&entity);
+        operation.record_version = 2;
+        assert!(pulled_operation_matches_mirror(&transaction, &operation).unwrap());
+        upsert_operation_mirror(&transaction, &operation).unwrap();
+        assert_eq!(
+            transaction
+                .query_row(
+                    "SELECT record_version FROM cloud_sync_entities WHERE entity_key='record:missav:abf-123'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        operation.payload.as_mut().unwrap()["primaryValue"] =
+            serde_json::Value::String("远端又变了".to_string());
+        assert!(!pulled_operation_matches_mirror(&transaction, &operation).unwrap());
+        transaction.commit().unwrap();
     }
 
     #[test]
@@ -2981,5 +3525,54 @@ mod tests {
         assert_eq!(state.4, "");
         assert_eq!(state.5, 0);
         assert_eq!(state.6, "");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TG_SYNC_GATEWAY and a one-time TG_SYNC_PAIRING_CODE"]
+    async fn deployed_gateway_pairs_previews_and_completes_isolated_first_pull() {
+        let gateway = std::env::var("TG_SYNC_GATEWAY").expect("TG_SYNC_GATEWAY is required");
+        let code =
+            std::env::var("TG_SYNC_PAIRING_CODE").expect("TG_SYNC_PAIRING_CODE is required");
+        let label = std::env::var("TG_SYNC_DEVICE_LABEL")
+            .unwrap_or_else(|_| "Windows isolated E2E".to_string());
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("gateway-e2e.sqlite");
+        let connection = Connection::open(&database_path).unwrap();
+        crate::workspace::initialize_schema(&connection).unwrap();
+        drop(connection);
+        let runtime = CloudSyncRuntime::new(directory.path()).unwrap();
+        let paired = runtime
+            .pair(
+                &database_path,
+                PairingInput {
+                    gateway_url: gateway,
+                    code,
+                    label,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(paired.configured);
+        assert!(paired.gateway_reachable);
+
+        let preview = runtime.preview(&database_path).await.unwrap();
+        assert_eq!(preview.local_count, 0);
+        let report = runtime
+            .run_sync(
+                &database_path,
+                SyncRunInput {
+                    direction: SyncDirection::Pull,
+                    preview_id: preview.preview_id,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.conflicts, 0);
+        let status = runtime.status(&database_path).unwrap();
+        assert!(status.bootstrap_completed);
+        assert!(status.last_error.is_empty());
+        assert!(!status.last_success_at.is_empty());
+        assert_eq!(status.pending_uploads, 0);
+        runtime.disconnect(&database_path).unwrap();
     }
 }

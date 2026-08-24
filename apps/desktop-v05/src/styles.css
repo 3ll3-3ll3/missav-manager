@@ -193,6 +193,7 @@ textarea:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px
 .sync-metric-grid span { color: var(--muted); font-size: 12px; }
 .sync-pair-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .sync-pair-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+.sync-pair-grid small { line-height: 1.45; }
 .sync-detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .sync-detail-grid span { display: grid; gap: 4px; min-width: 0; padding: 10px; border-radius: 9px; background: #f1f8f1; color: var(--muted); font-size: 11px; }
 .sync-detail-grid strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
@@ -205,10 +206,15 @@ textarea:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px
 .compact-actions { flex: 0 0 auto; margin: 0; }
 .compact-empty { margin: 0; padding: 18px; }
 @media (max-width: 760px) { .sync-conflict-item { align-items: stretch; flex-direction: column; } .compact-actions { width: 100%; } .compact-actions button { flex: 1; } }
-.sync-preview-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.sync-preview-summary { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 .sync-preview-summary span { display: grid; gap: 2px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: #f8fcf7; color: var(--muted); font-size: 11px; }
 .sync-preview-summary strong { color: var(--green-dark); font-size: 18px; }
 .sync-preview-summary p { grid-column: 1 / -1; margin: 0; color: var(--warning); font-size: 12px; }
+.sync-direction-advice { grid-column: 1 / -1; padding: 10px 12px; border-left: 3px solid var(--green); border-radius: 7px; background: #eef8ee; color: var(--green-dark); font-weight: 700; }
+.sync-entity-breakdown { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 7px; }
+.sync-entity-breakdown span { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; }
+.sync-entity-breakdown b { color: var(--text); font-weight: 650; }
+.danger-text { color: var(--danger) !important; }
 .setting-actions { margin-top: 20px; }
 .log-table td:first-child { width: 210px; }
 .pager { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 10px; border-top: 1px solid var(--line); }

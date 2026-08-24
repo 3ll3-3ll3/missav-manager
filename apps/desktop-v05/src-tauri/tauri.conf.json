@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TG Content Toolbox",
-  "version": "0.5.13",
+  "version": "0.6.0",
   "identifier": "com.wjl.tg-content-toolbox",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "TG 内容工具箱 v0.5",
+        "title": "TG 内容工具箱 v0.6",
         "width": 1360,
         "height": 900,
         "minWidth": 980,

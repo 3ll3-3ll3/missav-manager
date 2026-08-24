@@ -90,7 +90,7 @@ onMounted(refreshInfo);
     </main>
 
     <footer class="footer-bar">
-      <span>v0.5 工具箱主线 · 每个网站与文本工具独立工作</span>
+      <span>v0.6 本地云端统一主线 · 每个网站与文本工具独立工作</span>
       <span class="path-text" :title="info?.databasePath">{{ info?.databasePath }}</span>
     </footer>
   </div>
