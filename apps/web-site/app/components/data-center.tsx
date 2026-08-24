@@ -68,7 +68,7 @@ function download(name: string, content: string, type: string) {
   anchor.href = url;
   anchor.download = name;
   anchor.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 function tablePreferences(): TablePreferences {
   const fallback = {
@@ -573,7 +573,7 @@ export default function DataCenter({ refreshKey }: { refreshKey: number }) {
   }
   const pages = Math.max(1, Math.ceil(data.total / pageSize));
   return (
-    <div className="stack-md" tabIndex={0} onKeyDown={keyboard} onPaste={paste}>
+    <div className="stack-md data-center-workspace" tabIndex={0} onKeyDown={keyboard} onPaste={paste}>
       <section className="data-toolbar card">
         <div className="searchbox">
           <span>⌕</span>
@@ -791,7 +791,7 @@ export default function DataCenter({ refreshKey }: { refreshKey: number }) {
                   className={isSelected(row.id) ? "selected" : ""}
                   onClick={(event) => toggleRow(rowIndex, event)}
                 >
-                  <td className="check">
+                  <td className="check" data-column="选择">
                     <input
                       type="checkbox"
                       readOnly
@@ -805,6 +805,7 @@ export default function DataCenter({ refreshKey }: { refreshKey: number }) {
                     return (
                       <td
                         key={column.key}
+                        data-column={column.label}
                         className={focusedCell ? "focused-cell" : ""}
                         onClick={() =>
                           setFocused({ row: rowIndex, col: colIndex })

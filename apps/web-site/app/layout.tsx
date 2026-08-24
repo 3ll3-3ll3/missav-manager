@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "MissAV Manager · 私人工作台",
-  description: "v0.5.13 桌面规则的私人网站工作台",
+  title: "TG 内容工具箱 · 私人工作台",
+  description: "对齐 Windows v0.5.13 使用体验的 TG 内容工具箱",
   other: { "codex-preview": "development" },
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
 };

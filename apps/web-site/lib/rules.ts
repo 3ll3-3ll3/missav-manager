@@ -6,6 +6,7 @@ export type InputMessage = {
 };
 
 const TWITTER_RESERVED = new Set(["about","compose","explore","hashtag","home","i","intent","login","messages","notifications","search","settings","share","signup"]);
+const TWITTER_TOPIC_TAGS = new Set(["adult", "cosplay", "hentai", "nude", "nsfw", "porn", "porno", "sex", "sexy", "xxx"]);
 const HAIJIAO_CATEGORIES = ["hjjd","hjmz","hjyc","hjfn","hjsz","hjrq","hjhj"];
 const NOISE_PREFIXES = new Set([
   "MESSAGE","MESSAGES","USERPIC","MEDIA","VIDEO","PHOTO","AVATAR","PAGINATION","DETAILS","STATUS","TITLE","BODY","CLASS","STYLE",
@@ -163,6 +164,10 @@ export function parseDocument(document: InputDocument): InputMessage[] {
 
 function messageText(message: InputMessage) { return [message.text,...message.links].filter(Boolean).join("\n"); }
 function validHandle(value: string) { const handle = value.trim().replace(/^[@#]/,""); return /^[A-Za-z0-9_]{1,15}$/.test(handle) && !TWITTER_RESERVED.has(handle.toLowerCase()) ? handle : ""; }
+function isTwitterTopicTag(value: string) {
+  const tag = value.toLowerCase();
+  return TWITTER_TOPIC_TAGS.has(tag) || /^(?:adult|nsfw|porn|porno|sex|xxx)\d+$/i.test(tag);
+}
 function sourceFor(value: string, messages: InputMessage[]) { const needle = value.toLowerCase(); return messages.find((message)=>messageText(message).toLowerCase().includes(needle))?.source || ""; }
 
 function twitterResults(messages: InputMessage[]) {
@@ -173,7 +178,7 @@ function twitterResults(messages: InputMessage[]) {
     const candidates: Array<{ index: number; value: string }> = [];
     for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])#([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) {
       const handle = validHandle(match[1]); const index = Number(match.index || 0) + match[0].lastIndexOf("#"); const prefix = text.slice(Math.max(0,index-24),index);
-      if (handle.length >= 4 && !/传送门[\s：:→-]*$/u.test(prefix)) candidates.push({ index, value: handle });
+      if (handle.length >= 4 && !isTwitterTopicTag(handle) && !/传送门[\s：:→-]*$/u.test(prefix)) candidates.push({ index, value: handle });
     }
     for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])@([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])/gu)) if (!/_bot$/i.test(match[1])) candidates.push({ index: Number(match.index || 0) + match[0].lastIndexOf("@"), value: match[1] });
     for (const match of text.matchAll(/https?:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})(?=$|[/?#\s"'<>])/gi)) candidates.push({ index: Number(match.index || 0), value: match[1] });

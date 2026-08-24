@@ -22,6 +22,11 @@ test("复刻推特博主过滤：保持首次出现顺序并排除传送门、�
   ].join("\n")), ["kechunyaoll", "Second_User", "Third3", "xxxxshe0", "m1stedoll"]);
 });
 
+test("推特规则不把常见成人主题标签和带数字变体当成账号", () => {
+  assert.deepEqual(primary("twitter", "Se #sex80000 #nsfw #porno2026"), []);
+  assert.deepEqual(primary("twitter", "#sex80000 但明确账号是 @real_creator"), ["real_creator"]);
+});
+
 test("只保留 Bad.news 主题链接并规范化去重", () => {
   assert.deepEqual(primary("badnews", "https://bad.news/app https://bad.news/t/6295976 https://www.bad.news/t/6295976?from=tg http://bad.news/t/6295984#comments"), [
     "https://bad.news/t/6295976", "https://bad.news/t/6295984",

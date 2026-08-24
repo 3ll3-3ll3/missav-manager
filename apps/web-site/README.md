@@ -1,4 +1,4 @@
-# MissAV Manager Private Web
+# TG 内容工具箱 Private Web
 
 这是 `missav-manager` v0.5.13 Windows 工具的 B 账号私人网站版本。网站复刻业务规则与数据工作流，不直接转换 EXE，也不复制 Tauri/Rust 桌面外壳。
 
@@ -20,14 +20,15 @@
 - Raindrop CSV 与 Netscape 书签 HTML 生成；第二层黑名单会从 Raindrop 文件中排除匹配记录。
 - 脱敏 JSON/CSV 的预览、计数、SHA-256 核对、分批写入和批次回滚。
 - Telegram Bot API 增量、官方 JSON 导入、来源多对多绑定和工具独立队列。
+- Telegram 个人账号最小登录链路：二维码或国际手机号、验证码、两步验证、AES-GCM 加密 Session、跨请求恢复、取消解锁和注销删除。
 
 ## Telegram 个人账号 API 状态
 
 网站必须实现个人账号 MTProto，并尽可能复刻 Windows v0.5.13 的二维码/手机号登录、验证码、两步验证、Session、来源发现、历史、连续增量和三种已读策略。Windows 端同时保留，二者 Session、来源和检查点彼此独立。
 
-当前提交只完成 Bot、官方 JSON、绑定和工具队列；个人账号 MTProto 尚未完成真实登录与远端验收，因此 Telegram 整体状态是“未完成”。不得把构建或模拟测试通过表述为 Telegram 完成。
+当前提交已实现全局连接中心、请求级 MTProto 登录/恢复、最多 100 个群组与频道来源、工具多对多绑定、共享消息池、每工具独立队列、编辑/删除生命周期、历史与增量分离检查点，以及 `safe_auto`、`never`、`manual` 三种已读策略。真实扫码/手机号登录、刷新与重新部署后的 Session 恢复、真实来源同步、Bot webhook 冲突和跨工具扇出仍必须由所有者在私人预览中验收；在这些步骤完成前，Telegram 整体状态仍是“待真实验收”。不得把构建或模拟测试通过表述为 Telegram 完成。
 
-当前 Sites 运行时先通过不含凭据的受限探针验证 Telegram TCP 可达性。若实测证明 Worker 无法稳定承载跨请求登录会话，则 Site 改为服务端调用仅所有者可访问的私有 MTProto 后端；不会删除个人 API。
+当前 Sites 运行时已通过不含凭据的 TCP/WSS 生产探针。探针只证明固定传输端点可达，不代表 MTProto 授权可用。登录、发现、同步和已读的每一步都使用请求级短连接；临时/正式 StringSession 与验证码挑战分别通过独立 Site Secret 派生的 AES-GCM 密钥加密保存在 D1，不依赖跨请求常驻 socket。若真实登录与恢复证明普通 Worker 仍不稳定，则改为仅所有者可访问的私有 MTProto 后端或平台支持的长生命周期执行单元；不会把 TCP 可达误报为 Telegram 已连接。
 
 ## 仍由 Windows 桌面端独占
 
@@ -44,7 +45,7 @@
 4. 确认后才会按 100 条一批写入 D1。
 5. 如数量或内容不符，在迁移批次中执行回滚；新增记录会删除，被覆盖记录会恢复原值。
 
-不要把 Windows Telegram 会话、正式 SQLite 或未脱敏原始归档上传到网站。`TELEGRAM_API_ID`、`TELEGRAM_API_HASH`、`TELEGRAM_BOT_TOKEN` 和 Session 加密密钥只能配置在 Sites Secrets 或所有者私密配置中；手机号、验证码、两步验证密码和二维码内容只允许在所有者登录流程中短时使用。
+不要把 Windows Telegram 会话、正式 SQLite 或未脱敏原始归档上传到网站。`TELEGRAM_API_ID`、`TELEGRAM_API_HASH`、`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_SESSION_ENCRYPTION_KEY` 只能配置在 Sites Secrets 或所有者私密配置中；加密密钥至少 32 个随机字符。手机号、验证码、两步验证密码和二维码内容只允许在所有者登录流程中短时使用。
 
 ## 开发与验证
 

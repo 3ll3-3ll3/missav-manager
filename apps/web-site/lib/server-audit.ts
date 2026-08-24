@@ -1,5 +1,12 @@
 import { getD1 } from "../db";
-import { redact, safeJson } from "./security";
+import { csvSafe, redact, safeJson } from "./security";
+import {
+  normalizeTaskStatus,
+  taskStatusLabel,
+  taskStatusAliases,
+  TASK_STATUSES,
+  type TaskStatus,
+} from "./task-status";
 
 const nowIso = () => new Date().toISOString();
 
@@ -23,6 +30,56 @@ export async function writeLog(
       timestamp,
     )
     .run();
+}
+
+/**
+ * Persist an already-sanitized operational failure and mirror the same safe
+ * envelope to Worker observability. D1 and Worker logs are deliberately
+ * independent so a database write failure cannot erase the only diagnostic.
+ */
+export async function writeErrorLog(
+  category: string,
+  message: unknown,
+  detail: unknown = {},
+) {
+  const safeCategory = redact(category).slice(0, 80);
+  const safeMessage = redact(message);
+  const safeDetail = redact(safeJson(detail, {}));
+  const timestamp = nowIso();
+  let persisted = true;
+  try {
+    await getD1()
+      .prepare(
+        "INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)",
+      )
+      .bind(
+        crypto.randomUUID(),
+        "error",
+        safeCategory,
+        safeMessage,
+        safeDetail,
+        timestamp,
+      )
+      .run();
+  } catch (error) {
+    persisted = false;
+    console.error(JSON.stringify({
+      level: "error",
+      category: safeCategory,
+      message: "应用错误日志写入 D1 失败",
+      detail: redact(error instanceof Error ? error.message : error),
+      timestamp,
+    }));
+  }
+  console.error(JSON.stringify({
+    level: "error",
+    category: safeCategory,
+    message: safeMessage,
+    detail: safeDetail,
+    persisted,
+    timestamp,
+  }));
+  return { persisted, timestamp };
 }
 
 export async function listLogs(input: {
@@ -200,6 +257,45 @@ export async function createSettingsSnapshot(keys: string[], reason: string) {
   return snapshotId;
 }
 
+async function createTaskSnapshot(ids: string[], reason: string) {
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const rows: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `SELECT * FROM task_inbox WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .all();
+    rows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
+  }
+  const snapshotId = crypto.randomUUID();
+  await getD1().batch([
+    getD1()
+      .prepare(
+        "INSERT INTO data_snapshots(id,reason,entity,item_count,status,created_at,restored_at) VALUES (?,?,?,?,?,?,?)",
+      )
+      .bind(
+        snapshotId,
+        reason.slice(0, 240),
+        "task_inbox",
+        rows.length,
+        "ready",
+        nowIso(),
+        "",
+      ),
+    ...rows.map((row) =>
+      getD1()
+        .prepare(
+          "INSERT INTO data_snapshot_items(snapshot_id,entity_key,previous_json) VALUES (?,?,?)",
+        )
+        .bind(snapshotId, String(row.id), safeJson(row, {})),
+    ),
+  ]);
+  return snapshotId;
+}
+
 export async function listSnapshots(limit = 50) {
   const rows = await getD1()
     .prepare("SELECT * FROM data_snapshots ORDER BY created_at DESC LIMIT ?")
@@ -327,6 +423,70 @@ export async function restoreSnapshot(snapshotId: string) {
             .bind(item.row.key, item.row.value_json, item.row.updated_at),
     );
     if (statements.length) await getD1().batch(statements);
+  } else if (snapshot.entity === "task_inbox") {
+    const statements = parsed.map((item) => {
+      const row = item.row;
+      return getD1()
+        .prepare(
+          `INSERT OR REPLACE INTO task_inbox
+          (id,tool,stage,title,run_id,record_id,source_id,metadata_json,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .bind(
+          row.id,
+          row.tool,
+          row.stage,
+          row.title,
+          row.run_id,
+          row.record_id,
+          row.source_id,
+          row.metadata_json,
+          row.created_at,
+          row.updated_at,
+        );
+    });
+    for (let offset = 0; offset < statements.length; offset += 80)
+      await getD1().batch(statements.slice(offset, offset + 80));
+  } else if (
+    snapshot.entity === "telegram_migration" ||
+    snapshot.entity === "telegram_queue"
+  ) {
+    const primaryKeys: Record<string, string> = {
+      telegram_connections: "connection_id",
+      telegram_bot_state: "connection_id",
+      input_sources: "id",
+      tool_source_bindings: "id",
+      telegram_messages: "id",
+      telegram_message_fingerprints: "id",
+      telegram_tool_queue: "id",
+      telegram_read_states: "source_id",
+      telegram_sync_runs: "id",
+      telegram_accounts: "id",
+      telegram_auth_flows: "id",
+    };
+    const tableOrder = Object.keys(primaryKeys);
+    if (snapshot.entity === "telegram_migration") {
+      for (const table of [...tableOrder].reverse())
+        await getD1().prepare(`DELETE FROM ${table}`).run();
+    }
+    for (const table of tableOrder) {
+      const tableRows = parsed.filter((item) => item.key.startsWith(`${table}:`));
+      for (let offset = 0; offset < tableRows.length; offset += 50) {
+        const statements = tableRows.slice(offset, offset + 50).map((item) => {
+          const columns = Object.keys(item.row).filter((key) => /^[a-z][a-z0-9_]*$/i.test(key));
+          const primaryKey = primaryKeys[table];
+          if (!columns.length || !columns.includes(primaryKey))
+            throw new Error("Telegram 恢复点内容无效");
+          const updates = columns.filter((column) => column !== primaryKey);
+          return getD1()
+            .prepare(
+              `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")}) ON CONFLICT(${primaryKey}) ${updates.length ? `DO UPDATE SET ${updates.map((column) => `${column}=excluded.${column}`).join(",")}` : "DO NOTHING"}`,
+            )
+            .bind(...columns.map((column) => item.row[column]));
+        });
+        if (statements.length) await getD1().batch(statements);
+      }
+    }
   } else throw new Error("暂不支持该恢复点类型");
   const restoredAt = nowIso();
   await getD1()
@@ -344,23 +504,14 @@ export async function restoreSnapshot(snapshotId: string) {
   return { restored: parsed.length };
 }
 
-export async function listTasks(input: {
-  page?: number;
-  pageSize?: number;
-  stage?: string;
-  tool?: string;
-  search?: string;
-}) {
-  const page = Math.max(1, Math.trunc(Number(input.page) || 1));
-  const pageSize = Math.min(
-    200,
-    Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
-  );
+function taskFilters(input: { stage?: string; tool?: string; search?: string }) {
   const clauses: string[] = [];
   const values: unknown[] = [];
   if (input.stage) {
-    clauses.push("stage=?");
-    values.push(String(input.stage).slice(0, 32));
+    const canonical = normalizeTaskStatus(input.stage);
+    const aliases = taskStatusAliases(canonical);
+    clauses.push(`stage IN (${aliases.map(() => "?").join(",")})`);
+    values.push(...aliases);
   }
   if (input.tool) {
     clauses.push("tool=?");
@@ -370,14 +521,40 @@ export async function listTasks(input: {
     clauses.push("title LIKE ?");
     values.push(`%${input.search.trim().slice(0, 160)}%`);
   }
+  return { clauses, values };
+}
+
+export async function listTasks(input: {
+  page?: number;
+  pageSize?: number;
+  stage?: string;
+  tool?: string;
+  search?: string;
+  sort?: string;
+  direction?: "asc" | "desc";
+}) {
+  const page = Math.max(1, Math.trunc(Number(input.page) || 1));
+  const pageSize = Math.min(
+    200,
+    Math.max(20, Math.trunc(Number(input.pageSize) || 50)),
+  );
+  const { clauses, values } = taskFilters(input);
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const sortFields: Record<string, string> = {
+    tool: "tool",
+    stage: "stage",
+    title: "title",
+    updatedAt: "updated_at",
+  };
+  const sort = sortFields[String(input.sort || "updatedAt")] || "updated_at";
+  const direction = input.direction === "asc" ? "ASC" : "DESC";
   const [count, rows] = await getD1().batch([
     getD1()
       .prepare(`SELECT COUNT(*) AS count FROM task_inbox${where}`)
       .bind(...values),
     getD1()
       .prepare(
-        `SELECT * FROM task_inbox${where} ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM task_inbox${where} ORDER BY ${sort} ${direction},id ${direction} LIMIT ? OFFSET ?`,
       )
       .bind(...values, pageSize, (page - 1) * pageSize),
   ]);
@@ -389,17 +566,80 @@ export async function listTasks(input: {
   };
 }
 
-export async function updateTasks(ids: string[], stage: string) {
-  const valid = new Set([
-    "new",
-    "filtered",
-    "website",
-    "review",
-    "error",
-    "completed",
-  ]);
-  if (!valid.has(stage)) throw new Error("任务阶段无效");
+export async function resolveTaskSelection(input: {
+  mode?: "ids" | "all";
+  ids?: string[];
+  excludeIds?: string[];
+  filters?: { stage?: string; tool?: string; search?: string };
+}) {
+  if (input.mode !== "all") {
+    return [...new Set((input.ids ?? []).map(String).filter(Boolean))].slice(
+      0,
+      10_000,
+    );
+  }
+  const { clauses, values } = taskFilters(input.filters ?? {});
+  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const rows = await getD1()
+    .prepare(`SELECT id FROM task_inbox${where} ORDER BY id LIMIT 10001`)
+    .bind(...values)
+    .all();
+  const excluded = new Set((input.excludeIds ?? []).map(String));
+  const ids = (rows.results ?? [])
+    .map((row: Record<string, unknown>) => String(row.id))
+    .filter((id) => !excluded.has(id));
+  if (ids.length > 10_000)
+    throw new Error("当前任务操作超过 10,000 条，请先增加筛选条件");
+  return ids;
+}
+
+export async function exportTasks(ids: string[], format: "csv" | "txt") {
   const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const rows: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < unique.length; offset += 80) {
+    const chunk = unique.slice(offset, offset + 80);
+    const result = await getD1()
+      .prepare(
+        `SELECT * FROM task_inbox WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .bind(...chunk)
+      .all();
+    rows.push(...((result.results ?? []) as Array<Record<string, unknown>>));
+  }
+  const order = new Map(unique.map((id, index) => [id, index]));
+  rows.sort(
+    (a, b) =>
+      (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0),
+  );
+  if (format === "txt")
+    return rows
+      .map(
+        (row) =>
+          `${row.tool}\t${taskStatusLabel(row.stage)}\t${row.title}\t${row.updated_at}`,
+      )
+      .join("\r\n");
+  return `\uFEFF${[
+    ["tool", "status", "title", "updated_at"].map(csvSafe).join(","),
+    ...rows.map((row) =>
+      [row.tool, normalizeTaskStatus(row.stage), row.title, row.updated_at]
+        .map(csvSafe)
+        .join(","),
+    ),
+  ].join("\r\n")}`;
+}
+
+export async function updateTasks(ids: string[], stage: string) {
+  const requested = String(stage || "");
+  const valid = new Set<string>(TASK_STATUSES.flatMap(taskStatusAliases));
+  if (!valid.has(requested)) throw new Error("任务状态无效");
+  const canonical: TaskStatus = normalizeTaskStatus(requested);
+  const unique = [...new Set(ids.map(String).filter(Boolean))];
+  const snapshotId = unique.length
+    ? await createTaskSnapshot(
+        unique,
+        `批量修改任务为${taskStatusLabel(canonical)}前自动恢复点`,
+      )
+    : "";
   let changed = 0;
   for (let offset = 0; offset < unique.length; offset += 80) {
     const chunk = unique.slice(offset, offset + 80);
@@ -407,9 +647,9 @@ export async function updateTasks(ids: string[], stage: string) {
       .prepare(
         `UPDATE task_inbox SET stage=?,updated_at=? WHERE id IN (${chunk.map(() => "?").join(",")})`,
       )
-      .bind(stage, nowIso(), ...chunk)
+      .bind(canonical, nowIso(), ...chunk)
       .run();
     changed += Number(result.meta?.changes ?? 0);
   }
-  return { changed };
+  return { changed, snapshotId };
 }

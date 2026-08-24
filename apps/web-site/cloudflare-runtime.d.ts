@@ -40,3 +40,17 @@ declare module "cloudflare:workers" {
     [key: string]: unknown;
   };
 }
+
+declare module "cloudflare:sockets" {
+  export type Socket = {
+    readable: ReadableStream<Uint8Array>;
+    writable: WritableStream<Uint8Array>;
+    opened: Promise<{ remoteAddress?: string; localAddress?: string }>;
+    closed: Promise<void>;
+    close(): void;
+  };
+  export function connect(
+    address: { hostname: string; port: number },
+    options?: { allowHalfOpen?: boolean; secureTransport?: "off" | "on" | "starttls" },
+  ): Socket;
+}
