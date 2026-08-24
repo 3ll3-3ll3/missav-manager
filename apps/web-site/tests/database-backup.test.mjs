@@ -11,14 +11,8 @@ import { restoreBackupIntoFreshTemporaryD1 } from "./helpers/temporary-d1-restor
 class TestPreparedStatement {
   constructor(owner, sql, values = []) { this.owner = owner; this.sql = sql; this.values = values; }
   bind(...values) { return new TestPreparedStatement(this.owner, this.sql, values); }
-  async all() {
-    this.owner.beforeQuery(this.sql);
-    return { success: true, results: this.owner.database.prepare(this.sql).all(...this.values) };
-  }
-  async first() {
-    this.owner.beforeQuery(this.sql);
-    return this.owner.database.prepare(this.sql).get(...this.values) ?? null;
-  }
+  async all() { this.owner.beforeQuery(this.sql); return { success: true, results: this.owner.database.prepare(this.sql).all(...this.values) }; }
+  async first() { this.owner.beforeQuery(this.sql); return this.owner.database.prepare(this.sql).get(...this.values) ?? null; }
   async run() {
     this.owner.beforeQuery(this.sql);
     const result = this.owner.database.prepare(this.sql).run(...this.values);
@@ -31,53 +25,84 @@ class TestPreparedStatement {
   }
 }
 
+class TestD1Session {
+  constructor(owner) { this.owner = owner; this.seenVersion = null; }
+  get database() { return this.owner.database; }
+  beforeQuery(sql) { this.owner.beforeQuery(sql); this.seenVersion = this.owner.version; }
+  prepare(sql) { return new TestPreparedStatement(this, sql); }
+  getBookmark() { return this.seenVersion === null ? null : `bookmark-${String(this.seenVersion).padStart(8, "0")}`; }
+}
+
 class TestD1Database {
-  constructor(database, hooks = {}) {
-    this.database = database;
-    this.hooks = hooks;
-    this.queries = [];
-    this.writes = 0;
+  constructor(database, hooks = {}, queryLimit = 40) {
+    this.database = database; this.hooks = hooks; this.queryLimit = queryLimit;
+    this.queries = []; this.writes = 0; this.version = 0;
+    this.invocationQueries = 0; this.maxInvocationQueries = 0;
   }
+  beginInvocation() { this.invocationQueries = 0; }
+  bumpBookmark() { this.version += 1; }
   beforeQuery(sql) {
+    this.invocationQueries += 1;
+    this.maxInvocationQueries = Math.max(this.maxInvocationQueries, this.invocationQueries);
+    if (this.invocationQueries > this.queryLimit) throw new Error(`D1 query budget exceeded: ${this.invocationQueries} > ${this.queryLimit}`);
     this.queries.push(sql);
     if (/^\s*(?:DELETE|INSERT|UPDATE|REPLACE|CREATE|DROP|ALTER)\b/i.test(sql)) this.writes += 1;
     this.hooks.beforeQuery?.(sql, this);
   }
   prepare(sql) { return new TestPreparedStatement(this, sql); }
+  withSession() { return new TestD1Session(this); }
   async batch(statements) {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const results = statements.map((statement) => statement.executeForBatch());
-      this.database.exec("COMMIT");
-      return results;
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
+      this.database.exec("COMMIT"); return results;
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 }
 
+class CountingStatement {
+  constructor(owner, statement) { this.owner = owner; this.statement = statement; }
+  bind(...values) { return new CountingStatement(this.owner, this.statement.bind(...values)); }
+  async all() { this.owner.count(); return this.statement.all(); }
+  async first(column) { this.owner.count(); return this.statement.first(column); }
+  async run() { this.owner.count(); return this.statement.run(); }
+}
+
+class CountingSession {
+  constructor(owner, session) { this.owner = owner; this.session = session; }
+  prepare(sql) { return new CountingStatement(this.owner, this.session.prepare(sql)); }
+  getBookmark() { return this.session.getBookmark(); }
+}
+
+class CountingD1 {
+  constructor(database, queryLimit = 40) {
+    this.database = database; this.queryLimit = queryLimit;
+    this.invocationQueries = 0; this.maxInvocationQueries = 0;
+  }
+  beginInvocation() { this.invocationQueries = 0; }
+  count() {
+    this.invocationQueries += 1;
+    this.maxInvocationQueries = Math.max(this.maxInvocationQueries, this.invocationQueries);
+    if (this.invocationQueries > this.queryLimit) throw new Error(`D1 query budget exceeded: ${this.invocationQueries} > ${this.queryLimit}`);
+  }
+  prepare(sql) { return new CountingStatement(this, this.database.prepare(sql)); }
+  withSession(constraint) { return new CountingSession(this, this.database.withSession(constraint)); }
+}
+
 const MIGRATIONS = [
-  "drizzle/0000_fantastic_paper_doll.sql",
-  "drizzle/0001_ambitious_bloodscream.sql",
-  "drizzle/0002_small_garia.sql",
-  "drizzle/0003_glossy_bloodaxe.sql",
-  "drizzle/0004_classy_pixie.sql",
+  "drizzle/0000_fantastic_paper_doll.sql", "drizzle/0001_ambitious_bloodscream.sql",
+  "drizzle/0002_small_garia.sql", "drizzle/0003_glossy_bloodaxe.sql", "drizzle/0004_classy_pixie.sql",
 ];
 
 async function applySchema(database) {
-  for (const file of MIGRATIONS) {
-    database.exec((await readFile(projectFile(file), "utf8")).replaceAll("--> statement-breakpoint", "\n"));
-  }
+  for (const file of MIGRATIONS) database.exec((await readFile(projectFile(file), "utf8")).replaceAll("--> statement-breakpoint", "\n"));
   database.exec("PRAGMA foreign_keys=ON");
 }
 
 async function applyMiniflareSchema(database) {
   for (const file of MIGRATIONS) {
     const source = await readFile(projectFile(file), "utf8");
-    for (const statement of source.split("--> statement-breakpoint").map((value) => value.trim()).filter(Boolean)) {
-      await database.prepare(statement).run();
-    }
+    for (const statement of source.split("--> statement-breakpoint").map((value) => value.trim()).filter(Boolean)) await database.prepare(statement).run();
   }
   await database.prepare("PRAGMA foreign_keys=ON").run();
 }
@@ -85,12 +110,7 @@ async function applyMiniflareSchema(database) {
 async function loadBuiltModule(entry, database) {
   globalThis.__DATABASE_BACKUP_TEST_ENV__ = { DB: database };
   const result = await build({
-    entryPoints: [fileURLToPath(projectFile(entry))],
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    target: "node22",
-    write: false,
+    entryPoints: [fileURLToPath(projectFile(entry))], bundle: true, format: "esm", platform: "node", target: "node22", write: false,
     plugins: [{
       name: "cloudflare-test-env",
       setup(buildApi) {
@@ -103,8 +123,8 @@ async function loadBuiltModule(entry, database) {
 }
 
 const loadBackupModule = (database) => loadBuiltModule("lib/database-backup.ts", database);
+const loadFormatModule = () => loadBuiltModule("lib/database-backup-format.ts", {});
 const loadRouteModule = (database) => loadBuiltModule("app/api/database-backup/route.ts", database);
-const asText = (stream) => new Response(stream).text();
 const asStream = (text) => new Blob([text]).stream();
 
 function seedEncryptedSession(database) {
@@ -114,168 +134,201 @@ function seedEncryptedSession(database) {
   return encryptedSession;
 }
 
-test("页面清单只做轻量统计，完整备份流式校验 25 表并保持 Session 密文", async () => {
-  const database = new DatabaseSync(":memory:");
-  await applySchema(database);
-  const encryptedSession = seedEncryptedSession(database);
-  const d1 = new TestD1Database(database);
-  const backupModule = await loadBackupModule(d1);
-
+async function buildBackupByRequests(backupModule, formatModule, database, onPage) {
+  database.beginInvocation();
   const inventory = await backupModule.listDatabaseTables();
-  assert.equal(inventory.tableCount, 25);
-  assert.equal(inventory.totalRows, 1);
-  assert.equal(d1.queries.some((sql) => /SELECT \*/i.test(sql)), false);
-  assert.equal(d1.writes, 0);
+  assert.equal(database.invocationQueries, 2);
+  const records = [backupModule.createBackupHeader(inventory, "2026-08-24T00:00:00.000Z")];
+  const manifests = [];
+  let pageRequests = 0;
+  let bookmark = inventory.bookmark;
+  for (const phase of ["export", "verify"]) {
+    for (let tableIndex = 0; tableIndex < inventory.tables.length; tableIndex += 1) {
+      const table = inventory.tables[tableIndex];
+      let cursor = null; let pageIndex = 0; let rowCount = 0;
+      let digest = formatModule.DATABASE_BACKUP_INITIAL_DIGEST;
+      if (phase === "export") records.push({ type: "table", name: table.name, columns: table.columns, primaryKey: table.primaryKey });
+      for (;;) {
+        database.beginInvocation();
+        await onPage?.({ phase, table, pageIndex, database });
+        const page = await backupModule.readDatabaseBackupPage({ table: table.name, cursor, bookmark });
+        pageRequests += 1;
+        assert.ok(database.invocationQueries <= 40);
+        assert.equal(page.queryCount, 2);
+        assert.equal(page.consistent, true);
+        assert.ok(page.bookmark >= bookmark);
+        bookmark = page.bookmark;
+        assert.ok(page.rowCount <= formatModule.DATABASE_BACKUP_PAGE_MAX_ROWS);
+        if (page.rows.length) {
+          digest = await formatModule.nextBackupDigest(digest, pageIndex, page.rows);
+          rowCount += page.rows.length;
+          if (phase === "export") records.push({ type: "page", table: table.name, index: pageIndex, rows: page.rows });
+          pageIndex += 1;
+        }
+        cursor = page.nextCursor;
+        if (page.done) break;
+      }
+      if (phase === "export") {
+        assert.equal(rowCount, table.rowCount);
+        const manifest = { name: table.name, rowCount, sha256: digest, primaryKey: table.primaryKey };
+        manifests.push(manifest); records.push({ type: "table_end", ...manifest });
+      } else {
+        assert.equal(rowCount, manifests[tableIndex].rowCount);
+        assert.equal(digest, manifests[tableIndex].sha256);
+      }
+    }
+  }
+  database.beginInvocation();
+  const final = await backupModule.finalizeDatabaseBackup(bookmark);
+  assert.equal(final.queryCount, 1);
+  assert.equal(final.consistent, true);
+  records.push(await backupModule.createBackupFooter(manifests, inventory.bookmark, final.endBookmark, true));
+  return { inventory, manifests, pageRequests, text: `${records.map(JSON.stringify).join("\n")}\n` };
+}
 
-  const text = await asText(backupModule.createDatabaseBackupStream());
-  const validation = await backupModule.validateDatabaseBackupStream(asStream(text), d1);
-  assert.equal(validation.valid, true);
-  assert.equal(validation.tableCount, 25);
-  assert.equal(validation.totalRows, 1);
-  assert.match(text, new RegExp(encryptedSession.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(text, /"telegramSession":"opaque-encrypted-ciphertext"/);
-  assert.doesNotMatch(text, /cloud_sync_/);
-
-  const tampered = text.replace(encryptedSession, "v1:ciphertext-only:changed");
+test("清单合并为 2 次查询，分页备份保持 Session 密文且每请求最多 2 次查询", async () => {
+  const sqlite = new DatabaseSync(":memory:"); await applySchema(sqlite);
+  const encryptedSession = seedEncryptedSession(sqlite);
+  const d1 = new TestD1Database(sqlite);
+  const backupModule = await loadBackupModule(d1); const formatModule = await loadFormatModule();
+  const result = await buildBackupByRequests(backupModule, formatModule, d1);
+  assert.equal(result.inventory.tableCount, 25); assert.equal(result.inventory.totalRows, 1);
+  assert.equal(d1.maxInvocationQueries, 2); assert.equal(d1.writes, 0);
+  assert.match(result.text, new RegExp(encryptedSession.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(result.text, /"telegramSession":"opaque-encrypted-ciphertext"/);
+  assert.doesNotMatch(result.text, /cloud_sync_/);
+  d1.beginInvocation();
+  const validation = await backupModule.validateDatabaseBackupStream(asStream(result.text), d1);
+  assert.equal(validation.valid, true); assert.equal(validation.queryCount, 1);
+  const tampered = result.text.replace(encryptedSession, "v1:ciphertext-only:changed");
   await assert.rejects(() => backupModule.validateDatabaseBackupStream(asStream(tampered)), /SHA-256/);
-  assert.equal(d1.writes, 0);
-  delete globalThis.__DATABASE_BACKUP_TEST_ENV__;
-  database.close();
+  delete globalThis.__DATABASE_BACKUP_TEST_ENV__; sqlite.close();
 });
 
-test("生产导出中途失败不会修改正式库，生产源码不含恢复写入路径", async () => {
-  const database = new DatabaseSync(":memory:");
-  await applySchema(database);
-  database.prepare("INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)")
-    .run("before", "info", "test", "unchanged", "{}", "2026-08-24T00:00:00.000Z");
-  let fullReads = 0;
-  const d1 = new TestD1Database(database, {
-    beforeQuery(sql) {
-      if (/SELECT \*/i.test(sql) && ++fullReads === 3) throw new Error("injected read failure");
-    },
-  });
-  const backupModule = await loadBackupModule(d1);
-  await assert.rejects(() => asText(backupModule.createDatabaseBackupStream()), /injected read failure/);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM app_logs").get().count, 1);
-  assert.equal(database.prepare("SELECT message FROM app_logs WHERE id='before'").get().message, "unchanged");
-  assert.equal(d1.writes, 0);
+test("超过 40 次 D1 查询的单次 invocation 被测试替身强制终止", async () => {
+  const sqlite = new DatabaseSync(":memory:"); const d1 = new TestD1Database(sqlite, {}, 40);
+  d1.beginInvocation();
+  for (let index = 0; index < 40; index += 1) await d1.prepare("SELECT 1").first();
+  await assert.rejects(() => d1.prepare("SELECT 1").first(), /query budget exceeded: 41 > 40/);
+  sqlite.close();
+});
 
-  const [librarySource, routeSource, uiSource] = await Promise.all([
-    readFile(projectFile("lib/database-backup.ts"), "utf8"),
-    readFile(projectFile("app/api/database-backup/route.ts"), "utf8"),
-    readFile(projectFile("app/components/database-backup-center.tsx"), "utf8"),
+test("非安全 HTTP 预览没有 Web Crypto 时仍可计算标准 SHA-256", async () => {
+  const formatModule = await loadFormatModule();
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", { value: undefined, configurable: true });
+  try {
+    assert.equal(
+      await formatModule.backupSha256Hex("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "crypto", descriptor);
+    else delete globalThis.crypto;
+  }
+});
+
+test("生产读取中途失败零写入，旧单请求下载与恢复 API 均禁用", async () => {
+  const sqlite = new DatabaseSync(":memory:"); await applySchema(sqlite);
+  sqlite.prepare("INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)")
+    .run("before", "info", "test", "unchanged", "{}", "2026-08-24T00:00:00.000Z");
+  const d1 = new TestD1Database(sqlite, { beforeQuery(sql) { if (/WITH candidates/i.test(sql)) throw new Error("injected read failure"); } });
+  const route = await loadRouteModule(d1);
+  d1.beginInvocation();
+  const failed = await route.POST(new Request("https://private.example/api/database-backup?action=page", {
+    method: "POST", headers: { "Content-Type": "application/json", "oai-authenticated-user-email": "owner@example.com" },
+    body: JSON.stringify({ table: "app_logs", cursor: null, bookmark: "bookmark-00000000" }),
+  }));
+  assert.equal(failed.status, 400);
+  assert.equal(sqlite.prepare("SELECT message FROM app_logs WHERE id='before'").get().message, "unchanged");
+  assert.equal(d1.writes, 0);
+  const [librarySource, routeSource] = await Promise.all([
+    readFile(projectFile("lib/database-backup.ts"), "utf8"), readFile(projectFile("app/api/database-backup/route.ts"), "utf8"),
   ]);
   assert.doesNotMatch(librarySource, /\b(?:DELETE|INSERT|UPDATE|REPLACE)\s+(?:FROM|INTO)?/i);
-  assert.doesNotMatch(routeSource, /restoreDatabaseBackup|action\s*===?\s*["']restore/i);
-  assert.doesNotMatch(uiSource, /onClick=\{restore\}|恢复全部 25 张表/);
-  const route = await loadRouteModule(d1);
-  const disabledRestore = await route.POST(new Request("https://private.example/api/database-backup?action=restore", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-ndjson",
-      "oai-authenticated-user-email": "owner@example.com",
-    },
-    body: "{}\n",
+  assert.doesNotMatch(routeSource, /action\s*===?\s*["']restore|createDatabaseBackupStream/i);
+  const oldDownload = await route.GET(new Request("https://private.example/api/database-backup?action=download", { headers: { "oai-authenticated-user-email": "owner@example.com" } }));
+  assert.equal(oldDownload.status, 400);
+  const restore = await route.POST(new Request("https://private.example/api/database-backup?action=restore", {
+    method: "POST", headers: { "Content-Type": "application/json", "oai-authenticated-user-email": "owner@example.com" }, body: "{}",
   }));
-  assert.equal(disabledRestore.status, 400);
-  assert.equal(d1.writes, 0);
-  delete globalThis.__DATABASE_BACKUP_TEST_ENV__;
-  database.close();
+  assert.equal(restore.status, 400); assert.equal(d1.writes, 0);
+  delete globalThis.__DATABASE_BACKUP_TEST_ENV__; sqlite.close();
 });
 
-test("备份期间数据变化会使一致性完成标记失效", async () => {
-  const database = new DatabaseSync(":memory:");
-  await applySchema(database);
-  database.prepare("INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)")
-    .run("moving", "info", "test", "first-pass", "{}", "2026-08-24T00:00:00.000Z");
-  let appLogScans = 0;
-  const d1 = new TestD1Database(database, {
-    beforeQuery(sql) {
-      if (/SELECT \* FROM "app_logs"/i.test(sql) && ++appLogScans === 2) {
-        database.prepare("UPDATE app_logs SET message='changed-during-backup' WHERE id='moving'").run();
-      }
-    },
-  });
-  const backupModule = await loadBackupModule(d1);
-  const text = await asText(backupModule.createDatabaseBackupStream());
-  assert.match(text, /"complete":false/);
-  assert.match(text, /source_changed_during_backup/);
-  await assert.rejects(() => backupModule.validateDatabaseBackupStream(asStream(text)), /源数据库发生变化/);
-  assert.equal(d1.writes, 0);
-  delete globalThis.__DATABASE_BACKUP_TEST_ENV__;
-  database.close();
+test("跨请求期间表数据变化会由第二遍 SHA-256 明确判定无效", async () => {
+  const sqlite = new DatabaseSync(":memory:"); await applySchema(sqlite);
+  sqlite.prepare("INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)")
+    .run("moving", "info", "test", "first", "{}", "2026-08-24T00:00:00.000Z");
+  const d1 = new TestD1Database(sqlite); const backupModule = await loadBackupModule(d1); const formatModule = await loadFormatModule();
+  d1.beginInvocation(); const inventory = await backupModule.listDatabaseTables();
+  d1.beginInvocation();
+  const first = await backupModule.readDatabaseBackupPage({ table: "app_logs", cursor: null, bookmark: inventory.bookmark });
+  const firstDigest = await formatModule.nextBackupDigest(formatModule.DATABASE_BACKUP_INITIAL_DIGEST, 0, first.rows);
+  sqlite.prepare("UPDATE app_logs SET message='changed' WHERE id='moving'").run(); d1.bumpBookmark();
+  d1.beginInvocation();
+  const second = await backupModule.readDatabaseBackupPage({ table: "app_logs", cursor: null, bookmark: first.bookmark });
+  const secondDigest = await formatModule.nextBackupDigest(formatModule.DATABASE_BACKUP_INITIAL_DIGEST, 0, second.rows);
+  assert.equal(second.consistent, true); assert.notEqual(secondDigest, firstDigest); assert.ok(second.bookmark > first.bookmark); assert.equal(d1.writes, 0);
+  delete globalThis.__DATABASE_BACKUP_TEST_ENV__; sqlite.close();
 });
 
-test("未获准用户不能读取清单、下载或校验备份", async () => {
-  const database = new DatabaseSync(":memory:");
-  await applySchema(database);
-  const d1 = new TestD1Database(database);
-  const route = await loadRouteModule(d1);
-  const inventory = await route.GET(new Request("https://private.example/api/database-backup?action=inventory"));
-  const download = await route.GET(new Request("https://private.example/api/database-backup?action=download"));
-  const validate = await route.POST(new Request("https://private.example/api/database-backup?action=validate", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-ndjson" },
-    body: "{}\n",
-  }));
-  assert.equal(inventory.status, 401);
-  assert.equal(download.status, 401);
-  assert.equal(validate.status, 401);
-  assert.equal(d1.queries.length, 0);
-  assert.equal(d1.writes, 0);
-  delete globalThis.__DATABASE_BACKUP_TEST_ENV__;
-  database.close();
+test("UTF-8 字节与行数共同限制分页且不使用 OFFSET", async () => {
+  const sqlite = new DatabaseSync(":memory:"); await applySchema(sqlite);
+  const insert = sqlite.prepare("INSERT INTO app_logs(id,level,category,message,detail_json,created_at) VALUES (?,?,?,?,?,?)");
+  for (let index = 0; index < 180; index += 1) insert.run(`wide-${String(index).padStart(4, "0")}`, "info", "bytes", "中".repeat(2_000), "{}", "2026-08-24T00:00:00.000Z");
+  const d1 = new TestD1Database(sqlite); const backupModule = await loadBackupModule(d1);
+  d1.beginInvocation(); const inventory = await backupModule.listDatabaseTables();
+  d1.beginInvocation(); const page = await backupModule.readDatabaseBackupPage({ table: "app_logs", cursor: null, bookmark: inventory.bookmark });
+  assert.equal(page.done, false); assert.ok(page.rowCount < 180); assert.ok(page.utf8Bytes <= 512 * 1024);
+  assert.equal(d1.queries.some((sql) => /\bOFFSET\b/i.test(sql)), false); assert.equal(d1.invocationQueries, 2);
+  delete globalThis.__DATABASE_BACKUP_TEST_ENV__; sqlite.close();
 });
 
-test("备份只允许恢复演练到全新临时 D1", async () => {
-  const source = new DatabaseSync(":memory:");
-  await applySchema(source);
-  const encryptedSession = seedEncryptedSession(source);
-  const sourceModule = await loadBackupModule(new TestD1Database(source));
-  const text = await asText(sourceModule.createDatabaseBackupStream());
+test("未获准用户不能读取清单、分页、完成探针或校验备份", async () => {
+  const sqlite = new DatabaseSync(":memory:"); await applySchema(sqlite);
+  const d1 = new TestD1Database(sqlite); const route = await loadRouteModule(d1);
+  const responses = [
+    await route.GET(new Request("https://private.example/api/database-backup?action=inventory")),
+    await route.POST(new Request("https://private.example/api/database-backup?action=page", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
+    await route.POST(new Request("https://private.example/api/database-backup?action=finalize", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
+    await route.POST(new Request("https://private.example/api/database-backup?action=validate", { method: "POST", headers: { "Content-Type": "application/x-ndjson" }, body: "{}\n" })),
+  ];
+  assert.deepEqual(responses.map((response) => response.status), [401, 401, 401, 401]);
+  assert.equal(d1.queries.length, 0); assert.equal(d1.writes, 0);
+  delete globalThis.__DATABASE_BACKUP_TEST_ENV__; sqlite.close();
+});
 
-  const temporary = new DatabaseSync(":memory:");
-  await applySchema(temporary);
-  const temporaryD1 = new TestD1Database(temporary);
-  const temporaryModule = await loadBackupModule(temporaryD1);
+test("完整文件只允许恢复演练到全新临时 D1", async () => {
+  const source = new DatabaseSync(":memory:"); await applySchema(source); const encryptedSession = seedEncryptedSession(source);
+  const sourceD1 = new TestD1Database(source); const sourceModule = await loadBackupModule(sourceD1); const formatModule = await loadFormatModule();
+  const { text } = await buildBackupByRequests(sourceModule, formatModule, sourceD1);
+  const temporary = new DatabaseSync(":memory:"); await applySchema(temporary);
+  const temporaryD1 = new TestD1Database(temporary, {}, 500); const temporaryModule = await loadBackupModule(temporaryD1);
   const result = await restoreBackupIntoFreshTemporaryD1({ text, db: temporaryD1, backupModule: temporaryModule });
   assert.equal(result.valid, true);
   assert.equal(temporary.prepare("SELECT encrypted_session FROM telegram_accounts WHERE id='owner'").get().encrypted_session, encryptedSession);
-
-  await assert.rejects(
-    () => restoreBackupIntoFreshTemporaryD1({ text, db: temporaryD1, backupModule: temporaryModule }),
-    /fresh and empty/,
-  );
-  delete globalThis.__DATABASE_BACKUP_TEST_ENV__;
-  source.close();
-  temporary.close();
+  await assert.rejects(() => restoreBackupIntoFreshTemporaryD1({ text, db: temporaryD1, backupModule: temporaryModule }), /fresh and empty/);
+  delete globalThis.__DATABASE_BACKUP_TEST_ENV__; source.close(); temporary.close();
 });
 
-test("Miniflare Workers D1 可流式备份并校验 10 万行", { timeout: 180_000 }, async () => {
-  const mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok') } }",
-    d1Databases: { DB: "00000000-0000-0000-0000-000000000027" },
-  });
+test("Miniflare Workers D1 的 10 万行必须由数百个受限请求完成", { timeout: 240_000 }, async () => {
+  const mf = new Miniflare({ modules: true, script: "export default { fetch() { return new Response('ok') } }", d1Databases: { DB: "00000000-0000-0000-0000-000000000029" } });
   try {
-    const db = await mf.getD1Database("DB");
-    await applyMiniflareSchema(db);
-    await db.prepare(`WITH RECURSIVE counter(value) AS (
+    const raw = await mf.getD1Database("DB"); await applyMiniflareSchema(raw);
+    await raw.prepare(`WITH RECURSIVE counter(value) AS (
       SELECT 0 UNION ALL SELECT value + 1 FROM counter WHERE value < 99999
-    )
-    INSERT INTO app_logs(id,level,category,message,detail_json,created_at)
-    SELECT printf('load-%06d', value),'info','miniflare',printf('synthetic row %d', value),printf('{"index":%d}', value),'2026-08-24T00:00:00.000Z'
-    FROM counter`).run();
-    assert.equal(Number((await db.prepare("SELECT COUNT(*) AS count FROM app_logs").first()).count), 100_000);
-    const backupModule = await loadBackupModule(db);
-    const validation = await backupModule.validateDatabaseBackupStream(backupModule.createDatabaseBackupStream(), db);
-    assert.equal(validation.valid, true);
-    assert.equal(validation.totalRows, 100_000);
-    assert.equal(validation.tables.find((table) => table.name === "app_logs").rowCount, 100_000);
-  } finally {
-    delete globalThis.__DATABASE_BACKUP_TEST_ENV__;
-    await mf.dispose();
-  }
+    ) INSERT INTO app_logs(id,level,category,message,detail_json,created_at)
+      SELECT printf('load-%06d', value),'info','miniflare',printf('synthetic row %d', value),printf('{"index":%d}', value),'2026-08-24T00:00:00.000Z' FROM counter`).run();
+    assert.equal(Number((await raw.prepare("SELECT COUNT(*) AS count FROM app_logs").first()).count), 100_000);
+    const d1 = new CountingD1(raw, 40); const backupModule = await loadBackupModule(d1); const formatModule = await loadFormatModule();
+    const result = await buildBackupByRequests(backupModule, formatModule, d1);
+    assert.equal(result.pageRequests, 448);
+    assert.equal(result.pageRequests + 2, 450);
+    assert.equal(d1.maxInvocationQueries, 2);
+    d1.beginInvocation(); const validation = await backupModule.validateDatabaseBackupStream(asStream(result.text), d1);
+    assert.equal(validation.totalRows, 100_000); assert.equal(validation.queryCount, 1);
+  } finally { delete globalThis.__DATABASE_BACKUP_TEST_ENV__; await mf.dispose(); }
 });
 
 test("Windows 中文路径测试帮助器使用 fileURLToPath，不再拼出重复盘符", async () => {

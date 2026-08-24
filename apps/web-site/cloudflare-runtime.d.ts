@@ -22,6 +22,13 @@ interface D1PreparedStatement {
 interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch<T = Record<string, unknown>>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
+  withSession(constraint?: string): D1DatabaseSession;
+}
+
+interface D1DatabaseSession {
+  prepare(query: string): D1PreparedStatement;
+  batch<T = Record<string, unknown>>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
+  getBookmark(): string | null;
 }
 
 interface Fetcher {
