@@ -1,10 +1,12 @@
 import { build } from "esbuild";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 export async function loadModule(relativePath) {
-  const absolute = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..", relativePath);
+  const absolute = path.resolve(projectRoot, relativePath);
   const result = await build({
     entryPoints: [absolute], bundle: true, format: "esm", platform: "node", target: "node22", write: false,
     plugins: [{

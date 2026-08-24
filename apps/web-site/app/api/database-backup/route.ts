@@ -2,40 +2,23 @@ import { getD1 } from "../../../db";
 import { apiError, requireAuthenticated } from "../../../lib/api-response";
 import {
   backupFileName,
-  createDatabaseBackup,
-  restoreDatabaseBackup,
-  validateDatabaseBackup,
+  createDatabaseBackupStream,
+  listDatabaseTables,
+  validateDatabaseBackupStream,
 } from "../../../lib/database-backup";
-
-const MAX_BACKUP_REQUEST_BYTES = 96 * 1024 * 1024;
-
-async function backupBodyJson(request: Request) {
-  if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) throw new Error("请求格式必须是 JSON");
-  const length = Number(request.headers.get("content-length") || 0);
-  if (length > MAX_BACKUP_REQUEST_BYTES) throw new Error("备份文件超过 96 MB 上限");
-  const raw = await request.text();
-  if (new TextEncoder().encode(raw).byteLength > MAX_BACKUP_REQUEST_BYTES) throw new Error("备份文件超过 96 MB 上限");
-  try { return JSON.parse(raw) as Record<string, unknown>; } catch { throw new Error("JSON 内容无法解析"); }
-}
 
 export async function GET(request: Request) {
   try {
     requireAuthenticated(request);
-    const backup = await createDatabaseBackup();
     const action = new URL(request.url).searchParams.get("action");
-    if (action === "manifest") {
-      return Response.json({
-        createdAt: backup.createdAt,
-        source: backup.source,
-        security: backup.security,
-        manifest: backup.manifest,
-      });
-    }
-    return new Response(JSON.stringify(backup), {
+    if (action === "inventory") return Response.json(await listDatabaseTables());
+    if (action !== "download") throw new Error("必须显式选择只读清单或完整备份下载");
+    return new Response(createDatabaseBackupStream(), {
       headers: {
         "Cache-Control": "no-store",
-        "Content-Disposition": `attachment; filename="${backupFileName(backup.createdAt)}"`,
-        "Content-Type": "application/json; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${backupFileName()}"`,
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "X-Backup-Consistency": "verified-on-completion",
       },
     });
   } catch (error) {
@@ -46,10 +29,12 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     requireAuthenticated(request);
-    const input = await backupBodyJson(request);
-    if (input.action === "validate") return Response.json(await validateDatabaseBackup(input.backup, getD1()));
-    if (input.action === "restore") return Response.json(await restoreDatabaseBackup(input.backup, input.confirmation));
-    throw new Error("未知数据库备份操作");
+    if (new URL(request.url).searchParams.get("action") !== "validate") throw new Error("生产 Site 仅开放备份文件校验");
+    const contentType = request.headers.get("content-type")?.toLowerCase() || "";
+    if (!contentType.includes("application/x-ndjson") && !contentType.includes("application/octet-stream")) {
+      throw new Error("备份文件必须是 NDJSON");
+    }
+    return Response.json(await validateDatabaseBackupStream(request.body, getD1()));
   } catch (error) {
     return apiError(error);
   }

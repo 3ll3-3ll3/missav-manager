@@ -2,15 +2,15 @@
 
 import { useEffect, useState } from "react";
 
-type TableManifest = { name: string; rowCount: number; sha256: string; primaryKey: string[] };
-type ManifestResponse = {
-  createdAt: string;
-  source: { siteVersion: number; commit: string; tree: string; database: string };
+type InventoryTable = { name: string; rowCount: number; primaryKey: string[] };
+type InventoryResponse = {
+  inspectedAt: string;
+  source: { siteVersion: number; candidateSiteVersion: number; commit: string; tree: string; database: string };
   security: { telegramSession: string; decrypted: boolean; displayed: boolean };
-  manifest: { tableCount: number; totalRows: number; sha256: string; tables: TableManifest[] };
+  tableCount: number;
+  totalRows: number;
+  tables: InventoryTable[];
 };
-
-const CONFIRMATION = "RESTORE 25 TABLES";
 
 async function jsonApi(url: string, options?: RequestInit) {
   const response = await fetch(url, { cache: "no-store", ...options });
@@ -20,18 +20,16 @@ async function jsonApi(url: string, options?: RequestInit) {
 }
 
 export default function DatabaseBackupCenter() {
-  const [manifest, setManifest] = useState<ManifestResponse | null>(null);
-  const [backup, setBackup] = useState<unknown>(null);
+  const [inventory, setInventory] = useState<InventoryResponse | null>(null);
   const [fileName, setFileName] = useState("");
-  const [confirmation, setConfirmation] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(true);
 
-  async function loadManifest() {
+  async function loadInventory() {
     setBusy(true);
     try {
-      setManifest(await jsonApi("/api/database-backup?action=manifest"));
-      setNotice("已只读核对 25 张表、行数和 SHA-256。未修改数据库。");
+      setInventory(await jsonApi("/api/database-backup?action=inventory"));
+      setNotice("轻量清单已更新：仅查询 Schema 与逐表 COUNT(*)，未读取业务行、未修改数据库。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "读取失败");
     } finally {
@@ -41,11 +39,11 @@ export default function DatabaseBackupCenter() {
 
   useEffect(() => {
     let cancelled = false;
-    jsonApi("/api/database-backup?action=manifest")
+    jsonApi("/api/database-backup?action=inventory")
       .then((value) => {
         if (!cancelled) {
-          setManifest(value);
-          setNotice("已只读核对 25 张表、行数和 SHA-256。未修改数据库。");
+          setInventory(value);
+          setNotice("轻量清单已更新：未自动生成完整备份。");
         }
       })
       .catch((error) => {
@@ -57,71 +55,40 @@ export default function DatabaseBackupCenter() {
     return () => { cancelled = true; };
   }, []);
 
-  async function downloadBackup() {
-    setBusy(true);
-    try {
-      const response = await fetch("/api/database-backup", { cache: "no-store" });
-      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || "备份下载失败");
-      const blob = await response.blob();
-      const disposition = response.headers.get("content-disposition") || "";
-      const name = disposition.match(/filename="([^"]+)"/)?.[1] || "tg-content-toolbox-site-v26-d1.json";
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = name;
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-      setNotice("完整 JSON 备份已下载。Telegram Session 仅以原始加密密文存在。 ");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "下载失败");
-    } finally {
-      setBusy(false);
-    }
+  function downloadBackup() {
+    const anchor = document.createElement("a");
+    anchor.href = "/api/database-backup?action=download";
+    anchor.download = "";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setNotice("已显式启动分页流式备份。请在下载完成后用本页校验完整性与一致性完成标记。");
   }
 
-  async function chooseFile(file?: File) {
+  async function validateFile(file?: File) {
     if (!file) return;
-    setConfirmation("");
     setFileName(file.name);
-    try {
-      const parsed = JSON.parse(await file.text());
-      setBackup(parsed);
-      const result = await jsonApi("/api/database-backup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "validate", backup: parsed }),
-      });
-      setNotice(`恢复前校验通过：${result.tableCount} 张表，共 ${Number(result.totalRows).toLocaleString()} 行。`);
-    } catch (error) {
-      setBackup(null);
-      setNotice(error instanceof Error ? error.message : "备份文件校验失败");
-    }
-  }
-
-  async function restore() {
-    if (!backup || confirmation !== CONFIRMATION) return;
     setBusy(true);
     try {
-      const result = await jsonApi("/api/database-backup", {
+      const result = await jsonApi("/api/database-backup?action=validate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "restore", confirmation, backup }),
+        headers: { "Content-Type": "application/x-ndjson" },
+        body: file,
       });
-      setNotice(`恢复完成并复核：${result.tableCount} 张表，共 ${Number(result.totalRows).toLocaleString()} 行。`);
-      setConfirmation("");
-      await loadManifest();
+      setNotice(`备份校验通过：${result.tableCount} 张表，共 ${Number(result.totalRows).toLocaleString()} 行；SHA-256 ${result.sha256}。`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "恢复失败");
+      setNotice(error instanceof Error ? error.message : "备份文件校验失败");
     } finally {
       setBusy(false);
     }
   }
 
   return <div className="stack-md">
-    <section className="callout warning"><strong>完整 D1 备份与恢复</strong><p>固定覆盖正式 Site v26 的 25 张业务表。清单只显示表名、行数和 SHA-256；Telegram Session 不解密、不预览，只在下载文件中保留不透明加密密文。</p></section>
-    <section className="metric-grid"><article className="metric"><span>业务表</span><strong>{manifest?.manifest.tableCount ?? "—"}</strong><small>必须完整等于 25</small></article><article className="metric"><span>总行数</span><strong>{manifest ? manifest.manifest.totalRows.toLocaleString() : "—"}</strong><small>逐表只读统计</small></article><article className="metric"><span>Site 基线</span><strong>{manifest ? `v${manifest.source.siteVersion}` : "—"}</strong><small>{manifest?.source.tree.slice(0, 12) || "源码树待读取"}</small></article><article className="metric"><span>清单 SHA-256</span><strong className="backup-hash">{manifest?.manifest.sha256.slice(0, 12) || "—"}</strong><small>下载与恢复前复算</small></article></section>
-    <section className="card"><div className="section-heading"><div><span className="eyebrow">备份清单</span><h3>逐表行数与摘要</h3></div><div className="button-row"><button disabled={busy} onClick={loadManifest}>重新核对</button><button className="primary" disabled={busy || !manifest} onClick={downloadBackup}>下载完整备份</button></div></div><div className="backup-table-scroll"><table className="sheet"><thead><tr><th>表</th><th>行数</th><th>主键</th><th>SHA-256</th></tr></thead><tbody>{manifest?.manifest.tables.map((table) => <tr key={table.name}><td className="strong-cell">{table.name}</td><td>{table.rowCount.toLocaleString()}</td><td>{table.primaryKey.join(", ") || "—"}</td><td className="checksum">{table.sha256}</td></tr>)}</tbody></table></div></section>
-    <section className="card"><span className="eyebrow">恢复前校验</span><h3>选择完整备份 JSON</h3><p className="subtle">先校验格式、25 表清单、列定义、逐表行数、逐表 SHA-256 与总清单 SHA-256。校验阶段不会写入 D1。</p><label className="dropzone"><input type="file" accept="application/json,.json" onChange={(event) => void chooseFile(event.target.files?.[0])} /><strong>{fileName || "选择备份文件"}</strong><span>JSON · 仅在确认恢复后才会写入</span></label>{backup !== null && <><label className="field"><span>输入 {CONFIRMATION} 以解锁恢复</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label><button className="danger" disabled={busy || confirmation !== CONFIRMATION} onClick={restore}>恢复全部 25 张表</button></>}</section>
+    <section className="callout warning"><strong>Site v28 备份中心候选（未部署）</strong><p>v27 未获部署批准；本修订候选对正式 D1 只读：轻量表清单、显式流式下载、备份文件校验。生产恢复入口与写入 API 已移除；JSON/NDJSON 恢复只允许在全新临时 D1 演练。</p></section>
+    <section className="metric-grid"><article className="metric"><span>业务表</span><strong>{inventory?.tableCount ?? "—"}</strong><small>必须完整等于 25</small></article><article className="metric"><span>总行数</span><strong>{inventory ? inventory.totalRows.toLocaleString() : "—"}</strong><small>仅 COUNT(*) 轻量统计</small></article><article className="metric"><span>正式基线</span><strong>{inventory ? `Site v${inventory.source.siteVersion}` : "—"}</strong><small>{inventory?.source.tree.slice(0, 12) || "源码树待读取"}</small></article><article className="metric"><span>候选版本</span><strong>{inventory ? `v${inventory.source.candidateSiteVersion}` : "—"}</strong><small>仅保存，不部署</small></article></section>
+    <section className="card"><div className="section-heading"><div><span className="eyebrow">只读表清单</span><h3>逐表轻量统计</h3></div><div className="button-row"><button disabled={busy} onClick={loadInventory}>重新统计</button><button className="primary" disabled={busy || !inventory} onClick={downloadBackup}>生成并下载完整备份</button></div></div><p className="subtle">页面打开不会读取全部业务行。只有点击下载后，Worker 才以 250 行有界分页输出 NDJSON，并在文件末尾写入双遍一致性复核结果。</p><div className="backup-table-scroll"><table className="sheet"><thead><tr><th>表</th><th>行数</th><th>主键</th></tr></thead><tbody>{inventory?.tables.map((table) => <tr key={table.name}><td className="strong-cell">{table.name}</td><td>{table.rowCount.toLocaleString()}</td><td>{table.primaryKey.join(", ") || "—"}</td></tr>)}</tbody></table></div></section>
+    <section className="card"><span className="eyebrow">只读文件校验</span><h3>选择完整备份 NDJSON</h3><p className="subtle">流式复算 25 表、列定义、分页顺序、行数、逐表 SHA-256、总清单 SHA-256 与双遍一致性完成标记。校验不会写入 D1。</p><label className="dropzone"><input type="file" accept="application/x-ndjson,.ndjson" disabled={busy} onChange={(event) => void validateFile(event.target.files?.[0])} /><strong>{fileName || "选择备份文件"}</strong><span>NDJSON · 只读校验 · 无生产恢复入口</span></label></section>
+    <section className="callout"><strong>正式迁移前置门槛</strong><p>未来正式迁移必须先在 Cloudflare 控制面记录正式 D1 的 Time Travel bookmark；本候选不会获取 bookmark，也不会执行迁移、恢复或 0006。</p></section>
     {notice && <section className="notice">{notice}</section>}
   </div>;
 }
