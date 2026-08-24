@@ -71,7 +71,7 @@
 ### 本轮最终自动验证
 
 - 网站：TypeScript、ESLint、Vinext 生产构建通过，`90/90` 项测试通过；新增真实网关分块、显式续跑、Pull 后续分页失败、来源复用及消息写入后租约失效回归，构建路由含 `/api/cloud-sync`，产物含 `0006` 迁移。
-- 同步 Worker：语法检查、`7/7` 项 Miniflare+D1 测试、Wrangler dry-run 通过；未执行正式部署。
+- 同步 Worker：语法检查、`7/7` 项 Miniflare+D1 测试、Wrangler dry-run 通过；随后正式 Worker/独立 D1 已部署并执行 `0001_initial.sql`，公开健康接口和隔离设备协议 E2E 通过。
 - 仓库总回归：`242/242` 项测试通过，根目录语法检查通过。
 - Windows 统一版：Vue/TypeScript/Vite 构建和 Tauri release 应用构建通过；Rust `cargo check` 通过，`37/37` 项常规测试通过、1 项真实网关 E2E 默认忽略。另已在隔离临时 SQLite 与一次性设备上实际通过“配对→预览→首次 Pull→断开”，测试配对记录清零且设备已撤销。
 - `git diff --check` 通过；凭据模式扫描只命中既有安全测试中的明确假 Token 夹具，未发现正式 Secret。
@@ -147,14 +147,15 @@
 
 - 本轮代码提交与推送后，云端 Work 可从单一分支读取协议、网关、桌面和网站实现。
 - 不需要真实 Secret 的单元、集成和构建验证全部通过。
-- 未部署前同步 UI 不得指向虚构网关；首次正式数据同步必须由用户在差异预览后确认。
+- 生产 Site 尚未接入同步时不得把同步描述为已上线；首次正式数据同步必须由用户在差异预览后确认。
 - 云端完成后必须回写真实提交、部署版本、测试结果和待用户 E2E，不能用“构建通过”替代外部验收。
 
 ### 当前阻塞点
 
-- 正式部署需要用户批准创建 Cloudflare Worker/D1，并在安全 Secret 存储中设置 SYNC_ADMIN_TOKEN；当前不需要把值发给 Codex。
-- Sites 生产环境需要配置 `SYNC_GATEWAY_URL` 与 `SYNC_ADMIN_TOKEN`；值只能进入 Site Secrets。
-- 网站接入代码、outbox、Pull、冲突 UI 和 Telegram 跨端租约已经完成；剩余阻塞是正式基础设施部署和真实双端验收。
+- 正式 Worker/独立 D1 已部署，Site 所需 `SYNC_GATEWAY_URL` 与遮蔽的 `SYNC_ADMIN_TOKEN` 也已配置；不得重复创建或要求用户把值发给 Work/Codex。
+- 生产 Site v26 的实际源码树尚未形成可解析的 Git 基线；必须先从挂载 Site 的编辑上下文恢复并固定源码，不能用旧 Git 分支覆盖生产。
+- 正式 Site D1 尚未执行 `0006`。执行前必须先完成 25 张表的完整备份、校验、临时 D1 恢复演练和可恢复性证明。
+- 备份过渡版验收后，才允许合并统一同步代码、执行 `0006`，并完成网站与 Windows 的脱敏双端 E2E；首次正式汇合仍只生成预览并等待用户确认。
 
 ---
 
