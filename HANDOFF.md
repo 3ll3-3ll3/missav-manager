@@ -186,6 +186,16 @@
 - 当前 `loadLines()` 使用 IndexedDB `getAll()` 将整个备份加载到浏览器内存，随后再构造 Blob 用于校验/下载。10 万条普通数据可能可用，但未证明较大备份的内存安全性；至少应显示本地备份字节数、配额/容量错误，并提供“删除浏览器备份与续传数据”。
 - 本地 Codex 连接的 Sites 账号无法读取该 B 账号 Site，`get_site`/`list_site_versions` 返回 project not found。下一轮必须由挂载该 Site 的网页 Work 确认 v29 的 Sites 源码树/产物哈希与 GitHub `2ccedc8` 对应，并再核对平台 owner-only 访问策略。
 
+### 2026-08-24 Site v30 备份中心候选审计
+
+- 云端候选 Git 提交为 `38d6c5095e2f75551fa9038f342a3b83ea44f636`，源码树 `40130b380039d7a8028be750be18008a3cdaf275`；网页 Work 报告 Sites v30 已保存但未部署，正式生产仍为 v26。
+- Windows 隔离 worktree 已从远端真实提交复跑 TypeScript、ESLint、生产构建与全部测试，`64/64` 通过；`git diff --check` 通过且工作树恢复干净。构建产物中未发现 `0006_spicy_omega_sentinel`、`cloud_sync_*`、`SYNC_ADMIN_TOKEN` 或 `SYNC_GATEWAY_URL`。
+- v29 的静默缺页风险已经关闭：下一页使用独立 `nextJob` 计算，job 与 chunks 在同一 IndexedDB readwrite 事务中提交；成功后才切换界面状态。配额、abort、关闭连接或普通事务错误时会重新读取旧持久化检查点，游标、页号、摘要和序号均不提前推进；footer/complete 使用相同原子语义。
+- 本地 Chromium 已真实运行 `database-backup-indexeddb-browser.mjs` 的四类故障注入；四次失败均保留旧检查点，重试页只出现一次，footer 失败不持久化完成状态，最终 25 表/25 行清单连续且 SHA-256 生成成功。为了在 localhost 执行，只临时放宽了测试域名守卫，测试后已恢复原文件并删除临时入口；产品逻辑未改动。网页 Work 另报告在 Sites Agent Preview 完成同一回归。
+- `npm test` 中名为“真实 Chromium”的 Node 用例本身只检查浏览器回归脚本源码结构，并不会自动启动 Chromium；因此真实浏览器结论来自上述独立浏览器验收，后续不应把 64/64 单独描述成浏览器 E2E。
+- 浏览器整文件回读/下载仍明确限制为 128 MiB；超过时会停止并要求清理本地备份，不会静默生成不完整文件。当前 10 万行夹具位于该限制内；更大的正式库需要后续改为流式文件写入，当前不作为 v30 只读过渡版阻断。
+- **v30 可以作为只读备份中心的部署候选，但尚未授权部署。** 部署前必须由挂载 B 账号 Site 的网页 Work 再确认：Site v30 的源码/产物确实对应上述 Git 提交和树、访问策略仍为仅唯一所有者且 0 外部访客/0 群组。部署仅允许 v30 只读候选，不执行 `0006`、不迁移或修改正式 D1、不启动同步。
+
 ---
 
 # 历史交接：Web UX v0.5.13 对齐（非当前状态）
